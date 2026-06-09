@@ -29,10 +29,15 @@ accent hue, node-card style) become real user preferences (see §6).
 - **Location: `web/` in this repo.** CLAUDE.md describes the frontend as a
   separate repo, but no frontend repo exists in this session's scope, so it
   lives here as a self-contained workspace. Moving it out later is a `git mv`.
-- **Stack: Next.js (App Router, TypeScript, `output: "export"`) + React Flow
-  (`@xyflow/react`)** — per CLAUDE.md architecture. The exported static site
-  can later be embedded into `cmd/rinfra-server` via `go:embed` (seam only,
-  not now).
+- **Stack: Next.js (App Router, TypeScript, `output: "export"`)** — per
+  CLAUDE.md architecture. The exported static site can later be embedded into
+  `cmd/rinfra-server` via `go:embed` (seam only, not now).
+- **Builder canvas: custom (ported from the prototype), not React Flow.**
+  CLAUDE.md names React Flow, but the prototype implements its own
+  pointer-driven canvas (absolute-positioned nodes, SVG bezier edges, port
+  drag-to-connect) and porting it directly preserves the exact dimensions and
+  interactions. Swapping to `@xyflow/react` remains an isolated refactor of
+  `components/builder/` if needed.
 - **Icons:** port `icons.jsx` directly to a typed `components/icons.tsx`
   (pixel-identical, zero deps). Do not substitute lucide-react.
 - **Fonts:** `geist` npm package (GeistSans + GeistMono), wired in the root
@@ -81,7 +86,7 @@ notes for Metasploit, PoshC2, Brute Ratel.
 
 ```
 web/
-  package.json            # next, react, react-dom, @xyflow/react, geist; dev: typescript, @types/*, eslint, eslint-config-next
+  package.json            # next, react, react-dom, geist; dev: typescript, @types/*, eslint, eslint-config-next
   next.config.ts          # output: "export"
   tsconfig.json
   app/
@@ -92,14 +97,14 @@ web/
     c2/page.tsx
     emulation/page.tsx
     reporting/page.tsx
-    globals.css           # port of styles.css + React Flow overrides
+    globals.css           # port of styles.css
   components/
     icons.tsx             # ported icon set
     ui/                   # Button, Pill, StatusPill, ProviderBadge, NodeGlyph,
                           # Avatar, HealthMeter, Modal, EmptyState, PageHead,
                           # TierBadge, Seg, Toggle, Field/Input/Select, Dropdown, Toasts
     shell/                # Sidebar, TopBar, AppearanceMenu
-    builder/              # Canvas (React Flow), NodeCard (3 styles), Palette,
+    builder/              # Canvas (custom, ported), NodeCard (3 styles), Palette,
                           # Inspector, Toolbar, ValidationPopover, TeardownConfirm
     engagements/          # StatsRow, EngagementTable, NewEngagementFlow
     c2/                   # C2List, C2DetailRail, C2SelectorModal
@@ -127,11 +132,6 @@ library. Preferences (`theme`, `accentHue`, `nodeStyle`) persist to
   exactly — the accent tweak works by setting that one variable.
 - Accent options (Appearance menu): Indigo 262, Slate blue 245, Periwinkle 278,
   Steel 222 (default Indigo; note `:root` default is 258 — set 262 on load).
-- Add React Flow style overrides: hide attribution-adjacent chrome, style
-  `.react-flow__edge-path`, dotted-grid background
-  (`radial-gradient(var(--grid-dot) 1.3px, transparent 1.3px)`, 22px grid),
-  handles styled as the prototype's 14px ports (out-port accent dot,
-  crosshair cursor; in-port scales 1.25 + accent border while connecting).
 
 ## 5. App shell
 
@@ -162,7 +162,7 @@ Three-panel layout: 224px palette | canvas+toolbar | 264/300px inspector.
   drop point with generated name (`edge-https-02`, `teamserver-03`,
   `stage-host-02` — zero-padded counter), defaults aws/us-east-1, toast
   "<label> added — configure it in the inspector".
-- **Canvas:** React Flow. Custom node type renders the three NodeCard styles
+- **Canvas:** custom (ported). The node component renders the three NodeCard styles
   (dims: soft 216×110, compact 200×60, outline 212×96 — see
   `screen_builder_parts.jsx` for the exact layouts). Selection ring =
   accent border + `0 0 0 3px var(--accent-soft)`. Custom bezier edge:
@@ -236,7 +236,7 @@ key findings list with severity pills) + sticky metadata rail + action stubs.
 3. App shell (sidebar, topbar, dropdowns, toasts, appearance preferences).
 4. Dashboard + New Engagement flow.
 5. C2 selector (page + modal).
-6. Infrastructure Builder (React Flow canvas, node cards, palette DnD,
+6. Infrastructure Builder (custom canvas, node cards, palette DnD,
    inspector, toolbar actions).
 7. Emulation Runner.
 8. Coverage & Reporting.
