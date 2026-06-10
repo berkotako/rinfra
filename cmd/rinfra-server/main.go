@@ -60,6 +60,9 @@ import (
 	"github.com/rinfra/rinfra/internal/audit"
 	auditpostgres "github.com/rinfra/rinfra/internal/audit/postgres"
 	"github.com/rinfra/rinfra/internal/c2"
+	"github.com/rinfra/rinfra/internal/cloud"
+	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/orchestration"
 	"github.com/rinfra/rinfra/internal/payload"
 	"github.com/rinfra/rinfra/internal/secrets"
 	"github.com/rinfra/rinfra/internal/service"
@@ -123,6 +126,38 @@ func buildEncrypter(log *slog.Logger, devMode bool) *secrets.Encrypter {
 	return enc
 }
 
+// buildEngine constructs the Pulumi orchestration engine and registers
+// ProgramBuilder implementations for every real cloud provider. The stateDir
+// is read from PULUMI_BACKEND_DIR (default: $HOME/.rinfra/pulumi-state).
+// In RINFRA_DEV mode the engine is still constructed so the code path is
+// exercised, but the fake provider never routes through it.
+func buildEngine(log *slog.Logger) *orchestration.Engine {
+	stateDir := envOr("PULUMI_BACKEND_DIR", "")
+	eng := orchestration.New(stateDir, log)
+
+	// Register every cloud provider that implements ProgramBuilder.
+	// The real providers (aws, digitalocean, gcp, azure) implement it;
+	// the fake provider does not — so it keeps the direct ProvisionNode path.
+	for _, pt := range []domain.CloudProviderType{
+		domain.CloudDigitalOcean,
+		domain.CloudAWS,
+		domain.CloudGCP,
+		domain.CloudAzure,
+	} {
+		p, err := cloud.Get(pt)
+		if err != nil {
+			// Provider not registered (shouldn't happen given the imports above).
+			log.Warn("buildEngine: cloud provider not registered", "provider", pt)
+			continue
+		}
+		if builder, ok := p.(orchestration.ProgramBuilder); ok {
+			eng.RegisterBuilder(pt, builder)
+			log.Info("orchestration: registered ProgramBuilder", "provider", pt)
+		}
+	}
+	return eng
+}
+
 func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hub) {
 	auditLog := memstore.NewAuditLogger()
 	engStore := memstore.NewEngagementStore()
@@ -133,6 +168,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 
 	svcEng := service.NewEngagementService(engStore, auditLog)
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
+	svcInfra.WithEngine(buildEngine(log))
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 
 	svcInfra.ResumeJobs(context.Background())
@@ -171,6 +207,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 
 	svcEng := service.NewEngagementService(engStore, auditLog)
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
+	svcInfra.WithEngine(buildEngine(log))
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 
 	svcInfra.ResumeJobs(context.Background())

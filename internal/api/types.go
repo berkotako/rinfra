@@ -135,8 +135,15 @@ func (t topologyRequest) toDomain(engagementID string) domain.Topology {
 	}
 }
 
+// credentialsRequest carries the credential key/value pairs for a provider.
+// The Values map mirrors cloud.Credentials.Raw — provider-specific key names
+// documented in each provider's package (e.g. "DIGITALOCEAN_TOKEN" for DO,
+// "AWS_ACCESS_KEY_ID"/"AWS_SECRET_ACCESS_KEY"/"AWS_REGION" for AWS).
+//
+// Wire format: {"DIGITALOCEAN_TOKEN":"dop_v1_..."} for DigitalOcean.
+// Deprecated: the legacy {"value":"..."} shape is no longer accepted.
 type credentialsRequest struct {
-	Value string `json:"value"`
+	Values map[string]string `json:"values"`
 }
 
 type startRunRequest struct {

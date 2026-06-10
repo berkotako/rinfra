@@ -155,7 +155,9 @@ export interface RInfraClient {
   teardown(engagementId: string): Promise<{ jobId: string }>;
 
   // Credentials (write-only; GET returns metadata only)
-  putCredentials(engagementId: string, provider: string, value: string): Promise<void>;
+  // values is a provider-specific key/value map (mirrors cloud.Credentials.Raw).
+  // Examples: {"DIGITALOCEAN_TOKEN":"..."} for DO; {"AWS_ACCESS_KEY_ID":"...","AWS_SECRET_ACCESS_KEY":"...","AWS_REGION":"..."} for AWS.
+  putCredentials(engagementId: string, provider: string, values: Record<string, string>): Promise<void>;
   getCredentialsMeta(engagementId: string, provider: string): Promise<CredentialMeta>;
 
   // SSE
@@ -279,10 +281,10 @@ export class MockClient implements RInfraClient {
     return { jobId: "mock-job-" + Date.now() };
   }
 
-  async putCredentials(engagementId: string, provider: string, value: string): Promise<void> {
+  async putCredentials(engagementId: string, provider: string, values: Record<string, string>): Promise<void> {
     void engagementId;
     void provider;
-    void value;
+    void values;
   }
 
   async getCredentialsMeta(engagementId: string, provider: string): Promise<CredentialMeta> {
@@ -608,10 +610,10 @@ export class RestClient implements RInfraClient {
 
   // ---------- Credentials ----------
 
-  async putCredentials(engagementId: string, provider: string, value: string): Promise<void> {
+  async putCredentials(engagementId: string, provider: string, values: Record<string, string>): Promise<void> {
     await this.fetch<undefined>(
       `/engagements/${engagementId}/credentials/${provider}`,
-      { method: "PUT", body: JSON.stringify({ value }) }
+      { method: "PUT", body: JSON.stringify({ values }) }
     );
   }
 

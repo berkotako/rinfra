@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/service"
 )
 
 // handlers holds all HTTP handler methods.
@@ -176,8 +177,16 @@ func (h *handlers) putCredentials(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if len(req.Values) == 0 {
+		http.Error(w, `{"error":"credentials values map must not be empty"}`, http.StatusBadRequest)
+		return
+	}
 
-	plaintext := []byte(req.Value)
+	plaintext, err := service.MarshalCredentials(req.Values)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
 	if err := h.svc.Infra.PutCredentials(r.Context(), engagementID, provider, plaintext, actorFrom(r.Context())); err != nil {
 		writeError(w, h.log, err)
 		return

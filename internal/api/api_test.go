@@ -496,9 +496,9 @@ func TestCredentialsPutAndGet(t *testing.T) {
 	router, _, _ := buildRouter(t)
 	engID := createEngagementViaAPI(t, router)
 
-	// PUT credentials.
+	// PUT credentials using the values map format (mirrors cloud.Credentials.Raw).
 	putResp := doRequest(t, router, "PUT", "/api/v1/engagements/"+engID+"/credentials/digitalocean", map[string]any{
-		"value": `{"token":"test-token-value"}`,
+		"values": map[string]string{"DIGITALOCEAN_TOKEN": "test-token-value"},
 	})
 	if putResp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(putResp.Body)

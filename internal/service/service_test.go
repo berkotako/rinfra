@@ -2,14 +2,17 @@ package service_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/cloud/fake"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/orchestration"
 	"github.com/rinfra/rinfra/internal/secrets"
 	"github.com/rinfra/rinfra/internal/service"
 	"github.com/rinfra/rinfra/internal/store"
@@ -393,5 +396,136 @@ func TestAllPrivilegedActionsAudited(t *testing.T) {
 		if !hasAuditAction(s.audit, action, "") {
 			t.Errorf("missing audit event for action: %s", action)
 		}
+	}
+}
+
+// TestCredentialJSONRoundTrip verifies that MarshalCredentials + DecryptCredentials
+// produce the original Raw map.
+func TestCredentialJSONRoundTrip(t *testing.T) {
+	enc := testEnc(t)
+
+	input := map[string]string{
+		"DIGITALOCEAN_TOKEN": "dop_v1_test123",
+		"EXTRA_KEY":          "extra_value",
+	}
+
+	// Marshal to JSON bytes.
+	plaintext, err := service.MarshalCredentials(input)
+	if err != nil {
+		t.Fatalf("MarshalCredentials: %v", err)
+	}
+
+	// Verify raw JSON round-trip.
+	var decoded map[string]string
+	if err := json.Unmarshal(plaintext, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	for k, v := range input {
+		if decoded[k] != v {
+			t.Errorf("key %q: want %q, got %q", k, v, decoded[k])
+		}
+	}
+
+	// Encrypt then DecryptCredentials.
+	env, err := enc.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	creds, err := service.DecryptCredentials(enc, domain.CloudDigitalOcean, env.Ciphertext, env.Nonce, env.KeyID)
+	if err != nil {
+		t.Fatalf("DecryptCredentials: %v", err)
+	}
+	if creds.Provider != domain.CloudDigitalOcean {
+		t.Errorf("provider: want %s, got %s", domain.CloudDigitalOcean, creds.Provider)
+	}
+	for k, v := range input {
+		if creds.Raw[k] != v {
+			t.Errorf("Raw[%q]: want %q, got %q", k, v, creds.Raw[k])
+		}
+	}
+}
+
+// TestDeployRealProviderNoCreds verifies that a node whose cloud provider is a
+// real (ProgramBuilder) provider fails with ErrNoCloudCredentials when no
+// credentials are stored, before engine.Deploy is ever called.
+func TestDeployRealProviderNoCreds(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcInfra := buildInfraService(t, s, hub)
+
+	// Use a DO node — DO provider implements ProgramBuilder so the engine path
+	// is taken. We wire a nil-backend engine (orchestration.New with a temp dir)
+	// so the engine is present but DO builder is NOT registered, which means the
+	// engine path is triggered by the ProgramBuilder check on cloud.Get(DO).
+	// Wait — the DO provider IS a ProgramBuilder (registered in cloud registry).
+	// We need to ensure the engine is wired. Use a real engine (no Pulumi CLI
+	// needed because engine.Deploy will never be reached — creds load fails first).
+	stateDir := t.TempDir()
+	testEngine := orchestration.New(stateDir, testLogger())
+	// Register the DO ProgramBuilder from the cloud registry.
+	doProv, err := cloud.Get(domain.CloudDigitalOcean)
+	if err != nil {
+		t.Skipf("DO provider not registered (import may be missing): %v", err)
+	}
+	doBuilder, ok := doProv.(orchestration.ProgramBuilder)
+	if !ok {
+		t.Skip("DO provider does not implement ProgramBuilder")
+	}
+	testEngine.RegisterBuilder(domain.CloudDigitalOcean, doBuilder)
+	svcInfra.WithEngine(testEngine)
+
+	// Save a topology with a DO node (real provider).
+	topology := domain.Topology{
+		EngagementID: eng.ID,
+		Nodes: []domain.Node{
+			{
+				ID:     "node-redir-do",
+				Spec:   domain.NodeSpec{Type: domain.NodeRedirector, Cloud: domain.CloudDigitalOcean},
+				Canvas: domain.NodeCanvas{Name: "redir-do"},
+			},
+			{
+				ID:     "node-c2-do",
+				Spec:   domain.NodeSpec{Type: domain.NodeC2Server, Cloud: domain.CloudDigitalOcean, C2Framework: "sliver"},
+				Canvas: domain.NodeCanvas{Name: "c2-do"},
+			},
+		},
+		Edges: []domain.Edge{{FromNodeID: "node-redir-do", ToNodeID: "node-c2-do"}},
+	}
+	if err := svcInfra.SaveTopology(ctx, eng.ID, topology, "op1"); err != nil {
+		t.Fatalf("save topology: %v", err)
+	}
+
+	// Deploy with NO credentials stored → should fail with nodes marked failed,
+	// and credential.missing audit event should be emitted.
+	jobID, err := svcInfra.Deploy(ctx, eng.ID, "op1")
+	if err != nil {
+		t.Fatalf("deploy returned error (want async failure): %v", err)
+	}
+
+	status := waitForJob(t, ctx, s.job, jobID)
+	if status != domain.JobFailed {
+		t.Errorf("deploy job: want failed (no creds), got %s", status)
+	}
+
+	// All nodes should be marked failed.
+	topo, err := svcInfra.GetTopology(ctx, eng.ID)
+	if err != nil {
+		t.Fatalf("get topology: %v", err)
+	}
+	for _, n := range topo.Nodes {
+		if n.Status != domain.NodeFailed {
+			t.Errorf("node %s: want failed (no creds), got %s", n.ID, n.Status)
+		}
+	}
+
+	// credential.missing must be audited.
+	if !hasAuditAction(s.audit, "credential.missing", eng.ID) {
+		t.Error("expected credential.missing audit event when creds are absent")
 	}
 }

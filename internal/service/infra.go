@@ -11,6 +11,7 @@ import (
 	"github.com/rinfra/rinfra/internal/audit"
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/orchestration"
 	"github.com/rinfra/rinfra/internal/secrets"
 	"github.com/rinfra/rinfra/internal/store"
 )
@@ -33,6 +34,10 @@ type InfraService struct {
 	enc         *secrets.Encrypter
 	hub         *Hub
 	log         *slog.Logger
+	// engine is the optional Pulumi orchestration engine. When set, providers
+	// that implement orchestration.ProgramBuilder are routed through it instead
+	// of the per-node ProvisionNode path. The fake provider never uses the engine.
+	engine *orchestration.Engine
 }
 
 // NewInfraService constructs an InfraService with the given dependencies.
@@ -56,6 +61,15 @@ func NewInfraService(
 		hub:         hub,
 		log:         log,
 	}
+}
+
+// WithEngine sets the Pulumi orchestration engine on the service. Providers
+// that implement orchestration.ProgramBuilder will be routed through the engine
+// for Deploy/Teardown instead of the per-node ProvisionNode path. This is a
+// separate setter (not a constructor parameter) so existing call sites and tests
+// that don't need the engine don't need to change.
+func (s *InfraService) WithEngine(e *orchestration.Engine) {
+	s.engine = e
 }
 
 // GetTopology returns the stored topology for an engagement.
@@ -197,6 +211,12 @@ func (s *InfraService) Deploy(ctx context.Context, engagementID string, actor st
 
 // runDeploy executes in a goroutine: provisions each pending node, updates
 // status, publishes SSE events, and finishes the job.
+//
+// Routing logic:
+//   - Nodes whose cloud provider implements orchestration.ProgramBuilder AND
+//     the engine is wired → grouped and sent through engine.Deploy (real cloud).
+//   - All other nodes (fake provider or engine == nil) → per-node ProvisionNode
+//     path (dev/test path).
 func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor string) {
 	_ = s.jobs.UpdateStatus(ctx, jobID, domain.JobRunning, "")
 
@@ -206,36 +226,145 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 		return
 	}
 
-	// Attempt to load cloud credentials. For the fake provider this is optional;
-	// real providers require creds.
-	cloudCreds := cloud.Credentials{}
-	if len(t.Nodes) > 0 {
-		providerType := t.Nodes[0].Spec.Cloud
-		if ct, nonce, keyID, err := s.creds.GetCiphertext(ctx, engagementID, string(providerType)); err == nil {
-			raw, err := s.enc.Decrypt(secrets.Envelope{Ciphertext: ct, Nonce: nonce, KeyID: keyID})
-			if err == nil {
-				_ = raw // In a real provider we'd parse this into Credentials.Raw.
-				_ = s.creds.TouchLastUsed(ctx, engagementID, string(providerType))
-				_ = s.audit.Record(ctx, audit.Event{
-					EngagementID: engagementID,
-					Actor:        actor,
-					Action:       "credential.use",
-					Target:       string(providerType),
-					Detail:       "loaded for deploy",
-					At:           time.Now().UTC(),
-				})
-			}
-		}
-		cloudCreds.Provider = providerType
+	// Partition pending nodes into engine-routed vs per-node paths.
+	var engineNodes []domain.Node  // for real cloud via orchestration.Engine
+	var directNodes []*domain.Node // for fake/direct ProvisionNode path
+
+	nodeByID := make(map[string]*domain.Node, len(t.Nodes))
+	for i := range t.Nodes {
+		nodeByID[t.Nodes[i].ID] = &t.Nodes[i]
 	}
 
-	var anyFailed bool
 	for i := range t.Nodes {
 		n := &t.Nodes[i]
 		if n.Status != domain.NodePending {
 			continue
 		}
+		if s.engine != nil {
+			if prov, err := cloud.Get(n.Spec.Cloud); err == nil {
+				if _, ok := prov.(orchestration.ProgramBuilder); ok {
+					engineNodes = append(engineNodes, *n)
+					continue
+				}
+			}
+		}
+		directNodes = append(directNodes, n)
+	}
 
+	anyFailed := false
+
+	// --- Engine path (real cloud providers) ---
+	if len(engineNodes) > 0 {
+		// Build the per-provider creds map. Group unique provider types.
+		providerTypes := make(map[domain.CloudProviderType]struct{})
+		for _, n := range engineNodes {
+			providerTypes[n.Spec.Cloud] = struct{}{}
+		}
+
+		credsMap := make(map[domain.CloudProviderType]cloud.Credentials)
+		var missingProviders []domain.CloudProviderType
+		for pt := range providerTypes {
+			ct, nonce, keyID, err := s.creds.GetCiphertext(ctx, engagementID, string(pt))
+			if err != nil {
+				missingProviders = append(missingProviders, pt)
+				continue
+			}
+			creds, err := DecryptCredentials(s.enc, pt, ct, nonce, keyID)
+			if err != nil {
+				s.log.Error("decrypt credentials", "provider", pt, "err", err)
+				missingProviders = append(missingProviders, pt)
+				continue
+			}
+			_ = s.creds.TouchLastUsed(ctx, engagementID, string(pt))
+			_ = s.audit.Record(ctx, audit.Event{
+				EngagementID: engagementID,
+				Actor:        actor,
+				Action:       "credential.use",
+				Target:       string(pt),
+				Detail:       "loaded for deploy",
+				At:           time.Now().UTC(),
+			})
+			credsMap[pt] = creds
+		}
+
+		// Mark nodes for providers with missing creds as failed immediately.
+		if len(missingProviders) > 0 {
+			missing := make(map[domain.CloudProviderType]bool, len(missingProviders))
+			for _, pt := range missingProviders {
+				missing[pt] = true
+			}
+			var remaining []domain.Node
+			for _, n := range engineNodes {
+				if missing[n.Spec.Cloud] {
+					np := nodeByID[n.ID]
+					np.Status = domain.NodeFailed
+					_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeFailed, domain.HealthUnknown)
+					s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
+					_ = s.audit.Record(ctx, audit.Event{
+						EngagementID: engagementID,
+						Actor:        actor,
+						Action:       "credential.missing",
+						Target:       string(np.Spec.Cloud),
+						Detail:       fmt.Sprintf("node=%s %v", np.ID, ErrNoCloudCredentials),
+						At:           time.Now().UTC(),
+					})
+					anyFailed = true
+				} else {
+					remaining = append(remaining, n)
+				}
+			}
+			engineNodes = remaining
+		}
+
+		if len(engineNodes) > 0 {
+			// Transition all engine nodes to provisioning.
+			for _, n := range engineNodes {
+				np := nodeByID[n.ID]
+				np.Status = domain.NodeProvisioning
+				_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeProvisioning, domain.HealthUnknown)
+				s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
+			}
+
+			results, err := s.engine.Deploy(ctx, engagementID, engineNodes, credsMap)
+			if err != nil {
+				// Whole-engine error — mark all remaining engine nodes failed.
+				for _, n := range engineNodes {
+					np := nodeByID[n.ID]
+					np.Status = domain.NodeFailed
+					_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeFailed, domain.HealthUnknown)
+					s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
+				}
+				anyFailed = true
+				s.log.Error("engine.Deploy failed", "engagement", engagementID, "err", err)
+			} else {
+				for _, r := range results {
+					np, ok := nodeByID[r.NodeID]
+					if !ok {
+						continue
+					}
+					if r.Err != nil {
+						s.log.Error("engine deploy node failed", "node", r.NodeID, "err", r.Err)
+						np.Status = domain.NodeFailed
+						_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeFailed, domain.HealthUnknown)
+						s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
+						anyFailed = true
+					} else {
+						// Write ProviderRef before status=live (crash-safety invariant).
+						np.ProviderRef = r.ProviderRef
+						np.PublicIP = r.PublicIP
+						np.Status = domain.NodeLive
+						np.Health = domain.HealthHealthy
+						_ = s.persistNodeFields(ctx, np)
+						_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeLive, domain.HealthHealthy)
+						s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
+					}
+				}
+			}
+		}
+	}
+
+	// --- Direct per-node path (fake provider or no engine) ---
+	for _, n := range directNodes {
 		// Transition to provisioning.
 		n.Status = domain.NodeProvisioning
 		_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeProvisioning, domain.HealthUnknown)
@@ -245,13 +374,17 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 		prov, err := cloud.Get(n.Spec.Cloud)
 		if err != nil {
 			s.log.Error("no provider for cloud", "cloud", n.Spec.Cloud, "node", n.ID)
+			n.Status = domain.NodeFailed
 			_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeFailed, domain.HealthUnknown)
 			s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
 			anyFailed = true
 			continue
 		}
 
-		provisioned, err := prov.ProvisionNode(ctx, cloudCreds, n.Spec)
+		// For direct-path nodes, use empty creds (fake provider doesn't need them).
+		directCreds := cloud.Credentials{Provider: n.Spec.Cloud}
+
+		provisioned, err := prov.ProvisionNode(ctx, directCreds, n.Spec)
 		if err != nil {
 			s.log.Error("provision node failed", "node", n.ID, "err", err)
 			n.Status = domain.NodeFailed
@@ -351,6 +484,13 @@ func (s *InfraService) Teardown(ctx context.Context, engagementID string, actor 
 
 // runTeardown executes in a goroutine: drains then destroys each node and
 // reconciles against actual cloud state.
+//
+// Routing logic mirrors runDeploy:
+//   - Nodes whose cloud provider implements orchestration.ProgramBuilder AND
+//     engine is wired → engine.Teardown (stack destroy + sweep).
+//   - All other nodes → per-node Destroy (fake provider or no engine).
+//
+// Teardown is ungated (no CanDeploy check) and best-effort.
 func (s *InfraService) runTeardown(ctx context.Context, engagementID, jobID, actor string) {
 	_ = s.jobs.UpdateStatus(ctx, jobID, domain.JobRunning, "")
 
@@ -360,18 +500,87 @@ func (s *InfraService) runTeardown(ctx context.Context, engagementID, jobID, act
 		return
 	}
 
-	cloudCreds := cloud.Credentials{}
-	if len(t.Nodes) > 0 {
-		cloudCreds.Provider = t.Nodes[0].Spec.Cloud
-	}
+	// Partition non-destroyed nodes by routing path.
+	var engineNodes []domain.Node  // real cloud via engine
+	var directNodes []*domain.Node // fake/direct Destroy path
 
-	var anyFailed bool
 	for i := range t.Nodes {
 		n := &t.Nodes[i]
 		if n.Status == domain.NodeDestroyed {
 			continue
 		}
+		if s.engine != nil {
+			if prov, err := cloud.Get(n.Spec.Cloud); err == nil {
+				if _, ok := prov.(orchestration.ProgramBuilder); ok {
+					engineNodes = append(engineNodes, *n)
+					continue
+				}
+			}
+		}
+		directNodes = append(directNodes, n)
+	}
 
+	anyFailed := false
+
+	// --- Engine path (real cloud providers) ---
+	if len(engineNodes) > 0 {
+		// Drain all engine nodes first.
+		for i := range t.Nodes {
+			n := &t.Nodes[i]
+			for _, en := range engineNodes {
+				if n.ID == en.ID {
+					n.Status = domain.NodeDraining
+					_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeDraining, domain.HealthUnknown)
+					s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
+					break
+				}
+			}
+		}
+
+		// Build creds map for engine teardown (best-effort — missing creds means
+		// sweep can't run but we still try the stack destroy).
+		providerTypes := make(map[domain.CloudProviderType]struct{})
+		for _, n := range engineNodes {
+			providerTypes[n.Spec.Cloud] = struct{}{}
+		}
+		credsMap := make(map[domain.CloudProviderType]cloud.Credentials)
+		for pt := range providerTypes {
+			ct, nonce, keyID, cerr := s.creds.GetCiphertext(ctx, engagementID, string(pt))
+			if cerr != nil {
+				s.log.Warn("teardown: no stored creds for provider (sweep will be skipped)", "provider", pt)
+				continue
+			}
+			creds, cerr := DecryptCredentials(s.enc, pt, ct, nonce, keyID)
+			if cerr != nil {
+				s.log.Warn("teardown: could not decrypt creds for provider", "provider", pt, "err", cerr)
+				continue
+			}
+			_ = s.creds.TouchLastUsed(ctx, engagementID, string(pt))
+			credsMap[pt] = creds
+		}
+
+		if engineErr := s.engine.Teardown(ctx, engagementID, engineNodes, credsMap); engineErr != nil {
+			s.log.Error("engine.Teardown error", "engagement", engagementID, "err", engineErr)
+			// Best-effort: continue to mark nodes destroyed anyway.
+			anyFailed = true
+		}
+
+		// Mark engine nodes destroyed.
+		for i := range t.Nodes {
+			n := &t.Nodes[i]
+			for _, en := range engineNodes {
+				if n.ID == en.ID {
+					n.Status = domain.NodeDestroyed
+					_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeDestroyed, domain.HealthUnknown)
+					s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
+					break
+				}
+			}
+		}
+	}
+
+	// --- Direct per-node path (fake provider or no engine) ---
+	for _, n := range directNodes {
 		// Drain first.
 		n.Status = domain.NodeDraining
 		_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeDraining, domain.HealthUnknown)
@@ -392,7 +601,9 @@ func (s *InfraService) runTeardown(ctx context.Context, engagementID, jobID, act
 			continue
 		}
 
-		if err := prov.Destroy(ctx, cloudCreds, *n); err != nil {
+		directCreds := cloud.Credentials{Provider: n.Spec.Cloud}
+
+		if err := prov.Destroy(ctx, directCreds, *n); err != nil {
 			s.log.Error("destroy node failed", "node", n.ID, "err", err)
 			_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeFailed, domain.HealthUnknown)
 			s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
