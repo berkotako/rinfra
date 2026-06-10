@@ -114,6 +114,46 @@ func (s *EngagementStore) List(ctx context.Context) ([]domain.Engagement, error)
 	return out, rows.Err()
 }
 
+// Update replaces the full engagement record (used when authorization or
+// metadata changes). Only the mutable fields are updated; id/created_at are
+// preserved.
+func (s *EngagementStore) Update(ctx context.Context, e domain.Engagement) error {
+	scopeTargets, err := json.Marshal(e.Scope.AllowedTargets)
+	if err != nil {
+		return fmt.Errorf("marshal scope_targets: %w", err)
+	}
+	scopeExclusions, err := json.Marshal(e.Scope.Exclusions)
+	if err != nil {
+		return fmt.Errorf("marshal scope_exclusions: %w", err)
+	}
+	roeConstraints, err := json.Marshal(e.RoE.Constraints)
+	if err != nil {
+		return fmt.Errorf("marshal roe_constraints: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE engagements SET
+			client=$1, codename=$2, lead_operator=$3, engagement_type=$4, status=$5,
+			scope_targets=$6, scope_notes=$7, scope_exclusions=$8,
+			roe_document=$9, roe_window_start=$10, roe_window_end=$11, roe_constraints=$12,
+			auth_by=$13, auth_document=$14, auth_granted_at=$15, auth_expires_at=$16,
+			updated_at=now()
+		WHERE id=$17`,
+		e.Client, e.Codename, e.LeadOperator, string(e.EngagementType), string(e.Status),
+		scopeTargets, e.Scope.Notes, scopeExclusions,
+		e.RoE.DocumentRef, nullTime(e.RoE.WindowStart), nullTime(e.RoE.WindowEnd), roeConstraints,
+		e.Authorization.AuthorizedBy, e.Authorization.DocumentRef,
+		nullTime(e.Authorization.GrantedAt), nullTime(e.Authorization.ExpiresAt),
+		e.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update engagement %s: %w", e.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("engagement %s: %w", e.ID, store.ErrNotFound)
+	}
+	return nil
+}
+
 // UpdateStatus updates only the status field and refreshes updated_at.
 func (s *EngagementStore) UpdateStatus(ctx context.Context, id string, status domain.EngagementStatus) error {
 	tag, err := s.pool.Exec(ctx,

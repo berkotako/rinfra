@@ -26,3 +26,12 @@ type Event struct {
 type Logger interface {
 	Record(ctx context.Context, e Event) error
 }
+
+// Reader provides read access to the audit log. It is separate from Logger to
+// keep the write path minimal and to allow the HTTP audit endpoint to be wired
+// to any backing implementation.
+type Reader interface {
+	// List returns audit events for an engagement, ordered by time descending.
+	// limit and offset provide pagination.
+	List(ctx context.Context, engagementID string, limit, offset int) ([]Event, error)
+}

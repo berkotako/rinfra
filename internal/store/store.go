@@ -20,6 +20,9 @@ type EngagementStore interface {
 	Get(ctx context.Context, id string) (domain.Engagement, error)
 	List(ctx context.Context) ([]domain.Engagement, error)
 	UpdateStatus(ctx context.Context, id string, status domain.EngagementStatus) error
+	// Update replaces the full engagement record (used when authorization fields
+	// or metadata change). The engagement must already exist.
+	Update(ctx context.Context, e domain.Engagement) error
 }
 
 // InfraStore persists topology (nodes + edges) and their live status. The

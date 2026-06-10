@@ -70,6 +70,18 @@ func (s *EngagementStore) List(_ context.Context) ([]domain.Engagement, error) {
 	return out, nil
 }
 
+// Update replaces the full engagement record.
+func (s *EngagementStore) Update(_ context.Context, e domain.Engagement) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.rows[e.ID]; !ok {
+		return fmt.Errorf("engagement %s: %w", e.ID, store.ErrNotFound)
+	}
+	e.UpdatedAt = time.Now().UTC()
+	s.rows[e.ID] = e
+	return nil
+}
+
 // UpdateStatus changes an engagement's status.
 func (s *EngagementStore) UpdateStatus(_ context.Context, id string, status domain.EngagementStatus) error {
 	s.mu.Lock()
@@ -437,4 +449,28 @@ func (l *AuditLogger) Events() []AuditEvent {
 	out := make([]AuditEvent, len(l.events))
 	copy(out, l.events)
 	return out
+}
+
+// List returns audit events for an engagement, most recent first, with
+// pagination. Implements audit.Reader.
+func (l *AuditLogger) List(_ context.Context, engagementID string, limit, offset int) ([]audit.Event, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var filtered []audit.Event
+	for i := len(l.events) - 1; i >= 0; i-- {
+		e := l.events[i]
+		if engagementID == "" || e.EngagementID == engagementID {
+			filtered = append(filtered, e.Event)
+		}
+	}
+
+	if offset >= len(filtered) {
+		return nil, nil
+	}
+	filtered = filtered[offset:]
+	if limit > 0 && limit < len(filtered) {
+		filtered = filtered[:limit]
+	}
+	return filtered, nil
 }
