@@ -1022,6 +1022,19 @@ export default function InfrastructureScreen() {
   };
 
   const doDeploy = () => {
+    // Authorization gate: mirror the server-side invariant on the client.
+    // No infrastructure may be provisioned for an engagement that is not
+    // authorized. (The control plane also enforces this and returns 403, but
+    // in mock/demo mode there is no server, and either way the UI must not
+    // present deploy as available for an unauthorized engagement.)
+    if (activeEngagement.auth !== "authorized") {
+      pushToast(
+        "Deploy blocked — engagement authorization is not on file",
+        "danger"
+      );
+      return;
+    }
+
     const targets = nodes.filter(
       (n) => n.status === "pending" || n.status === "provisioning"
     );
@@ -1632,8 +1645,23 @@ export default function InfrastructureScreen() {
       {c2Modal && (
         <C2Selector
           asModal
+          selectedId={selNode?.type === "c2_server" ? selNode.framework : undefined}
           onClose={() => setC2Modal(false)}
-          onSelect={() => pushToast("Framework assigned to node", "ok")}
+          onSelect={(c) => {
+            if (selNode && selNode.type === "c2_server") {
+              updateNode({
+                ...selNode,
+                framework: c.id,
+                listener: c.listeners[0] ?? selNode.listener,
+              });
+              pushToast(`${c.name} assigned to ${selNode.name}`, "ok");
+            } else {
+              pushToast(
+                "Select a C2 server node first to assign a framework",
+                "warn"
+              );
+            }
+          }}
         />
       )}
     </div>
