@@ -13,6 +13,18 @@ function ShellInner({ children }: { children: React.ReactNode }) {
   const { toasts } = useStore();
   const [appearanceOpen, setAppearanceOpen] = useState(false);
 
+  // The marketing landing page ("/") renders full-bleed, without the console
+  // chrome (sidebar/top bar). All other routes get the operator shell.
+  const isLanding = pathname === "/" || pathname === "";
+  if (isLanding) {
+    return (
+      <>
+        {children}
+        <Toasts items={toasts} />
+      </>
+    );
+  }
+
   const isBuilder = pathname === "/infrastructure" || pathname === "/infrastructure/";
 
   return (
