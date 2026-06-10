@@ -485,7 +485,29 @@ export class RestClient implements RInfraClient {
       return undefined as T;
     }
 
-    const body = await res.json() as Record<string, unknown>;
+    // Parse defensively: a non-JSON body (5xx HTML, proxy error page, or a
+    // plain-text error) must still surface as a typed ApiError, not a raw
+    // SyntaxError from res.json().
+    const text = await res.text();
+    let body: Record<string, unknown> = {};
+    if (text) {
+      try {
+        body = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        if (!res.ok) {
+          throw new ApiError(
+            "internal_error",
+            text.slice(0, 200) || `Request failed (${res.status})`,
+            res.status
+          );
+        }
+        throw new ApiError(
+          "internal_error",
+          "Malformed response from server",
+          res.status
+        );
+      }
+    }
 
     if (!res.ok) {
       const err = body["error"] as Record<string, unknown> | undefined;

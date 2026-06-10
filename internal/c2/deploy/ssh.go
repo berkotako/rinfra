@@ -69,6 +69,13 @@ type InstallParams struct {
 
 	// ExecStart is the ExecStart value for the unit file. Defaults to DestPath.
 	ExecStart string
+
+	// EnvironmentFile, when set, is emitted as the systemd unit's
+	// EnvironmentFile directive so the service loads variables (e.g. a
+	// license key) referenced by ExecStart. The "-" prefix is applied so a
+	// missing file does not fail the unit. Leave empty for units that need no
+	// environment file.
+	EnvironmentFile string
 }
 
 // installScriptTmpl is the parameterised install script template. It:
@@ -113,7 +120,8 @@ After=network.target
 [Service]
 Type=simple
 User={{ .ServiceUser }}
-ExecStart={{ .ExecStart }}
+{{ if .EnvironmentFile }}EnvironmentFile=-{{ .EnvironmentFile }}
+{{ end }}ExecStart={{ .ExecStart }}
 Restart=on-failure
 RestartSec=5s
 

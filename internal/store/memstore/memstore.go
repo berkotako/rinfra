@@ -153,10 +153,15 @@ func (s *InfraStore) GetTopology(_ context.Context, engagementID string) (domain
 			nodes = append(nodes, n)
 		}
 	}
+	// Copy the edges slice so callers cannot mutate the store's internal state.
+	var edges []domain.Edge
+	if e := s.edges[engagementID]; len(e) > 0 {
+		edges = append(edges, e...)
+	}
 	return domain.Topology{
 		EngagementID: engagementID,
 		Nodes:        nodes,
-		Edges:        s.edges[engagementID],
+		Edges:        edges,
 	}, nil
 }
 
@@ -297,8 +302,10 @@ func (s *CredentialStore) Upsert(_ context.Context, engagementID, provider strin
 	defer s.mu.Unlock()
 	existing, exists := s.rows[k]
 	id := existing.meta.ID
+	createdAt := existing.meta.CreatedAt
 	if !exists {
 		id = uuid.NewString()
+		createdAt = time.Now().UTC()
 	}
 	ct := make([]byte, len(ciphertext))
 	copy(ct, ciphertext)
@@ -310,7 +317,7 @@ func (s *CredentialStore) Upsert(_ context.Context, engagementID, provider strin
 			EngagementID: engagementID,
 			Provider:     provider,
 			KeyID:        keyID,
-			CreatedAt:    time.Now().UTC(),
+			CreatedAt:    createdAt,
 		},
 		ciphertext: ct,
 		nonce:      n,

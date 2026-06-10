@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/rinfra/rinfra/internal/audit"
@@ -23,7 +24,7 @@ type createEngagementRequest struct {
 	Constraints    []string `json:"constraints"`
 }
 
-func (r createEngagementRequest) toDomain() domain.Engagement {
+func (r createEngagementRequest) toDomain() (domain.Engagement, error) {
 	e := domain.Engagement{
 		Client:         r.Client,
 		Codename:       r.Codename,
@@ -41,19 +42,23 @@ func (r createEngagementRequest) toDomain() domain.Engagement {
 		},
 	}
 	if r.WindowStart != "" {
-		if t, err := time.Parse(time.RFC3339, r.WindowStart); err == nil {
-			e.RoE.WindowStart = t
+		t, err := time.Parse(time.RFC3339, r.WindowStart)
+		if err != nil {
+			return domain.Engagement{}, fmt.Errorf("windowStart must be an RFC3339 timestamp")
 		}
+		e.RoE.WindowStart = t
 	}
 	if r.WindowEnd != "" {
-		if t, err := time.Parse(time.RFC3339, r.WindowEnd); err == nil {
-			e.RoE.WindowEnd = t
+		t, err := time.Parse(time.RFC3339, r.WindowEnd)
+		if err != nil {
+			return domain.Engagement{}, fmt.Errorf("windowEnd must be an RFC3339 timestamp")
 		}
+		e.RoE.WindowEnd = t
 	}
 	if e.EngagementType == "" {
 		e.EngagementType = domain.EngagementTypeRedTeam
 	}
-	return e
+	return e, nil
 }
 
 type patchEngagementRequest struct {

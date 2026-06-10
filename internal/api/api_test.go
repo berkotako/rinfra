@@ -51,6 +51,14 @@ func (f *flushableRecorder) Flush() {
 	f.ResponseRecorder.Flush()
 }
 
+// Write holds the same mutex the test uses to read Body, so the SSE handler
+// goroutine's writes are synchronized with the test reading the buffer.
+func (f *flushableRecorder) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ResponseRecorder.Write(p)
+}
+
 // testEnc returns a deterministic Encrypter for tests.
 func testEnc(t *testing.T) *secrets.Encrypter {
 	t.Helper()
@@ -206,6 +214,55 @@ func TestCreateAndGetEngagement(t *testing.T) {
 	eng := result["engagement"].(map[string]any)
 	if eng["id"] != engID {
 		t.Errorf("engagement id mismatch: got %v", eng["id"])
+	}
+}
+
+func TestCreateEngagement_MalformedWindow_Returns400(t *testing.T) {
+	router, _, _ := buildRouter(t)
+	resp := doRequest(t, router, "POST", "/api/v1/engagements", map[string]any{
+		"client":      "Acme",
+		"codename":    "Test",
+		"targets":     []string{"10.0.0.0/8"},
+		"windowStart": "not-a-timestamp",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed windowStart: want 400, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	decodeBody(t, resp, &body)
+	if body["error"] == nil {
+		t.Errorf("expected JSON error envelope, got %v", body)
+	}
+}
+
+func TestPatchEngagement_MalformedGrantedAt_Returns400(t *testing.T) {
+	router, _, _ := buildRouter(t)
+	engID := createEngagementViaAPI(t, router)
+	resp := doRequest(t, router, "PATCH", "/api/v1/engagements/"+engID, map[string]any{
+		"authorization": map[string]any{
+			"authorizedBy": "CISO",
+			"grantedAt":    "yesterday",
+			"expiresAt":    "2026-07-01T00:00:00Z",
+		},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed grantedAt: want 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestPutCredentials_EmptyValues_Returns400(t *testing.T) {
+	router, _, _ := buildRouter(t)
+	engID := createEngagementViaAPI(t, router)
+	resp := doRequest(t, router, "PUT", "/api/v1/engagements/"+engID+"/credentials/aws", map[string]any{
+		"values": map[string]string{},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty credentials: want 400, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	decodeBody(t, resp, &body)
+	if body["error"] == nil {
+		t.Errorf("expected JSON error envelope, got %v", body)
 	}
 }
 

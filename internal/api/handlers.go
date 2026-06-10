@@ -36,7 +36,11 @@ func (h *handlers) createEngagement(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	e := req.toDomain()
+	e, err := req.toDomain()
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	created, err := h.svc.Engagement.Create(r.Context(), e, actorFrom(r.Context()))
 	if err != nil {
 		writeError(w, h.log, err)
@@ -77,14 +81,20 @@ func (h *handlers) patchEngagement(w http.ResponseWriter, r *http.Request) {
 			DocumentRef:  req.Authorization.DocumentRef,
 		}
 		if req.Authorization.GrantedAt != "" {
-			if t, err := time.Parse(time.RFC3339, req.Authorization.GrantedAt); err == nil {
-				auth.GrantedAt = t
+			t, err := time.Parse(time.RFC3339, req.Authorization.GrantedAt)
+			if err != nil {
+				writeErrorCode(w, http.StatusBadRequest, "invalid_request", "grantedAt must be an RFC3339 timestamp")
+				return
 			}
+			auth.GrantedAt = t
 		}
 		if req.Authorization.ExpiresAt != "" {
-			if t, err := time.Parse(time.RFC3339, req.Authorization.ExpiresAt); err == nil {
-				auth.ExpiresAt = t
+			t, err := time.Parse(time.RFC3339, req.Authorization.ExpiresAt)
+			if err != nil {
+				writeErrorCode(w, http.StatusBadRequest, "invalid_request", "expiresAt must be an RFC3339 timestamp")
+				return
 			}
+			auth.ExpiresAt = t
 		}
 		if _, err := h.svc.Engagement.Authorize(r.Context(), id, auth, actor); err != nil {
 			writeError(w, h.log, err)
@@ -178,7 +188,7 @@ func (h *handlers) putCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Values) == 0 {
-		http.Error(w, `{"error":"credentials values map must not be empty"}`, http.StatusBadRequest)
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "credentials values map must not be empty")
 		return
 	}
 
@@ -281,12 +291,16 @@ func (h *handlers) sseEvents(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	const maxLimit = 500
 	limit := 50
 	offset := 0
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
+	}
+	if limit > maxLimit {
+		limit = maxLimit // cap to avoid unbounded result sets
 	}
 	if v := r.URL.Query().Get("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {

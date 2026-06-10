@@ -66,22 +66,24 @@ func deployCS(ctx context.Context, runner deploy.Runner, node domain.Node, cfg c
 		"# before this step. RInfra never fetches or bundles the CS distro.",
 		"[ -d /opt/cobaltstrike ] || { echo '[rinfra-cs] ERROR: /opt/cobaltstrike not found — operator must upload CS distro'; exit 1; }",
 		"chmod +x /opt/cobaltstrike/teamserver",
-		// The license key is written to a restricted file that the systemd unit reads.
-		// It is NOT echoed, logged, or placed in the script body.
+		// Pre-create the license env file with restricted permissions. Its
+		// contents are written separately via an out-of-band upload (never in
+		// this script body), and the systemd unit loads it via EnvironmentFile.
+		"mkdir -p /etc/cobaltstrike",
 		"install -m 0600 /dev/null /etc/cobaltstrike/license.env",
-		"echo 'RINFRA_CS_LICENSE=${RINFRA_CS_LICENSE}' >> /etc/cobaltstrike/license.env",
 	}
 
 	params := deploy.InstallParams{
 		// The CS teamserver binary is operator-uploaded; we use a placeholder URL
 		// that validates the checksum of the operator-provided distro.
-		ReleaseURL:  "file:///opt/cobaltstrike/teamserver",
-		SHA256:      cfg.Extra["teamserver_sha256"], // operator-provided per-version
-		DestPath:    "/opt/cobaltstrike/teamserver",
-		SystemdUnit: "cobaltstrike-teamserver",
-		ServiceUser: "root",
-		ExecStart:   fmt.Sprintf("/opt/cobaltstrike/teamserver %s", maskLicenseRef()),
-		ExtraSetup:  extraSetup,
+		ReleaseURL:      "file:///opt/cobaltstrike/teamserver",
+		SHA256:          cfg.Extra["teamserver_sha256"], // operator-provided per-version
+		DestPath:        "/opt/cobaltstrike/teamserver",
+		SystemdUnit:     "cobaltstrike-teamserver",
+		ServiceUser:     "root",
+		ExecStart:       fmt.Sprintf("/opt/cobaltstrike/teamserver %s", maskLicenseRef()),
+		EnvironmentFile: "/etc/cobaltstrike/license.env",
+		ExtraSetup:      extraSetup,
 	}
 
 	if err := deploy.RunInstall(ctx, runner, params); err != nil {

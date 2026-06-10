@@ -428,7 +428,7 @@ var _ store.ScenarioStore = (*ScenarioStore)(nil)
 func (s *ScenarioStore) SaveRun(ctx context.Context, run domain.ScenarioRun) (string, error) {
 	// Update path: when ID is already set, update the run status only.
 	if run.ID != "" {
-		_, err := s.pool.Exec(ctx, `
+		tag, err := s.pool.Exec(ctx, `
 			UPDATE scenario_runs
 			SET status=$2, finished_at=$3
 			WHERE id=$1`,
@@ -436,6 +436,9 @@ func (s *ScenarioStore) SaveRun(ctx context.Context, run domain.ScenarioRun) (st
 		)
 		if err != nil {
 			return "", fmt.Errorf("update scenario_run %s: %w", run.ID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return "", fmt.Errorf("update scenario_run %s: %w", run.ID, store.ErrNotFound)
 		}
 		return run.ID, nil
 	}

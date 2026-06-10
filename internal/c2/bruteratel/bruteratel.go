@@ -57,18 +57,22 @@ func deployBRC(ctx context.Context, runner deploy.Runner, node domain.Node, cfg 
 		"# before this step. RInfra never fetches or bundles the BRC distro.",
 		"[ -d /opt/bruteratel ] || { echo '[rinfra-brc] ERROR: /opt/bruteratel not found — operator must upload BRC distro'; exit 1; }",
 		"chmod +x /opt/bruteratel/badger",
-		// License key goes into a restricted env file, not the script body.
+		// License key goes into a restricted env file, not the script body. Its
+		// contents are written out-of-band; the systemd unit loads it via
+		// EnvironmentFile so the badger process sees RINFRA_BRC_LICENSE.
+		"mkdir -p /etc/bruteratel",
 		"install -m 0600 /dev/null /etc/bruteratel/license.env",
 	}
 
 	params := deploy.InstallParams{
-		ReleaseURL:  "file:///opt/bruteratel/badger",
-		SHA256:      cfg.Extra["server_sha256"],
-		DestPath:    "/opt/bruteratel/badger",
-		SystemdUnit: "bruteratel",
-		ServiceUser: "root",
-		ExecStart:   "/opt/bruteratel/badger --port 443 --config /etc/bruteratel/server.json",
-		ExtraSetup:  extraSetup,
+		ReleaseURL:      "file:///opt/bruteratel/badger",
+		SHA256:          cfg.Extra["server_sha256"],
+		DestPath:        "/opt/bruteratel/badger",
+		SystemdUnit:     "bruteratel",
+		ServiceUser:     "root",
+		ExecStart:       "/opt/bruteratel/badger --port 443 --config /etc/bruteratel/server.json",
+		EnvironmentFile: "/etc/bruteratel/license.env",
+		ExtraSetup:      extraSetup,
 	}
 
 	if err := deploy.RunInstall(ctx, runner, params); err != nil {

@@ -31,6 +31,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeErrorCode writes the JSON error envelope with an explicit status and
+// code, for validation errors that are not domain/store sentinels.
+func writeErrorCode(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, errorBody{Error: errDetail{Code: code, Message: message}})
+}
+
 // writeError maps a domain/store error to the correct HTTP status and error
 // code, then writes the JSON error envelope.
 func writeError(w http.ResponseWriter, log *slog.Logger, err error) {

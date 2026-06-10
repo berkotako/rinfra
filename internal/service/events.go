@@ -62,12 +62,16 @@ func (h *Hub) Subscribe(engagementID string) (<-chan Event, func()) {
 
 // Publish sends an event to all current subscribers for the engagement. Slow
 // subscribers that have a full buffer are skipped (non-blocking send).
+//
+// The read lock is held across the send loop so a concurrent Unsubscribe
+// (which closes the channel under the write lock) cannot close a channel while
+// we are sending to it — that would panic with "send on closed channel". The
+// sends are non-blocking, so holding the lock briefly is safe.
 func (h *Hub) Publish(e Event) {
 	h.mu.RLock()
-	subs := h.subs[e.EngagementID]
-	h.mu.RUnlock()
+	defer h.mu.RUnlock()
 
-	for _, s := range subs {
+	for _, s := range h.subs[e.EngagementID] {
 		select {
 		case s.ch <- e:
 		default:
