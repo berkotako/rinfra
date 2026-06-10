@@ -27,8 +27,11 @@ export default function Sidebar() {
       }}
     >
       {/* brand */}
-      <div
+      <Link
+        href="/"
         style={{
+          textDecoration: "none",
+          color: "inherit",
           height: 56,
           display: "flex",
           alignItems: "center",
@@ -65,7 +68,7 @@ export default function Sidebar() {
             Operations platform
           </div>
         </div>
-      </div>
+      </Link>
 
       {/* nav */}
       <div

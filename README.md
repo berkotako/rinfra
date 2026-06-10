@@ -11,6 +11,21 @@ audit trail.
 > deploy is gated on an authorized engagement, provisions into the customer's own
 > cloud account, and is fully audited. See `CLAUDE.md` for the invariants.
 
+## Live demo
+
+A fully interactive demo of the web console is published to GitHub Pages:
+
+**→ https://berkotako.github.io/rinfra/**
+
+It runs entirely in the browser on mock data (no backend, nothing provisioned),
+so you can click through all five screens and the deploy / emulation flows. The
+landing page includes a short "how to use" walkthrough. To run it locally
+instead, see `web/README.md` (`make web-dev`).
+
+> The demo deploys via the `Deploy demo to GitHub Pages` workflow. To enable it
+> once, set **Settings → Pages → Source: GitHub Actions**; it then publishes on
+> every push to `main` (or on demand via the workflow's "Run workflow" button).
+
 ## Layout
 
 | Path | Purpose |
