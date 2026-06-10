@@ -1,10 +1,11 @@
 "use client";
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Icons } from "../icons";
 import { PageHead } from "../ui";
 import { useStore } from "../../lib/store";
+import { getClient, isRestMode } from "../../lib/client";
 import { SCENARIOS } from "../../lib/data";
-import type { NodeStatus } from "../../lib/types";
+import type { NodeStatus, Technique } from "../../lib/types";
 
 type StepStatus = "pending" | "running" | "done" | "detected";
 
@@ -28,11 +29,14 @@ const TACTIC_TONE: Record<string, number> = {
 };
 
 export default function EmulationScreen() {
-  const { activeEngagement, nodes, pushToast } = useStore();
+  const { activeEngagement, activeEngagementId, nodes, pushToast, apiStartRun } = useStore();
   const [scenarioId, setScenarioId] = useState(SCENARIOS[0].id);
   const [running, setRunning] = useState(false);
   const [stepState, setStepState] = useState<Record<number, StepStatus>>({});
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const runIdRef = useRef<string | null>(null);
+  const restMode = isRestMode();
+  const client = getClient();
 
   const scenario = SCENARIOS.find((s) => s.id === scenarioId) || SCENARIOS[0];
 
@@ -57,10 +61,92 @@ export default function EmulationScreen() {
     setRunning(false);
   }, [scenarioId]);
 
+  // SSE subscription for run events in REST mode.
+  const subscribeRunEvents = useCallback(
+    (engagementId: string, localRunId: string, techniques: Technique[]) => {
+      const unsubscribe = client.subscribeEvents(engagementId, (ev) => {
+        if (ev.kind !== "run_status") return;
+        if (ev.data.runId !== localRunId) return;
+
+        const { techniqueId, status } = ev.data;
+        if (techniqueId) {
+          // Per-technique update.
+          const idx = techniques.findIndex((t) => t.id === techniqueId);
+          if (idx >= 0) {
+            const st: StepStatus =
+              status === "success" ? "done" :
+              status === "detected" ? "detected" :
+              status === "running" ? "running" :
+              "done";
+            setStepState((s) => ({ ...s, [idx]: st }));
+          }
+        } else if (status === "success" || status === "done" || status === "failed") {
+          setRunning(false);
+          pushToast("Emulation complete — results captured", "ok");
+          unsubscribe();
+        }
+      });
+      return unsubscribe;
+    },
+    [client, pushToast]
+  );
+
+  // Polling fallback for REST mode: poll GET /runs/{id} every 2 s until done.
+  const pollRun = useCallback(
+    (runId: string, techniques: Technique[]) => {
+      const interval = setInterval(async () => {
+        try {
+          const run = await client.getRun(runId);
+          for (const r of run.results) {
+            const idx = techniques.findIndex((t) => t.id === r.techniqueId);
+            if (idx >= 0) {
+              const st: StepStatus =
+                r.status === "success" ? "done" :
+                r.status === "detected" ? "detected" :
+                r.status === "running" ? "running" :
+                "done";
+              setStepState((s) => ({ ...s, [idx]: st }));
+            }
+          }
+          if (run.status !== "running") {
+            clearInterval(interval);
+            setRunning(false);
+            pushToast("Emulation complete — results captured", "ok");
+          }
+        } catch {
+          // ignore transient errors
+        }
+      }, 2000);
+      timers.current.push(interval as unknown as ReturnType<typeof setTimeout>);
+    },
+    [client, pushToast]
+  );
+
   const run = () => {
     reset();
     setRunning(true);
     pushToast(`Emulation started — ${scenario.name}`, "info");
+
+    if (restMode) {
+      apiStartRun(activeEngagementId, scenarioId).then((runId) => {
+        runIdRef.current = runId;
+        // Try SSE first; poll as fallback.
+        const unsub = subscribeRunEvents(activeEngagementId, runId, scenario.techniques);
+        // Poll fallback kicks in after 5 s if SSE doesn't deliver results.
+        const fallbackTimer = setTimeout(() => {
+          unsub();
+          pollRun(runId, scenario.techniques);
+        }, 5000);
+        timers.current.push(fallbackTimer);
+      }).catch((err: unknown) => {
+        setRunning(false);
+        const msg = err instanceof Error ? err.message : "Failed to start emulation";
+        pushToast(msg, "danger");
+      });
+      return;
+    }
+
+    // Mock mode: local simulation.
     const n = scenario.techniques.length;
     scenario.techniques.forEach((t, i) => {
       timers.current.push(

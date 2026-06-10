@@ -1,5 +1,5 @@
 .PHONY: build vet test run fmt tidy web-dev web-build web-lint \
-        db-up db-down migrate-up migrate-down test-integration
+        db-up db-down migrate-up migrate-down test-integration dev
 
 build:
 	go build ./...
@@ -21,6 +21,35 @@ tidy:
 
 web-dev:
 	cd web && npm install && npm run dev
+
+# dev — run the Go server (RINFRA_DEV=1, no Postgres needed) and the Next.js
+# dev server together. Runs in two terminals because a single make rule with
+# trap is fragile across shells; this documented two-terminal approach is simpler.
+#
+# Terminal 1:  make dev-server
+# Terminal 2:  make dev-web
+#
+# Or, to run both in one terminal (Go server in background):
+#   RINFRA_DEV=1 RINFRA_ADDR=:8080 go run ./cmd/rinfra-server &
+#   SERVER_PID=$$! ; cd web && NEXT_PUBLIC_RINFRA_API=http://localhost:8080 npm run dev ; kill $$SERVER_PID
+#
+dev-server:
+	RINFRA_DEV=1 RINFRA_ADDR=:8080 go run ./cmd/rinfra-server
+
+dev-web:
+	cd web && NEXT_PUBLIC_RINFRA_API=http://localhost:8080 npm run dev
+
+# dev — convenience: start both in background (server) + foreground (web).
+# Kills the server when the web process exits.
+dev:
+	@echo "Starting Go server in background (RINFRA_DEV=1)..."
+	@RINFRA_DEV=1 RINFRA_ADDR=:8080 go run ./cmd/rinfra-server & \
+	SERVER_PID=$$! ; \
+	echo "Server PID: $$SERVER_PID — waiting 2s for startup..."; \
+	sleep 2; \
+	trap "kill $$SERVER_PID 2>/dev/null; exit" INT TERM EXIT; \
+	cd web && NEXT_PUBLIC_RINFRA_API=http://localhost:8080 npm run dev; \
+	kill $$SERVER_PID 2>/dev/null
 
 web-build:
 	cd web && npm install && npm run build

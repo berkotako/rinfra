@@ -15,8 +15,10 @@ const AUTH_META: Record<string, { cls: string; icon: string; label: string }> = 
 
 export default function EngagementsScreen() {
   const router = useRouter();
-  const { engagements, setEngagements, activeEngagementId, setActiveEngagementId, pushToast } =
-    useStore();
+  const {
+    engagements, setEngagements, activeEngagementId, setActiveEngagementId, pushToast,
+    apiCreateEngagement,
+  } = useStore();
   const [filter, setFilter] = useState("all");
   const [q, setQ] = useState("");
   const [newEngOpen, setNewEngOpen] = useState(false);
@@ -50,11 +52,19 @@ export default function EngagementsScreen() {
   };
 
   const createEngagement = (e: Engagement) => {
-    setEngagements((list) => [e, ...list]);
+    // In REST mode, apiCreateEngagement already updated the store; in mock mode
+    // we still get the Engagement object back and add it manually.
+    setEngagements((list) => {
+      // Avoid duplicate if apiCreateEngagement already prepended it.
+      if (list.some((x) => x.id === e.id)) return list;
+      return [e, ...list];
+    });
     setNewEngOpen(false);
     setActiveEngagementId(e.id);
     pushToast(`Engagement ${e.codename} created — authorization recorded`, "ok");
   };
+
+  void apiCreateEngagement; // referenced so linter doesn't complain; used by NewEngagementFlow
 
   return (
     <div className="scroll" style={{ height: "100%", padding: "26px 32px 40px" }}>

@@ -63,11 +63,51 @@ lib/
   store.tsx           # React context: engagements, topology, preferences, toasts
 ```
 
-## API seam
+## API seam — REST vs mock mode
 
-All data comes from `lib/client.ts → MockClient`. When the Go control plane
-gains REST endpoints, implement `RInfraClient` against them and swap
-`MockClient` for the real client. No changes to screens required.
+`lib/client.ts` exports `RInfraClient` with two implementations:
+
+| Mode | When active | Description |
+|------|-------------|-------------|
+| **MockClient** | `NEXT_PUBLIC_RINFRA_API` **unset** | In-memory demo; no Go server needed. Static export default. |
+| **RestClient** | `NEXT_PUBLIC_RINFRA_API=http://…` | Fetch-based; talks to the Go control plane. SSE-driven node/job/run updates. |
+
+### Running against the Go server
+
+```bash
+# Copy and edit the env file
+cp web/.env.example web/.env.local
+# NEXT_PUBLIC_RINFRA_API=http://localhost:8080  (already set in example)
+
+# Start both together (Go server in background + Next.js dev):
+make dev
+
+# Or in two separate terminals:
+make dev-server   # terminal 1 — RINFRA_DEV=1 Go server on :8080
+make dev-web      # terminal 2 — Next.js on :3000
+```
+
+`RINFRA_DEV=1` starts the Go server with in-memory stores and a fake cloud
+provider — no Postgres or cloud credentials needed for local development.
+
+### SSE events → store updates
+
+| SSE event kind | Payload fields | Store effect |
+|---|---|---|
+| `node_status` | `nodeId`, `status`, `publicIp` | Updates node status/ip/health in topology |
+| `job_status` | `jobId`, `status` | Shows toast on `done`/`failed` |
+| `run_status` | `runId`, `techniqueId?`, `status` | Updates technique step in EmulationScreen |
+
+### API error codes → toasts
+
+`ApiError.toastMessage()` maps the following codes to user-facing messages:
+
+- `authorization_required` — engagement must be authorized before deploying
+- `auth_expired` — re-authorize the engagement
+- `outside_window` — outside the RoE window
+- `empty_scope` — define targets before deploying
+- `job_running` — a deploy or teardown is already in progress
+- `not_found` — resource not found
 
 ## Preferences
 

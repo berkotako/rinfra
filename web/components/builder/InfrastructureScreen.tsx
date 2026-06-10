@@ -754,8 +754,10 @@ function Inspector({
 }
 
 export default function InfrastructureScreen() {
-  const { nodes, setNodes, edges, setEdges, activeEngagement, pushToast, preferences } =
-    useStore();
+  const {
+    nodes, setNodes, edges, setEdges, activeEngagement, pushToast, preferences,
+    apiDeploy, apiTeardown, apiSaveTopology, activeEngagementId,
+  } = useStore();
   const nodeStyle = preferences.nodeStyle;
 
   const [selected, setSelected] = useState<string | null>(null);
@@ -1027,33 +1029,50 @@ export default function InfrastructureScreen() {
       pushToast("Nothing to deploy — all assets already live", "info");
       return;
     }
-    setNodes((ns) =>
-      ns.map((n) => (n.status === "pending" ? { ...n, status: "provisioning" } : n))
-    );
-    pushToast(`Provisioning ${targets.length} asset(s)…`, "warn");
-    targets.forEach((t, i) => {
-      setTimeout(() => {
-        setNodes((ns) =>
-          ns.map((n) =>
-            n.id === t.id
-              ? {
-                  ...n,
-                  status: "live",
-                  health: 92 + Math.floor(Math.random() * 7),
-                  ip:
-                    n.type === "c2_server"
-                      ? `10.0.${Math.floor(Math.random() * 9) + 1}.${Math.floor(Math.random() * 200) + 10}`
-                      : `203.0.113.${Math.floor(Math.random() * 200) + 10}`,
-                }
-              : n
-          )
-        );
-      }, 900 + i * 700);
+
+    // REST mode: save topology first, then call deploy; SSE drives state transitions.
+    apiSaveTopology(activeEngagementId, nodes, edges);
+
+    apiDeploy(activeEngagementId).then(() => {
+      // REST mode: set pending→provisioning optimistically; SSE will transition to live.
+      setNodes((ns) =>
+        ns.map((n) => (n.status === "pending" ? { ...n, status: "provisioning" } : n))
+      );
+      pushToast(`Provisioning ${targets.length} asset(s)…`, "warn");
+    }).catch(() => {
+      // Error toast already emitted by apiDeploy.
     });
-    setTimeout(
-      () => pushToast("Deployment complete — infrastructure live", "ok"),
-      900 + targets.length * 700
-    );
+
+    // Mock mode simulation (no-op in REST mode since apiDeploy returns quickly).
+    if (!process.env.NEXT_PUBLIC_RINFRA_API) {
+      setNodes((ns) =>
+        ns.map((n) => (n.status === "pending" ? { ...n, status: "provisioning" } : n))
+      );
+      pushToast(`Provisioning ${targets.length} asset(s)…`, "warn");
+      targets.forEach((t, i) => {
+        setTimeout(() => {
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === t.id
+                ? {
+                    ...n,
+                    status: "live",
+                    health: 92 + Math.floor(Math.random() * 7),
+                    ip:
+                      n.type === "c2_server"
+                        ? `10.0.${Math.floor(Math.random() * 9) + 1}.${Math.floor(Math.random() * 200) + 10}`
+                        : `203.0.113.${Math.floor(Math.random() * 200) + 10}`,
+                  }
+                : n
+            )
+          );
+        }, 900 + i * 700);
+      });
+      setTimeout(
+        () => pushToast("Deployment complete — infrastructure live", "ok"),
+        900 + targets.length * 700
+      );
+    }
   };
 
   const doTearDown = () => {
@@ -1065,29 +1084,47 @@ export default function InfrastructureScreen() {
       pushToast("No live assets to tear down", "info");
       return;
     }
-    setNodes((ns) =>
-      ns.map((n) =>
-        n.status === "live" || n.status === "provisioning"
-          ? { ...n, status: "draining" }
-          : n
-      )
-    );
-    pushToast("Draining connections…", "info");
-    live.forEach((t, i) => {
-      setTimeout(
-        () =>
-          setNodes((ns) =>
-            ns.map((n) =>
-              n.id === t.id ? { ...n, status: "destroyed", health: 0, ip: "—" } : n
-            )
-          ),
-        800 + i * 500
+
+    // REST mode: call teardown API; SSE drives state transitions.
+    apiTeardown(activeEngagementId).then(() => {
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.status === "live" || n.status === "provisioning"
+            ? { ...n, status: "draining" }
+            : n
+        )
       );
+      pushToast("Draining connections…", "info");
+    }).catch(() => {
+      // Error toast already emitted by apiTeardown.
     });
-    setTimeout(
-      () => pushToast("Infrastructure torn down — assets destroyed", "ok"),
-      800 + live.length * 500
-    );
+
+    // Mock mode simulation (no-op in REST mode since apiTeardown returns quickly).
+    if (!process.env.NEXT_PUBLIC_RINFRA_API) {
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.status === "live" || n.status === "provisioning"
+            ? { ...n, status: "draining" }
+            : n
+        )
+      );
+      pushToast("Draining connections…", "info");
+      live.forEach((t, i) => {
+        setTimeout(
+          () =>
+            setNodes((ns) =>
+              ns.map((n) =>
+                n.id === t.id ? { ...n, status: "destroyed", health: 0, ip: "—" } : n
+              )
+            ),
+          800 + i * 500
+        );
+      });
+      setTimeout(
+        () => pushToast("Infrastructure torn down — assets destroyed", "ok"),
+        800 + live.length * 500
+      );
+    }
   };
 
   const selNode = nodes.find((n) => n.id === selected) || null;

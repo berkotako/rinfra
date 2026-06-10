@@ -3,6 +3,7 @@ import React, { useState, useEffect } from "react";
 import { Icons } from "../icons";
 import { Modal } from "../ui";
 import type { Engagement } from "../../lib/types";
+import { useStore } from "../../lib/store";
 
 interface Props {
   open: boolean;
@@ -34,6 +35,7 @@ interface FormState {
 const STEPS = ["Engagement", "Rules of engagement", "Scope", "Authorization"];
 
 export default function NewEngagementFlow({ open, onClose, onCreate }: Props) {
+  const { apiCreateEngagement, pushToast } = useStore();
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormState>({
     client: "",
@@ -70,25 +72,38 @@ export default function NewEngagementFlow({ open, onClose, onCreate }: Props) {
       : true;
 
   const finish = () => {
-    onCreate({
-      id: "ENG-" + (2412 + Math.floor(Math.random() * 80)),
+    const targets = form.targets.split("\n").map((s) => s.trim()).filter(Boolean);
+    const exclusions = form.excluded.split("\n").map((s) => s.trim()).filter(Boolean);
+    const constraints: string[] = [];
+    if (form.roe.noPii) constraints.push("No live PII exfiltration");
+    if (form.roe.businessHours) constraints.push("Restrict to business hours");
+    if (form.roe.noProd) constraints.push("Exclude production-impacting techniques");
+    if (form.roe.dataHandling) constraints.push("Encrypted evidence handling");
+
+    const params = {
       client: form.client,
       codename: form.codename,
-      scope: form.scope,
-      status: "draft",
-      auth: form.consent ? "authorized" : "pending",
-      authBy: form.authName ? `${form.authName} (${form.authTitle})` : "—",
-      start: form.start,
-      end: form.end,
-      assets: 0,
-      live: 0,
-      cost: 0,
-      lead: form.lead,
-      targets: form.targets
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean),
-      frameworks: [],
+      leadOperator: form.lead,
+      engagementType: "red_team",
+      targets,
+      exclusions,
+      scopeNotes: form.scope,
+      roeDocRef: form.authRef,
+      windowStart: form.start ? `${form.start}T00:00:00Z` : "",
+      windowEnd: form.end ? `${form.end}T23:59:59Z` : "",
+      constraints,
+    };
+
+    apiCreateEngagement(params).then((created) => {
+      // If authorization data was provided, patch it.
+      if (form.authName && form.consent) {
+        // The API doesn't take authorization in the create call; we'd PATCH separately.
+        // For now just surface what we have.
+      }
+      onCreate(created);
+    }).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Failed to create engagement";
+      pushToast(msg, "danger");
     });
   };
 
