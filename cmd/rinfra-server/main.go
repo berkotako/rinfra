@@ -1,12 +1,27 @@
 // Command rinfra-server is the RInfra control-plane entrypoint. It wires the
 // cloud and C2 registries, sets up persistence, services, and the HTTP API.
 //
-// Configuration (environment variables):
+// # Configuration (environment variables)
+//
+// Core:
 //   - RINFRA_ADDR         listen address (default :8080)
 //   - DATABASE_URL        Postgres connection string (required unless RINFRA_DEV=1)
 //   - RINFRA_MASTER_KEY   base64-encoded 32-byte AES key (required unless RINFRA_DEV=1)
 //   - RINFRA_DEV          set to "1" for in-memory stores and fake cloud;
 //     no Postgres or master key required in this mode.
+//
+// Pulumi (required for real cloud provisioning; not needed with RINFRA_DEV=1):
+//   - PULUMI_CONFIG_PASSPHRASE   passphrase used to encrypt secrets in the local
+//     Pulumi state backend. Set to any non-empty value for local dev. Required
+//     before calling any deploy/teardown endpoint.
+//   - PULUMI_BACKEND_DIR         optional: root directory for Pulumi local state
+//     files (default: $HOME/.rinfra/pulumi-state). Passed to orchestration.Engine.
+//
+// Pulumi uses the Pulumi CLI binary on PATH to run the automation API engine.
+// Install the Pulumi CLI before enabling real cloud provisioning:
+// https://www.pulumi.com/docs/install/
+//
+// See docs/RUNBOOK_DO.md for the full live-verification checklist.
 package main
 
 import (
