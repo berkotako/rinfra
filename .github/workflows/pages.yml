@@ -10,7 +10,7 @@ name: Deploy demo to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, claude/compassionate-allen-cjb0bc]
     paths:
       - "web/**"
       - ".github/workflows/pages.yml"
@@ -35,6 +35,13 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+
+      # Enables GitHub Pages on the repo (Source: GitHub Actions) using the
+      # workflow token, so no manual Settings change is required.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/setup-node@v4
         with:

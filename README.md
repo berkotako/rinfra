@@ -22,9 +22,10 @@ so you can click through all five screens and the deploy / emulation flows. The
 landing page includes a short "how to use" walkthrough. To run it locally
 instead, see `web/README.md` (`make web-dev`).
 
-> The demo deploys via the `Deploy demo to GitHub Pages` workflow. To enable it
-> once, set **Settings → Pages → Source: GitHub Actions**; it then publishes on
-> every push to `main` (or on demand via the workflow's "Run workflow" button).
+> The demo deploys via the `Deploy demo to GitHub Pages` workflow, which enables
+> Pages automatically (`actions/configure-pages` with `enablement: true`) and
+> publishes on push. If your org restricts programmatic Pages enablement, set
+> **Settings → Pages → Source: GitHub Actions** once and re-run the workflow.
 
 ## Layout
 
