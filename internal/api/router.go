@@ -53,6 +53,8 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			r.Get("/events", h.sseEvents)
 			r.Get("/audit", h.listAuditEvents)
 			r.Post("/runs", h.startRun)
+			r.Get("/coverage", h.getCoverage)
+			r.Get("/navigator", h.getNavigator)
 		})
 
 		// C2 frameworks (from registry).

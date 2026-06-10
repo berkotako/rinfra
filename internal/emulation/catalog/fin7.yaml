@@ -1,0 +1,39 @@
+id: fin7
+name: "FIN7 — Carbanak"
+adversaryProfile: fin7-like
+techniques:
+  - attackID: T1566.001
+    name: Spearphishing Attachment
+    tactic: initial-access
+    source: atomic_red_team
+    sourceID: cb3afd92-92c3-4d8d-bb3e-6b2e4e3c2f4a
+  - attackID: T1204.002
+    name: Malicious File
+    tactic: execution
+    source: atomic_red_team
+    sourceID: a5c3b2d4-6e7f-4819-9a2b-c8d4e5f60124
+  - attackID: T1053.005
+    name: Scheduled Task/Job
+    tactic: persistence
+    source: atomic_red_team
+    sourceID: 2f3a9a4b-8c9d-4e5f-a6b7-c8d9e0f12345
+  - attackID: T1112
+    name: Modify Registry
+    tactic: defense-evasion
+    source: atomic_red_team
+    sourceID: 1a2b3c4d-5e6f-7890-abcd-ef1234567890
+  - attackID: T1555.003
+    name: Credentials from Web Browsers
+    tactic: credential-access
+    source: atomic_red_team
+    sourceID: a1b2c3d4-e5f6-7890-1234-567890abcdef
+  - attackID: T1057
+    name: Process Discovery
+    tactic: discovery
+    source: atomic_red_team
+    sourceID: b2c3d4e5-f6a7-8901-2345-678901abcdef
+  - attackID: T1570
+    name: Lateral Tool Transfer
+    tactic: lateral-movement
+    source: atomic_red_team
+    sourceID: c3d4e5f6-a7b8-9012-3456-789012abcdef

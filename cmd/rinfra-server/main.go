@@ -170,6 +170,8 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
 	svcInfra.WithEngine(buildEngine(log))
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
+	// Dev mode: keep the fake resolver so no live teamserver is needed.
+	svcEmu.WithResolver(service.NewFakeResolver())
 
 	svcInfra.ResumeJobs(context.Background())
 
@@ -209,6 +211,9 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
 	svcInfra.WithEngine(buildEngine(log))
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
+	// Production mode: use registry-backed resolver that finds the engagement's
+	// deployed C2 topology and calls C2Provider.Control(teamserver).
+	svcEmu.WithResolver(service.NewRegistryResolver(infraStore))
 
 	svcInfra.ResumeJobs(context.Background())
 

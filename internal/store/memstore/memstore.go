@@ -203,13 +203,29 @@ func NewScenarioStore() *ScenarioStore {
 
 var _ store.ScenarioStore = (*ScenarioStore)(nil)
 
-// SaveRun stores a ScenarioRun, generating an ID if needed.
+// SaveRun stores a ScenarioRun, generating an ID if needed. If run.ID is
+// already set and the run exists, it merges: status and FinishedAt are updated
+// but existing Results are preserved (incremental results use SaveResult).
 func (s *ScenarioStore) SaveRun(_ context.Context, run domain.ScenarioRun) (string, error) {
 	if run.ID == "" {
 		run.ID = uuid.NewString()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	existing, exists := s.runs[run.ID]
+	if exists {
+		// Update path: keep existing results; update status fields only.
+		existing.Status = run.Status
+		if !run.FinishedAt.IsZero() {
+			existing.FinishedAt = run.FinishedAt
+		}
+		// If caller supplies new results (legacy full-save path), append them.
+		if len(run.Results) > 0 {
+			existing.Results = run.Results
+		}
+		s.runs[run.ID] = existing
+		return run.ID, nil
+	}
 	s.runs[run.ID] = run
 	return run.ID, nil
 }
@@ -236,6 +252,19 @@ func (s *ScenarioStore) RunsForEngagement(_ context.Context, engagementID string
 		}
 	}
 	return out, nil
+}
+
+// SaveResult appends a per-technique Result to an existing run.
+func (s *ScenarioStore) SaveResult(_ context.Context, runID string, result domain.Result) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		return fmt.Errorf("scenario_run %s: %w", runID, store.ErrNotFound)
+	}
+	run.Results = append(run.Results, result)
+	s.runs[runID] = run
+	return nil
 }
 
 // --- CredentialStore ---

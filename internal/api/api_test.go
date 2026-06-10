@@ -587,3 +587,180 @@ func TestSSEReceivesDeployEvent(t *testing.T) {
 		t.Log("SSE events not received synchronously (expected in httptest with buffering); deploy cycle is covered by TestDeployLiveCycle_PollUntilLive")
 	}
 }
+
+// TestStartRunAndGetRun exercises the POST /runs and GET /runs/{id} endpoints
+// with an authorized engagement.
+func TestStartRunAndGetRun(t *testing.T) {
+	router, _, _ := buildRouter(t)
+	engID := createEngagementViaAPI(t, router)
+	authorizeEngagementViaAPI(t, router, engID)
+
+	// Start a run.
+	startResp := doRequest(t, router, "POST", "/api/v1/engagements/"+engID+"/runs", map[string]any{
+		"scenarioId": "apt29",
+	})
+	if startResp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(startResp.Body)
+		t.Fatalf("start run: want 202, got %d: %s", startResp.StatusCode, b)
+	}
+	var startResult map[string]any
+	decodeBody(t, startResp, &startResult)
+	runID, ok := startResult["runId"].(string)
+	if !ok || runID == "" {
+		t.Fatalf("expected non-empty runId in response, got %v", startResult)
+	}
+
+	// Poll until run completes.
+	var run map[string]any
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		getResp := doRequest(t, router, "GET", "/api/v1/runs/"+runID, nil)
+		if getResp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(getResp.Body)
+			t.Fatalf("get run: want 200, got %d: %s", getResp.StatusCode, b)
+		}
+		var result map[string]any
+		decodeBody(t, getResp, &result)
+		run = result["run"].(map[string]any)
+		if run["status"] != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if run["status"] == "running" {
+		t.Error("run did not complete within timeout")
+	}
+	if run["status"] != "success" {
+		t.Errorf("run status: want success, got %v", run["status"])
+	}
+}
+
+// TestStartRun_DraftEngagement_Returns403 verifies CanDeploy gate on emulation.
+func TestStartRun_DraftEngagement_Returns403(t *testing.T) {
+	router, _, _ := buildRouter(t)
+	engID := createEngagementViaAPI(t, router)
+	// NOT authorized — draft engagement.
+
+	resp := doRequest(t, router, "POST", "/api/v1/engagements/"+engID+"/runs", map[string]any{
+		"scenarioId": "apt29",
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("start run on draft: want 403, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// TestCoverageEndpoint exercises GET /engagements/{id}/coverage.
+func TestCoverageEndpoint(t *testing.T) {
+	router, _, _ := buildRouter(t)
+	engID := createEngagementViaAPI(t, router)
+	authorizeEngagementViaAPI(t, router, engID)
+
+	// Start a run and wait for completion.
+	startResp := doRequest(t, router, "POST", "/api/v1/engagements/"+engID+"/runs", map[string]any{
+		"scenarioId": "apt29",
+	})
+	if startResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("start run: want 202, got %d", startResp.StatusCode)
+	}
+	var startResult map[string]any
+	decodeBody(t, startResp, &startResult)
+	runID := startResult["runId"].(string)
+
+	// Wait for run to complete.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		getResp := doRequest(t, router, "GET", "/api/v1/runs/"+runID, nil)
+		var r map[string]any
+		decodeBody(t, getResp, &r)
+		run := r["run"].(map[string]any)
+		if run["status"] != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Fetch coverage.
+	covResp := doRequest(t, router, "GET", "/api/v1/engagements/"+engID+"/coverage", nil)
+	if covResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(covResp.Body)
+		t.Fatalf("get coverage: want 200, got %d: %s", covResp.StatusCode, b)
+	}
+	var cov map[string]any
+	decodeBody(t, covResp, &cov)
+
+	if cov["engagementId"] != engID {
+		t.Errorf("coverage engagementId: want %s, got %v", engID, cov["engagementId"])
+	}
+	tactics, ok := cov["tactics"].([]any)
+	if !ok || len(tactics) == 0 {
+		t.Error("expected non-empty tactics in coverage response")
+	}
+	if cov["totalTechniques"] == nil {
+		t.Error("expected totalTechniques field")
+	}
+}
+
+// TestNavigatorEndpoint exercises GET /engagements/{id}/navigator and validates
+// the ATT&CK Navigator layer schema essentials.
+func TestNavigatorEndpoint(t *testing.T) {
+	router, _, _ := buildRouter(t)
+	engID := createEngagementViaAPI(t, router)
+	authorizeEngagementViaAPI(t, router, engID)
+
+	// Start a run and wait for completion.
+	startResp := doRequest(t, router, "POST", "/api/v1/engagements/"+engID+"/runs", map[string]any{
+		"scenarioId": "fin7",
+	})
+	if startResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("start run: want 202, got %d", startResp.StatusCode)
+	}
+	var startResult map[string]any
+	decodeBody(t, startResp, &startResult)
+	runID := startResult["runId"].(string)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		getResp := doRequest(t, router, "GET", "/api/v1/runs/"+runID, nil)
+		var r map[string]any
+		decodeBody(t, getResp, &r)
+		run := r["run"].(map[string]any)
+		if run["status"] != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Fetch navigator layer.
+	navResp := doRequest(t, router, "GET", "/api/v1/engagements/"+engID+"/navigator", nil)
+	if navResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(navResp.Body)
+		t.Fatalf("get navigator: want 200, got %d: %s", navResp.StatusCode, b)
+	}
+	var layer map[string]any
+	decodeBody(t, navResp, &layer)
+
+	// Validate Navigator layer schema essentials.
+	if layer["domain"] != "enterprise-attack" {
+		t.Errorf("navigator domain: want enterprise-attack, got %v", layer["domain"])
+	}
+	if layer["name"] == nil || layer["name"] == "" {
+		t.Error("navigator: expected non-empty name")
+	}
+	techniques, ok := layer["techniques"].([]any)
+	if !ok || len(techniques) == 0 {
+		t.Error("navigator: expected non-empty techniques array")
+	}
+	// Every technique must have a non-empty techniqueID.
+	for i, nt := range techniques {
+		tech := nt.(map[string]any)
+		if tech["techniqueID"] == nil || tech["techniqueID"] == "" {
+			t.Errorf("navigator technique[%d]: empty techniqueID", i)
+		}
+	}
+	// Versions must be present.
+	if layer["versions"] == nil {
+		t.Error("navigator: expected versions field")
+	}
+}

@@ -386,3 +386,34 @@ func (h *handlers) getRun(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": runToJSON(run)})
 }
+
+// ---------- Coverage + Navigator ----------
+
+func (h *handlers) getCoverage(w http.ResponseWriter, r *http.Request) {
+	engagementID := chi.URLParam(r, "id")
+	coverage, err := h.svc.Emulation.GetCoverage(r.Context(), engagementID)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, coverage)
+}
+
+func (h *handlers) getNavigator(w http.ResponseWriter, r *http.Request) {
+	engagementID := chi.URLParam(r, "id")
+
+	// Fetch engagement name for the Navigator layer name.
+	layerName := "RInfra Coverage Export"
+	if eng, err := h.svc.Engagement.Get(r.Context(), engagementID); err == nil {
+		layerName = fmt.Sprintf("RInfra · %s · %s", eng.Client, eng.Codename)
+	}
+
+	layer, err := h.svc.Emulation.GetNavigatorLayer(r.Context(), engagementID, layerName)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	// The Navigator layer is delivered as JSON (application/json for download).
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="navigator-%s.json"`, engagementID))
+	writeJSON(w, http.StatusOK, layer)
+}

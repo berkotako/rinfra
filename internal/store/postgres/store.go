@@ -421,8 +421,26 @@ func NewScenarioStore(pool *pgxpool.Pool) *ScenarioStore {
 
 var _ store.ScenarioStore = (*ScenarioStore)(nil)
 
-// SaveRun inserts a ScenarioRun and all its Results in a transaction.
+// SaveRun inserts or updates a ScenarioRun. If run.ID is empty a new row is
+// inserted and the generated UUID is returned. If run.ID is non-empty the row
+// is updated (status, finished_at); Results in the run are inserted only when
+// the run is new (incremental results use SaveResult instead).
 func (s *ScenarioStore) SaveRun(ctx context.Context, run domain.ScenarioRun) (string, error) {
+	// Update path: when ID is already set, update the run status only.
+	if run.ID != "" {
+		_, err := s.pool.Exec(ctx, `
+			UPDATE scenario_runs
+			SET status=$2, finished_at=$3
+			WHERE id=$1`,
+			run.ID, string(run.Status), nullTime(run.FinishedAt),
+		)
+		if err != nil {
+			return "", fmt.Errorf("update scenario_run %s: %w", run.ID, err)
+		}
+		return run.ID, nil
+	}
+
+	// Insert path: create the run row and any results already present.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("begin SaveRun tx: %w", err)
@@ -504,6 +522,21 @@ func (s *ScenarioStore) GetRun(ctx context.Context, id string) (domain.ScenarioR
 		run.Results = append(run.Results, r)
 	}
 	return run, rows.Err()
+}
+
+// SaveResult appends a single per-technique Result to an existing run.
+func (s *ScenarioStore) SaveResult(ctx context.Context, runID string, result domain.Result) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO technique_results
+		  (run_id, attack_id, status, output, started_at, finished_at, err)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		runID, result.TechniqueAttackID, string(result.Status), result.Output,
+		nullTime(result.StartedAt), nullTime(result.FinishedAt), result.Err,
+	)
+	if err != nil {
+		return fmt.Errorf("insert technique_result for run %s: %w", runID, err)
+	}
+	return nil
 }
 
 // RunsForEngagement returns all runs for an engagement ordered by started_at.

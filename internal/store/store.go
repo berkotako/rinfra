@@ -42,6 +42,10 @@ type ScenarioStore interface {
 	SaveRun(ctx context.Context, run domain.ScenarioRun) (string, error)
 	GetRun(ctx context.Context, id string) (domain.ScenarioRun, error)
 	RunsForEngagement(ctx context.Context, engagementID string) ([]domain.ScenarioRun, error)
+	// SaveResult appends a per-technique Result to a run. This enables
+	// incremental persistence as each technique completes rather than requiring
+	// a full SaveRun after the run finishes.
+	SaveResult(ctx context.Context, runID string, result domain.Result) error
 }
 
 // CredentialStore persists envelope-encrypted credentials keyed by engagement

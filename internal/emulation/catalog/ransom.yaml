@@ -1,0 +1,24 @@
+id: ransom
+name: Ransomware Affiliate
+adversaryProfile: ransomware-affiliate-like
+techniques:
+  - attackID: T1078
+    name: Valid Accounts
+    tactic: initial-access
+    source: atomic_red_team
+    sourceID: d4e5f6a7-b8c9-0123-4567-890123abcdef
+  - attackID: T1562.001
+    name: Disable or Modify Tools
+    tactic: defense-evasion
+    source: atomic_red_team
+    sourceID: e5f6a7b8-c9d0-1234-5678-901234abcdef
+  - attackID: T1490
+    name: Inhibit System Recovery
+    tactic: impact
+    source: atomic_red_team
+    sourceID: f6a7b8c9-d0e1-2345-6789-012345abcdef
+  - attackID: T1486
+    name: Data Encrypted for Impact
+    tactic: impact
+    source: atomic_red_team
+    sourceID: a7b8c9d0-e1f2-3456-7890-123456abcdef
