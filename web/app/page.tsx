@@ -1,7 +1,8 @@
 "use client";
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import Link from "next/link";
 import { Icons } from "../components/icons";
+import { useStore } from "../lib/store";
 
 const REPO = "https://github.com/berkotako/rinfra";
 
@@ -237,13 +238,28 @@ const SCREENS: { href: string; icon: keyof typeof Icons; title: string; desc: st
 const STACK = ["Go 1.24", "Next.js", "React", "Pulumi", "Postgres", "chi", "SSE", "AES-256-GCM", "MITRE ATT&CK"];
 
 export default function Home() {
-  // Force light theme on the landing page; restore the app's theme on leave.
+  // Track the user's stored theme so we can restore it when leaving the page.
+  const { preferences } = useStore();
+  const themeRef = useRef(preferences.theme);
+  themeRef.current = preferences.theme;
+
+  // Force the landing page to light, and KEEP it light. A one-shot set loses a
+  // race: StoreProvider loads localStorage after mount and its apply-effect
+  // (an ancestor effect, so it runs after this one) reasserts data-theme.
+  // A MutationObserver re-forces light whenever anything writes data-theme,
+  // so a returning dark-mode user still sees a light landing. On navigate-away
+  // we restore the user's actual current theme (dark if that's their pref).
   useEffect(() => {
     const html = document.documentElement;
-    const prev = html.getAttribute("data-theme");
-    html.setAttribute("data-theme", "");
+    const forceLight = () => {
+      if (html.getAttribute("data-theme")) html.setAttribute("data-theme", "");
+    };
+    forceLight();
+    const obs = new MutationObserver(forceLight);
+    obs.observe(html, { attributes: true, attributeFilter: ["data-theme"] });
     return () => {
-      if (prev) html.setAttribute("data-theme", prev);
+      obs.disconnect();
+      html.setAttribute("data-theme", themeRef.current === "dark" ? "dark" : "");
     };
   }, []);
 
