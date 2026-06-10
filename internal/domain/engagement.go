@@ -25,6 +25,7 @@ const (
 // fully-qualified domains. Anything not in scope must be rejected.
 type Scope struct {
 	AllowedTargets []string // CIDRs and/or domains the engagement may target
+	Exclusions     []string // CIDRs and/or domains explicitly excluded from scope
 	Notes          string
 }
 
@@ -46,17 +47,30 @@ type Authorization struct {
 	ExpiresAt    time.Time
 }
 
+// EngagementType classifies the kind of assessment, informing how results are
+// reported and which emulation scenarios are appropriate.
+type EngagementType string
+
+const (
+	EngagementTypeRedTeam    EngagementType = "red_team"
+	EngagementTypePurpleTeam EngagementType = "purple_team"
+	EngagementTypePenTest    EngagementType = "pentest"
+)
+
 // Engagement is the top-level unit of work. Every Node, ScenarioRun, and
 // audit.Event is bound to an Engagement.
 type Engagement struct {
-	ID            string
-	Client        string
-	Status        EngagementStatus
-	Scope         Scope
-	RoE           RulesOfEngagement
-	Authorization Authorization
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID             string
+	Client         string
+	Codename       string // short operational name, e.g. "OPERATION COBALT"
+	LeadOperator   string // primary operator responsible for the engagement
+	EngagementType EngagementType
+	Status         EngagementStatus
+	Scope          Scope
+	RoE            RulesOfEngagement
+	Authorization  Authorization
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Sentinel errors returned by CanDeploy so callers can branch on cause.

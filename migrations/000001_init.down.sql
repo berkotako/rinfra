@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS technique_results;
+DROP TABLE IF EXISTS scenario_runs;
+DROP TABLE IF EXISTS edges;
+DROP TABLE IF EXISTS nodes;
+DROP TABLE IF EXISTS engagements;

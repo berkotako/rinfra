@@ -1,0 +1,27 @@
+# Development Postgres instance for RInfra.
+# Use: make db-up   → starts Postgres on :5432
+#      make db-down  → stops and removes the container
+#      make migrate-up / migrate-down → requires the migrate CLI.
+#
+# Install golang-migrate CLI:
+#   go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.1
+#   or download a release binary from https://github.com/golang-migrate/migrate/releases
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: rinfra
+      POSTGRES_PASSWORD: rinfra
+      POSTGRES_DB: rinfra
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rinfra"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
