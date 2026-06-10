@@ -1,0 +1,44 @@
+id: apt29
+name: "APT29 — Cozy Bear"
+adversaryProfile: apt29-like
+techniques:
+  - attackID: T1566.002
+    name: Spearphishing Link
+    tactic: initial-access
+    source: atomic_red_team
+    sourceID: f494f14a-7574-4538-9fbc-8d30afb6cbcb
+  - attackID: T1059.001
+    name: PowerShell
+    tactic: execution
+    source: atomic_red_team
+    sourceID: a21bb3e0-f861-400e-a4c6-b8eb699c6c5e
+  - attackID: T1547.001
+    name: Registry Run Keys / Startup Folder
+    tactic: persistence
+    source: atomic_red_team
+    sourceID: 9efb1ea7-c37b-4595-a9d1-d58f4d873f56
+  - attackID: T1055
+    name: Process Injection
+    tactic: defense-evasion
+    source: atomic_red_team
+    sourceID: 74496461-11cb-44fe-a508-e9b62c9a6a74
+  - attackID: T1003.001
+    name: LSASS Memory
+    tactic: credential-access
+    source: atomic_red_team
+    sourceID: 2f7682c6-2b7d-461e-b2bc-07a1a7f2e5e1
+  - attackID: T1018
+    name: Remote System Discovery
+    tactic: discovery
+    source: atomic_red_team
+    sourceID: b9d2e8b4-2db3-4ea4-8b26-bb9e67b7ea9d
+  - attackID: T1021.001
+    name: Remote Desktop Protocol
+    tactic: lateral-movement
+    source: atomic_red_team
+    sourceID: 2f3a9a4b-2c3a-4a6e-b8f0-20a74e5d8e30
+  - attackID: T1567.002
+    name: Exfiltration to Cloud Storage
+    tactic: exfiltration
+    source: atomic_red_team
+    sourceID: c7b8e9d1-4a3e-4d12-8f92-b7e3a9c10f15

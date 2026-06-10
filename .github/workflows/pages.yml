@@ -1,0 +1,81 @@
+name: Deploy demo to GitHub Pages
+
+# Builds the web console as a static site and publishes it to GitHub Pages.
+# The site runs in self-contained mock mode (no backend), so it is a fully
+# interactive demo.
+#
+# Setup (one-time): in the repo, Settings → Pages → Build and deployment →
+# Source: "GitHub Actions". After that, this workflow deploys on every push to
+# main, or on demand via the "Run workflow" button (workflow_dispatch).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Allow the workflow to publish Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one concurrent Pages deployment; don't cancel an in-progress one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the repo's Pages configuration. Pages must already be enabled with
+      # Source: "GitHub Actions" (Settings → Pages). Programmatic enablement
+      # (enablement: true) is intentionally NOT used here — the Actions token
+      # cannot create a Pages site on this repo (private repos require a paid
+      # plan and the token is denied site creation), so it must be enabled once
+      # by hand in Settings.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build static export
+        env:
+          # Project Pages are served from /<repo>; set the base path so assets
+          # and links resolve. Change this if the repository is renamed.
+          NEXT_PUBLIC_BASE_PATH: /rinfra
+        run: npm run build
+
+      - name: Disable Jekyll (serve _next/ assets verbatim)
+        run: touch out/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

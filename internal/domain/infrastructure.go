@@ -52,6 +52,19 @@ type NodeSpec struct {
 	Size        string // provider-specific instance size
 	C2Framework string // only for NodeC2Server, e.g. "sliver", "mythic"
 	ProfileName string // redirector/listener profile to apply
+	// Subtype disambiguates within a NodeType, e.g. "https", "dns", "http" for redirectors.
+	Subtype string
+}
+
+// NodeCanvas holds the canvas-level state for a node. These fields are
+// persisted with the topology so the UI can round-trip the diagram faithfully.
+type NodeCanvas struct {
+	Name         string  // operator-assigned label shown on the canvas card
+	Listener     string  // listener profile or bind address for C2 nodes
+	FrontDomain  string  // categorized domain used for traffic fronting
+	CostEstimate float64 // estimated monthly cloud cost in USD
+	X            int     // canvas X position (pixels)
+	Y            int     // canvas Y position (pixels)
 }
 
 // Node is a provisioned (or to-be-provisioned) piece of infrastructure.
@@ -59,6 +72,7 @@ type Node struct {
 	ID           string
 	EngagementID string
 	Spec         NodeSpec
+	Canvas       NodeCanvas
 	Status       NodeStatus
 	Health       Health
 	PublicIP     string
