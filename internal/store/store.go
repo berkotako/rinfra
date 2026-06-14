@@ -50,6 +50,14 @@ type ScenarioStore interface {
 	SaveResult(ctx context.Context, runID string, result domain.Result) error
 }
 
+// UserScenarioStore persists operator-authored emulation scenarios (distinct
+// from the code-shipped catalog). Techniques are stored as a JSON document.
+type UserScenarioStore interface {
+	Create(ctx context.Context, s domain.Scenario) (string, error)
+	Get(ctx context.Context, id string) (domain.Scenario, error)
+	List(ctx context.Context) ([]domain.Scenario, error)
+}
+
 // CredentialStore persists envelope-encrypted credentials keyed by engagement
 // and provider. The raw ciphertext is write-only from the caller's perspective;
 // reads return only metadata. The Postgres implementation holds the actual bytes.

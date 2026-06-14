@@ -60,9 +60,10 @@ interface StoreState {
   toasts: Toast[];
   pushToast: (msg: string, kind?: ToastKind) => void;
 
-  // Scenarios — built-in catalog plus operator-authored scenarios (session-local).
+  // Scenarios — built-in catalog plus operator-authored scenarios. In REST mode
+  // authored scenarios are persisted via the backend; in mock mode session-local.
   scenarios: Scenario[];
-  addScenario: (s: Scenario) => void;
+  addScenario: (s: Scenario) => Promise<Scenario>;
 
   // API-connected actions (no-ops / local simulation in mock mode)
   apiCreateEngagement: (params: CreateEngagementParams) => Promise<Engagement>;
@@ -343,12 +344,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const scenarios = useMemo(() => [...SCENARIOS, ...customScenarios], [customScenarios]);
 
   const addScenario = useCallback(
-    (s: Scenario) => {
+    async (s: Scenario): Promise<Scenario> => {
+      if (rest) {
+        const created = await client.createScenario(s);
+        setCustomScenarios((list) => [...list, created]);
+        pushToast(`Scenario created — ${created.name}`, "ok");
+        return created;
+      }
       setCustomScenarios((list) => [...list, s]);
       pushToast(`Scenario created — ${s.name}`, "ok");
+      return s;
     },
-    [pushToast]
+    [rest, client, pushToast]
   );
+
+  // REST mode: load operator-authored scenarios (those not in the built-in set).
+  useEffect(() => {
+    if (!rest) return;
+    client
+      .listScenarios()
+      .then((all) => {
+        const builtin = new Set(SCENARIOS.map((s) => s.id));
+        setCustomScenarios(all.filter((s) => !builtin.has(s.id)));
+      })
+      .catch(() => undefined);
+  }, [rest, client]);
 
   const activeEngagement =
     engagements.find((e) => e.id === activeEngagementId) ?? engagements[0] ?? ENGAGEMENTS[0];

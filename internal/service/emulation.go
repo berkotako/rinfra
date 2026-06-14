@@ -15,12 +15,13 @@ import (
 
 // EmulationService runs adversary-emulation scenarios and tracks their results.
 type EmulationService struct {
-	engagements store.EngagementStore
-	scenarios   store.ScenarioStore
-	audit       audit.Logger
-	orch        *emulation.Orchestrator
-	hub         *Hub
-	resolver    OperatorResolver
+	engagements   store.EngagementStore
+	scenarios     store.ScenarioStore
+	userScenarios store.UserScenarioStore // operator-authored scenarios; may be nil
+	audit         audit.Logger
+	orch          *emulation.Orchestrator
+	hub           *Hub
+	resolver      OperatorResolver
 }
 
 // NewEmulationService constructs an EmulationService with a FakeResolver
@@ -47,9 +48,65 @@ func (s *EmulationService) WithResolver(r OperatorResolver) {
 	s.resolver = r
 }
 
-// ListScenarios returns the built-in scenario catalog.
+// WithUserScenarios injects the store for operator-authored scenarios. When
+// unset, CreateScenario is unavailable and only the built-in catalog is listed.
+func (s *EmulationService) WithUserScenarios(store store.UserScenarioStore) {
+	s.userScenarios = store
+}
+
+// ListScenarios returns the built-in catalog plus any operator-authored
+// scenarios, the latter newest-first after the catalog.
 func (s *EmulationService) ListScenarios() []domain.Scenario {
-	return catalog.List()
+	out := catalog.List()
+	if s.userScenarios != nil {
+		if custom, err := s.userScenarios.List(context.Background()); err == nil {
+			out = append(out, custom...)
+		}
+	}
+	return out
+}
+
+// CreateScenario persists an operator-authored scenario and returns it with its
+// generated ID. Validation rejects an empty name or an empty technique list.
+func (s *EmulationService) CreateScenario(ctx context.Context, sc domain.Scenario, actor string) (domain.Scenario, error) {
+	if s.userScenarios == nil {
+		return domain.Scenario{}, fmt.Errorf("scenario authoring not enabled")
+	}
+	if sc.Name == "" {
+		return domain.Scenario{}, fmt.Errorf("scenario name is required")
+	}
+	if len(sc.Techniques) == 0 {
+		return domain.Scenario{}, fmt.Errorf("scenario must include at least one technique")
+	}
+	sc.CreatedAt = time.Now().UTC()
+	id, err := s.userScenarios.Create(ctx, sc)
+	if err != nil {
+		return domain.Scenario{}, fmt.Errorf("persist scenario: %w", err)
+	}
+	sc.ID = id
+
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "scenario.create",
+		Target: id,
+		Detail: fmt.Sprintf("name=%q techniques=%d", sc.Name, len(sc.Techniques)),
+		At:     time.Now().UTC(),
+	})
+	return sc, nil
+}
+
+// lookupScenario resolves a scenario by ID from the catalog, then the
+// operator-authored store.
+func (s *EmulationService) lookupScenario(ctx context.Context, id string) (domain.Scenario, bool) {
+	if sc, ok := catalog.Get(id); ok {
+		return sc, true
+	}
+	if s.userScenarios != nil {
+		if sc, err := s.userScenarios.Get(ctx, id); err == nil {
+			return sc, true
+		}
+	}
+	return domain.Scenario{}, false
 }
 
 // Start begins running a scenario against an engagement. It gates on CanDeploy,
@@ -64,7 +121,7 @@ func (s *EmulationService) Start(ctx context.Context, engagementID, scenarioID, 
 		return "", fmt.Errorf("emulation start refused: %w", err)
 	}
 
-	sc, ok := catalog.Get(scenarioID)
+	sc, ok := s.lookupScenario(ctx, scenarioID)
 	if !ok {
 		return "", fmt.Errorf("scenario %q: %w", scenarioID, store.ErrNotFound)
 	}

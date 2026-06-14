@@ -157,6 +157,54 @@ type startRunRequest struct {
 	ScenarioID string `json:"scenarioId"`
 }
 
+type createScenarioRequest struct {
+	Name       string `json:"name"`
+	Actor      string `json:"actor"`
+	Desc       string `json:"desc"`
+	Techniques []struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Tactic string `json:"tactic"`
+	} `json:"techniques"`
+}
+
+func (r createScenarioRequest) toDomain() domain.Scenario {
+	techniques := make([]domain.Technique, 0, len(r.Techniques))
+	for _, t := range r.Techniques {
+		techniques = append(techniques, domain.Technique{
+			AttackID: t.ID,
+			Name:     t.Name,
+			Tactic:   t.Tactic,
+			Source:   domain.SourceAtomicRedTeam,
+		})
+	}
+	return domain.Scenario{
+		Name:             r.Name,
+		AdversaryProfile: r.Actor,
+		Description:      r.Desc,
+		Techniques:       techniques,
+	}
+}
+
+// scenarioToJSON serialises a Scenario for API responses.
+func scenarioToJSON(s domain.Scenario) map[string]any {
+	techniques := make([]map[string]any, 0, len(s.Techniques))
+	for _, t := range s.Techniques {
+		techniques = append(techniques, map[string]any{
+			"id":     t.AttackID,
+			"name":   t.Name,
+			"tactic": t.Tactic,
+		})
+	}
+	return map[string]any{
+		"id":         s.ID,
+		"name":       s.Name,
+		"actor":      s.AdversaryProfile,
+		"desc":       s.Description,
+		"techniques": techniques,
+	}
+}
+
 // ---------- Response types (JSON serialisation) ----------
 
 func engagementToJSON(e domain.Engagement) map[string]any {

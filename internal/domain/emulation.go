@@ -30,12 +30,15 @@ const (
 )
 
 // Scenario is an ordered adversary-emulation plan, typically modeling a known
-// threat-actor profile.
+// threat-actor profile. Built-in scenarios ship in the catalog; operators may
+// also author their own, which are persisted via store.UserScenarioStore.
 type Scenario struct {
 	ID               string
 	Name             string
 	AdversaryProfile string // e.g. "APT29-like", "ransomware-affiliate-like"
+	Description      string // operator-facing summary (optional)
 	Techniques       []Technique
+	CreatedAt        time.Time // set for operator-authored scenarios
 }
 
 // ExecutionStatus is the outcome of running a single technique.

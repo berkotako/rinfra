@@ -3,7 +3,7 @@ import React from "react";
 import { Icons } from "../icons";
 import { Modal } from "../ui";
 import { CopyButton } from "../c2/ManualAccess";
-import { c2SupportsTactic, C2_DELIVERY } from "../../lib/data";
+import { c2SupportsTactic, C2_DELIVERY, techniqueById } from "../../lib/data";
 import type { Technique, DeployedC2 } from "../../lib/types";
 
 // ATT&CK technique page URL: T1059.001 -> /techniques/T1059/001
@@ -20,8 +20,12 @@ export default function TechniqueDetail({
   c2?: DeployedC2 | null;
   onClose: () => void;
 }) {
+  // Authored / REST-fetched scenarios may carry only id/name/tactic; fall back to
+  // the library for the description and procedure commands.
+  const fromLib = techniqueById(technique.id);
+  const description = technique.description ?? fromLib?.description;
+  const commands = technique.commands ?? fromLib?.commands ?? [];
   const auto = !!c2 && c2SupportsTactic(c2.framework, technique.tactic);
-  const commands = technique.commands ?? [];
 
   return (
     <Modal open onClose={onClose} width={560} label="Technique detail">
@@ -63,11 +67,11 @@ export default function TechniqueDetail({
       </div>
 
       <div className="scroll" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
-        {technique.description && (
+        {description && (
           <div>
             <div className="eyebrow" style={{ marginBottom: 8 }}>What it is</div>
             <div style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.55 }}>
-              {technique.description}
+              {description}
             </div>
           </div>
         )}
