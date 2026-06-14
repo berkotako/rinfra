@@ -49,8 +49,9 @@ export default function EmulationScreen() {
   const scenario = scenarios.find((s) => s.id === scenarioId) || scenarios[0];
 
   const handleCreateScenario = (s: Scenario) => {
-    addScenario(s);
-    setScenarioId(s.id);
+    addScenario(s)
+      .then((saved) => setScenarioId(saved.id))
+      .catch(() => undefined);
     setBuilderOpen(false);
   };
 

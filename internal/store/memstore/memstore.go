@@ -9,6 +9,7 @@ package memstore
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -283,6 +284,58 @@ func (s *ScenarioStore) SaveResult(_ context.Context, runID string, result domai
 	run.Results = append(run.Results, result)
 	s.runs[runID] = run
 	return nil
+}
+
+// --- UserScenarioStore ---
+
+// UserScenarioStore is the in-memory implementation of store.UserScenarioStore.
+type UserScenarioStore struct {
+	mu        sync.RWMutex
+	scenarios map[string]domain.Scenario
+}
+
+// NewUserScenarioStore returns an empty UserScenarioStore.
+func NewUserScenarioStore() *UserScenarioStore {
+	return &UserScenarioStore{scenarios: make(map[string]domain.Scenario)}
+}
+
+var _ store.UserScenarioStore = (*UserScenarioStore)(nil)
+
+// Create stores an operator-authored scenario, generating an ID if needed.
+func (s *UserScenarioStore) Create(_ context.Context, sc domain.Scenario) (string, error) {
+	if sc.ID == "" {
+		sc.ID = uuid.NewString()
+	}
+	if sc.CreatedAt.IsZero() {
+		sc.CreatedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scenarios[sc.ID] = sc
+	return sc.ID, nil
+}
+
+// Get returns a stored scenario by ID.
+func (s *UserScenarioStore) Get(_ context.Context, id string) (domain.Scenario, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sc, ok := s.scenarios[id]
+	if !ok {
+		return domain.Scenario{}, fmt.Errorf("scenario %s: %w", id, store.ErrNotFound)
+	}
+	return sc, nil
+}
+
+// List returns all stored scenarios, newest first.
+func (s *UserScenarioStore) List(_ context.Context) ([]domain.Scenario, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Scenario, 0, len(s.scenarios))
+	for _, sc := range s.scenarios {
+		out = append(out, sc)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
 }
 
 // --- CredentialStore ---

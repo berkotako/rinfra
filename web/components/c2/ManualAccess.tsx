@@ -1,6 +1,8 @@
 "use client";
 import React, { useState } from "react";
 import { Icons } from "../icons";
+import { useStore } from "../../lib/store";
+import WebShell from "./WebShell";
 import type { DeployedC2, OperatorMode } from "../../lib/types";
 
 const MODE_PILL: Record<
@@ -89,9 +91,14 @@ export function OperatorStatus({ d }: { d: DeployedC2 }) {
 
 // ManualAccessControls — native-client connect path: ssh tunnel + instructions.
 export function ManualAccessControls({ d }: { d: DeployedC2 }) {
+  const { activeEngagementId } = useStore();
   const [tunnel, setTunnel] = useState(false);
+  const [shell, setShell] = useState(false);
   return (
     <div>
+      {shell && (
+        <WebShell d={d} engagementId={activeEngagementId} onClose={() => setShell(false)} />
+      )}
       <div className="eyebrow" style={{ marginBottom: 10 }}>
         Manual access
       </div>
@@ -144,6 +151,14 @@ export function ManualAccessControls({ d }: { d: DeployedC2 }) {
               <Icons.Link size={14} /> Open tunnel
             </>
           )}
+        </button>
+        <button
+          className="btn"
+          onClick={() => setShell(true)}
+          disabled={d.status !== "live"}
+          title="Open an in-browser operator shell over the tunnel"
+        >
+          <Icons.Terminal size={14} /> Web shell
         </button>
         {tunnel && (
           <span className="pill ok" style={{ height: 22 }}>

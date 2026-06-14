@@ -609,6 +609,83 @@ func (s *ScenarioStore) RunsForEngagement(ctx context.Context, engagementID stri
 	return out, rows.Err()
 }
 
+// --- UserScenarioStore ---
+
+// UserScenarioStore is the Postgres implementation of store.UserScenarioStore.
+type UserScenarioStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewUserScenarioStore returns a new UserScenarioStore backed by pool.
+func NewUserScenarioStore(pool *pgxpool.Pool) *UserScenarioStore {
+	return &UserScenarioStore{pool: pool}
+}
+
+var _ store.UserScenarioStore = (*UserScenarioStore)(nil)
+
+// Create inserts an operator-authored scenario, storing techniques as JSONB.
+func (s *UserScenarioStore) Create(ctx context.Context, sc domain.Scenario) (string, error) {
+	techniques, err := json.Marshal(sc.Techniques)
+	if err != nil {
+		return "", fmt.Errorf("marshal techniques: %w", err)
+	}
+	var id string
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO user_scenarios (name, adversary_profile, description, techniques)
+		VALUES ($1,$2,$3,$4)
+		RETURNING id`,
+		sc.Name, sc.AdversaryProfile, sc.Description, techniques,
+	).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("insert user_scenario: %w", err)
+	}
+	return id, nil
+}
+
+func (s *UserScenarioStore) scanScenario(row pgx.Row) (domain.Scenario, error) {
+	var sc domain.Scenario
+	var techniques []byte
+	if err := row.Scan(&sc.ID, &sc.Name, &sc.AdversaryProfile, &sc.Description, &techniques, &sc.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Scenario{}, fmt.Errorf("user_scenario: %w", store.ErrNotFound)
+		}
+		return domain.Scenario{}, fmt.Errorf("scan user_scenario: %w", err)
+	}
+	if len(techniques) > 0 {
+		if err := json.Unmarshal(techniques, &sc.Techniques); err != nil {
+			return domain.Scenario{}, fmt.Errorf("unmarshal techniques: %w", err)
+		}
+	}
+	return sc, nil
+}
+
+// Get returns a stored scenario by ID.
+func (s *UserScenarioStore) Get(ctx context.Context, id string) (domain.Scenario, error) {
+	return s.scanScenario(s.pool.QueryRow(ctx, `
+		SELECT id, name, adversary_profile, description, techniques, created_at
+		FROM user_scenarios WHERE id=$1`, id))
+}
+
+// List returns all stored scenarios, newest first.
+func (s *UserScenarioStore) List(ctx context.Context) ([]domain.Scenario, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, adversary_profile, description, techniques, created_at
+		FROM user_scenarios ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("query user_scenarios: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Scenario
+	for rows.Next() {
+		sc, err := s.scanScenario(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
 // --- CredentialStore ---
 
 // CredentialStore is the Postgres implementation of store.CredentialStore.

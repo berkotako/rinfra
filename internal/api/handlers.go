@@ -415,22 +415,22 @@ func (h *handlers) listScenarios(w http.ResponseWriter, r *http.Request) {
 	scenarios := h.svc.Emulation.ListScenarios()
 	out := make([]map[string]any, 0, len(scenarios))
 	for _, s := range scenarios {
-		techniques := make([]map[string]any, 0, len(s.Techniques))
-		for _, t := range s.Techniques {
-			techniques = append(techniques, map[string]any{
-				"id":     t.AttackID,
-				"name":   t.Name,
-				"tactic": t.Tactic,
-			})
-		}
-		out = append(out, map[string]any{
-			"id":         s.ID,
-			"name":       s.Name,
-			"actor":      s.AdversaryProfile,
-			"techniques": techniques,
-		})
+		out = append(out, scenarioToJSON(s))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"scenarios": out})
+}
+
+func (h *handlers) createScenario(w http.ResponseWriter, r *http.Request) {
+	var req createScenarioRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	created, err := h.svc.Emulation.CreateScenario(r.Context(), req.toDomain(), actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"scenario": scenarioToJSON(created)})
 }
 
 // ---------- Runs ----------

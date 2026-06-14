@@ -10,6 +10,7 @@ import (
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/service"
 	"github.com/rinfra/rinfra/internal/store"
+	"github.com/rinfra/rinfra/internal/store/memstore"
 )
 
 // ---------- Emulation service tests ----------
@@ -462,5 +463,79 @@ func TestGetNavigatorLayer(t *testing.T) {
 		if nt.TechniqueID == "T1566.002" && nt.Score != 2 {
 			t.Errorf("T1566.002 score: want 2 (executed), got %d", nt.Score)
 		}
+	}
+}
+
+// TestCreateScenario_PersistAndRun verifies operator-authored scenarios are
+// persisted, surfaced by ListScenarios, and runnable by Start (catalog miss
+// falls back to the user-scenario store).
+func TestCreateScenario_PersistAndRun(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithResolver(service.NewFakeResolver())
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+
+	authored := domain.Scenario{
+		Name:             "Insider — finance pivot",
+		AdversaryProfile: "custom",
+		Description:      "operator authored",
+		Techniques: []domain.Technique{
+			{AttackID: "T1059.001", Name: "PowerShell", Tactic: "execution"},
+			{AttackID: "T1018", Name: "Remote System Discovery", Tactic: "discovery"},
+		},
+	}
+	created, err := svcEmu.CreateScenario(ctx, authored, "test-op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("expected generated scenario ID")
+	}
+
+	// ListScenarios must include both the catalog and the authored scenario.
+	var found bool
+	for _, sc := range svcEmu.ListScenarios() {
+		if sc.ID == created.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("authored scenario missing from ListScenarios")
+	}
+
+	// Start must resolve the authored scenario (not in catalog) and run it.
+	runID, err := svcEmu.Start(ctx, eng.ID, created.ID, "test-op")
+	if err != nil {
+		t.Fatalf("Start authored scenario: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := svcEmu.GetRun(ctx, runID)
+		if err == nil && run.Status != domain.ExecRunning && len(run.Results) == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("authored scenario run did not complete with 2 results")
+}
+
+// TestCreateScenario_Validation rejects empty name / no techniques.
+func TestCreateScenario_Validation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, service.NewHub())
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+
+	if _, err := svcEmu.CreateScenario(ctx, domain.Scenario{Techniques: []domain.Technique{{AttackID: "T1059"}}}, "op"); err == nil {
+		t.Error("expected error for empty name")
+	}
+	if _, err := svcEmu.CreateScenario(ctx, domain.Scenario{Name: "x"}, "op"); err == nil {
+		t.Error("expected error for no techniques")
 	}
 }
