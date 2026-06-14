@@ -56,6 +56,8 @@ type UserScenarioStore interface {
 	Create(ctx context.Context, s domain.Scenario) (string, error)
 	Get(ctx context.Context, id string) (domain.Scenario, error)
 	List(ctx context.Context) ([]domain.Scenario, error)
+	Update(ctx context.Context, s domain.Scenario) error
+	Delete(ctx context.Context, id string) error
 }
 
 // CredentialStore persists envelope-encrypted credentials keyed by engagement

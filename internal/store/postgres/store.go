@@ -686,6 +686,39 @@ func (s *UserScenarioStore) List(ctx context.Context) ([]domain.Scenario, error)
 	return out, rows.Err()
 }
 
+// Update replaces an existing scenario's mutable fields.
+func (s *UserScenarioStore) Update(ctx context.Context, sc domain.Scenario) error {
+	techniques, err := json.Marshal(sc.Techniques)
+	if err != nil {
+		return fmt.Errorf("marshal techniques: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE user_scenarios
+		SET name=$2, adversary_profile=$3, description=$4, techniques=$5
+		WHERE id=$1`,
+		sc.ID, sc.Name, sc.AdversaryProfile, sc.Description, techniques,
+	)
+	if err != nil {
+		return fmt.Errorf("update user_scenario: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("user_scenario %s: %w", sc.ID, store.ErrNotFound)
+	}
+	return nil
+}
+
+// Delete removes a scenario by ID.
+func (s *UserScenarioStore) Delete(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM user_scenarios WHERE id=$1`, id)
+	if err != nil {
+		return fmt.Errorf("delete user_scenario: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("user_scenario %s: %w", id, store.ErrNotFound)
+	}
+	return nil
+}
+
 // --- CredentialStore ---
 
 // CredentialStore is the Postgres implementation of store.CredentialStore.

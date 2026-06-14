@@ -16,16 +16,21 @@ import type { Scenario, Technique } from "../../lib/types";
 const AUTOMATING_FRAMEWORKS = C2_FRAMEWORKS.filter((f) => C2_TACTIC_SUPPORT[f.id]);
 
 export default function ScenarioBuilder({
+  initial,
   onClose,
-  onCreate,
+  onSubmit,
 }: {
+  initial?: Scenario;
   onClose: () => void;
-  onCreate: (s: Scenario) => void;
+  onSubmit: (s: Scenario) => void;
 }) {
-  const [name, setName] = useState("");
-  const [actor, setActor] = useState("");
-  const [desc, setDesc] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const editing = !!initial;
+  const [name, setName] = useState(initial?.name ?? "");
+  const [actor, setActor] = useState(initial?.actor ?? "");
+  const [desc, setDesc] = useState(initial?.desc ?? "");
+  const [selected, setSelected] = useState<Set<string>>(
+    new Set(initial?.techniques.map((t) => t.id) ?? [])
+  );
 
   const toggle = (id: string) =>
     setSelected((s) => {
@@ -54,13 +59,13 @@ export default function ScenarioBuilder({
   const save = () => {
     if (!canSave) return;
     const scenario: Scenario = {
-      id: "custom-" + Date.now().toString(36),
+      id: initial?.id ?? "custom-" + Date.now().toString(36),
       name: name.trim(),
       actor: actor.trim() || "Custom · operator-authored",
       desc: desc.trim() || "Operator-authored scenario.",
       techniques: selectedTechniques, // already in library (ATT&CK) order
     };
-    onCreate(scenario);
+    onSubmit(scenario);
   };
 
   return (
@@ -75,10 +80,13 @@ export default function ScenarioBuilder({
         }}
       >
         <div>
-          <div style={{ fontSize: 16, fontWeight: 600 }}>New emulation scenario</div>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>
+            {editing ? "Edit scenario" : "New emulation scenario"}
+          </div>
           <div style={{ fontSize: 12.5, color: "var(--text-3)", marginTop: 2 }}>
-            Author a scenario from scratch — pick ATT&CK techniques; coverage shows which C2s can
-            automate them.
+            {editing
+              ? "Adjust the techniques and metadata; coverage shows which C2s can automate them."
+              : "Author a scenario from scratch — pick ATT&CK techniques; coverage shows which C2s can automate them."}
           </div>
         </div>
         <button className="btn ghost sm" onClick={onClose} style={{ padding: 6 }}>
@@ -259,7 +267,15 @@ export default function ScenarioBuilder({
               disabled={!canSave}
               onClick={save}
             >
-              <Icons.Plus size={15} /> Create scenario
+              {editing ? (
+                <>
+                  <Icons.Check size={15} /> Save changes
+                </>
+              ) : (
+                <>
+                  <Icons.Plus size={15} /> Create scenario
+                </>
+              )}
             </button>
           </div>
         </div>

@@ -1,8 +1,10 @@
 "use client";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Icons } from "../icons";
 import { PageHead } from "../ui";
 import { useStore } from "../../lib/store";
+import { getClient } from "../../lib/client";
+import type { Project } from "../../lib/types";
 
 const TACTICS = [
   {
@@ -87,8 +89,29 @@ const LVL_COLOR = [
 const LVL_TEXT = ["var(--text-4)", "var(--text-2)", "#fff", "#fff"];
 
 export default function ReportingScreen() {
-  const { activeEngagement } = useStore();
+  const { activeEngagement, engagements, activeEngagementId, setActiveEngagementId } = useStore();
   const [tab, setTab] = useState<"coverage" | "report">("coverage");
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectId, setProjectId] = useState("all");
+
+  useEffect(() => {
+    let alive = true;
+    getClient()
+      .listProjects()
+      .then((p) => alive && setProjects(p))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Scope the engagement picker to the selected project (best-effort match on
+  // client name, since the demo engagements aren't hard-linked to projects).
+  const project = projects.find((p) => p.id === projectId);
+  const scopedEngagements =
+    project && engagements.some((e) => e.client === project.clientName)
+      ? engagements.filter((e) => e.client === project.clientName)
+      : engagements;
 
   const allTechs = TACTICS.flatMap((t) => t.techs);
   const covered = allTechs.filter(([, l]) => (l as number) > 0).length;
@@ -125,6 +148,52 @@ export default function ReportingScreen() {
 
         {tab === "coverage" && (
           <div className="fade-in">
+            {/* project + engagement scope */}
+            <div
+              className="card"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 14,
+                flexWrap: "wrap",
+                padding: "12px 16px",
+                marginBottom: 14,
+              }}
+            >
+              <span className="eyebrow">Scope</span>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5 }}>
+                <Icons.Building size={14} />
+                <select
+                  className="select"
+                  value={projectId}
+                  onChange={(e) => setProjectId(e.target.value)}
+                  style={{ minWidth: 200 }}
+                >
+                  <option value="all">All projects</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5 }}>
+                <Icons.Target size={14} />
+                <select
+                  className="select"
+                  value={activeEngagementId}
+                  onChange={(e) => setActiveEngagementId(e.target.value)}
+                  style={{ minWidth: 220 }}
+                >
+                  {scopedEngagements.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.codename} · {e.client}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
             <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
               {(
                 [

@@ -95,6 +95,57 @@ func (s *EmulationService) CreateScenario(ctx context.Context, sc domain.Scenari
 	return sc, nil
 }
 
+// UpdateScenario replaces an operator-authored scenario. Catalog scenarios are
+// immutable (code-shipped), so only user-store scenarios can be edited.
+func (s *EmulationService) UpdateScenario(ctx context.Context, sc domain.Scenario, actor string) (domain.Scenario, error) {
+	if s.userScenarios == nil {
+		return domain.Scenario{}, fmt.Errorf("scenario authoring not enabled")
+	}
+	if sc.ID == "" {
+		return domain.Scenario{}, fmt.Errorf("scenario id is required")
+	}
+	if _, builtin := catalog.Get(sc.ID); builtin {
+		return domain.Scenario{}, fmt.Errorf("built-in scenarios cannot be edited")
+	}
+	if sc.Name == "" {
+		return domain.Scenario{}, fmt.Errorf("scenario name is required")
+	}
+	if len(sc.Techniques) == 0 {
+		return domain.Scenario{}, fmt.Errorf("scenario must include at least one technique")
+	}
+	if err := s.userScenarios.Update(ctx, sc); err != nil {
+		return domain.Scenario{}, err
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "scenario.update",
+		Target: sc.ID,
+		Detail: fmt.Sprintf("name=%q techniques=%d", sc.Name, len(sc.Techniques)),
+		At:     time.Now().UTC(),
+	})
+	return s.userScenarios.Get(ctx, sc.ID)
+}
+
+// DeleteScenario removes an operator-authored scenario.
+func (s *EmulationService) DeleteScenario(ctx context.Context, id, actor string) error {
+	if s.userScenarios == nil {
+		return fmt.Errorf("scenario authoring not enabled")
+	}
+	if _, builtin := catalog.Get(id); builtin {
+		return fmt.Errorf("built-in scenarios cannot be deleted")
+	}
+	if err := s.userScenarios.Delete(ctx, id); err != nil {
+		return err
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "scenario.delete",
+		Target: id,
+		At:     time.Now().UTC(),
+	})
+	return nil
+}
+
 // lookupScenario resolves a scenario by ID from the catalog, then the
 // operator-authored store.
 func (s *EmulationService) lookupScenario(ctx context.Context, id string) (domain.Scenario, bool) {

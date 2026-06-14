@@ -3,7 +3,13 @@ import React from "react";
 import { Icons } from "../icons";
 import { Modal } from "../ui";
 import { CopyButton } from "../c2/ManualAccess";
-import { c2SupportsTactic, C2_DELIVERY, techniqueById } from "../../lib/data";
+import {
+  c2SupportsTactic,
+  C2_DELIVERY,
+  techniqueById,
+  frameworksSupportingTactic,
+  C2_FRAMEWORKS,
+} from "../../lib/data";
 import type { Technique, DeployedC2 } from "../../lib/types";
 
 // ATT&CK technique page URL: T1059.001 -> /techniques/T1059/001
@@ -107,9 +113,28 @@ export default function TechniqueDetail({
               </span>
             </div>
           ) : (
-            <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>
-              Select a C2 target to see how it&apos;s executed.
-            </div>
+            (() => {
+              const ids = frameworksSupportingTactic(technique.tactic);
+              const names = C2_FRAMEWORKS.filter((f) => ids.includes(f.id)).map((f) => f.name);
+              return names.length > 0 ? (
+                <div>
+                  <div style={{ fontSize: 12, color: "var(--text-3)", marginBottom: 7 }}>
+                    Automated by these C2 frameworks:
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {names.map((n) => (
+                      <span key={n} className="pill ok" style={{ height: 20 }}>
+                        <Icons.Bolt size={10} /> {n}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>
+                  Manual only — no framework automates this tactic; operate by hand.
+                </div>
+              );
+            })()
           )}
         </div>
 

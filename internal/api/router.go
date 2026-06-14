@@ -98,9 +98,11 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		// C2 frameworks (from registry).
 		r.Get("/c2/frameworks", h.listC2Frameworks)
 
-		// Scenarios — built-in catalog + operator-authored.
+		// Scenarios — built-in catalog + operator-authored (full CRUD on authored).
 		r.Get("/scenarios", h.listScenarios)
 		r.Post("/scenarios", h.createScenario)
+		r.Put("/scenarios/{id}", h.updateScenario)
+		r.Delete("/scenarios/{id}", h.deleteScenario)
 
 		// Runs — fetch by ID (cross-engagement).
 		r.Get("/runs/{id}", h.getRun)

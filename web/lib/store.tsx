@@ -64,6 +64,8 @@ interface StoreState {
   // authored scenarios are persisted via the backend; in mock mode session-local.
   scenarios: Scenario[];
   addScenario: (s: Scenario) => Promise<Scenario>;
+  updateScenario: (s: Scenario) => Promise<Scenario>;
+  deleteScenario: (id: string) => Promise<void>;
 
   // API-connected actions (no-ops / local simulation in mock mode)
   apiCreateEngagement: (params: CreateEngagementParams) => Promise<Engagement>;
@@ -358,6 +360,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [rest, client, pushToast]
   );
 
+  const updateScenario = useCallback(
+    async (s: Scenario): Promise<Scenario> => {
+      const saved = rest ? await client.updateScenario(s) : s;
+      setCustomScenarios((list) => list.map((x) => (x.id === saved.id ? saved : x)));
+      pushToast(`Scenario updated — ${saved.name}`, "ok");
+      return saved;
+    },
+    [rest, client, pushToast]
+  );
+
+  const deleteScenario = useCallback(
+    async (id: string): Promise<void> => {
+      if (rest) await client.deleteScenario(id);
+      setCustomScenarios((list) => list.filter((x) => x.id !== id));
+      pushToast("Scenario deleted", "ok");
+    },
+    [rest, client, pushToast]
+  );
+
   // REST mode: load operator-authored scenarios (those not in the built-in set).
   useEffect(() => {
     if (!rest) return;
@@ -393,6 +414,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         pushToast,
         scenarios,
         addScenario,
+        updateScenario,
+        deleteScenario,
         apiCreateEngagement,
         apiDeploy,
         apiTeardown,
