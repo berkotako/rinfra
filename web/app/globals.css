@@ -317,6 +317,10 @@ kbd { font-family: var(--font-mono); font-size: 10.5px; background: var(--surfac
 .eng-row:hover:not(.active) { background: var(--surface-2); }
 .eng-row.active { background: var(--accent-soft); }
 
+/* emulation technique rows (click for detail) */
+.tech-row { transition: background .12s; }
+.tech-row:hover { background: var(--surface-2); }
+
 /* generic menu hover */
 .menu-item { transition: background .1s; }
 .menu-item:hover { background: var(--surface-3); }

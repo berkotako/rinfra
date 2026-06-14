@@ -5,6 +5,7 @@ import React, {
   useState,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
 } from "react";
 import type {
@@ -17,8 +18,9 @@ import type {
   AccentId,
   NodeStyle,
   NodeStatus,
+  Scenario,
 } from "./types";
-import { ENGAGEMENTS, INITIAL_NODES, INITIAL_EDGES } from "./data";
+import { ENGAGEMENTS, INITIAL_NODES, INITIAL_EDGES, SCENARIOS } from "./data";
 import {
   getClient,
   isRestMode,
@@ -58,6 +60,10 @@ interface StoreState {
   toasts: Toast[];
   pushToast: (msg: string, kind?: ToastKind) => void;
 
+  // Scenarios — built-in catalog plus operator-authored scenarios (session-local).
+  scenarios: Scenario[];
+  addScenario: (s: Scenario) => void;
+
   // API-connected actions (no-ops / local simulation in mock mode)
   apiCreateEngagement: (params: CreateEngagementParams) => Promise<Engagement>;
   apiDeploy: (engagementId: string) => Promise<void>;
@@ -90,6 +96,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [edges, setEdges] = useState<CanvasEdge[]>(rest ? [] : INITIAL_EDGES);
   const [preferences, setPreferences] = useState<Preferences>(DEFAULT_PREFS);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [customScenarios, setCustomScenarios] = useState<Scenario[]>([]);
   const toastCounter = useRef(0);
 
   // Keep a ref to activeEngagementId so effects can read it without stale closures.
@@ -333,6 +340,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [rest, client]
   );
 
+  const scenarios = useMemo(() => [...SCENARIOS, ...customScenarios], [customScenarios]);
+
+  const addScenario = useCallback(
+    (s: Scenario) => {
+      setCustomScenarios((list) => [...list, s]);
+      pushToast(`Scenario created — ${s.name}`, "ok");
+    },
+    [pushToast]
+  );
+
   const activeEngagement =
     engagements.find((e) => e.id === activeEngagementId) ?? engagements[0] ?? ENGAGEMENTS[0];
 
@@ -354,6 +371,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setNodeStyle,
         toasts,
         pushToast,
+        scenarios,
+        addScenario,
         apiCreateEngagement,
         apiDeploy,
         apiTeardown,
