@@ -20,6 +20,8 @@ const NAV: NavItem[] = [
   { id: "projects", label: "Projects", icon: "Building", href: "/projects" },
   { id: "infrastructure", label: "Infrastructure", icon: "Network", href: "/infrastructure" },
   { id: "c2", label: "C2 Frameworks", icon: "Server", href: "/c2" },
+  { id: "alive-c2s", label: "Alive C2s", icon: "Terminal", href: "/alive-c2s" },
+  { id: "ttps", label: "TTPs", icon: "Crosshair", href: "/ttps" },
   { id: "emulation", label: "Emulation", icon: "Crosshair", href: "/emulation" },
   { id: "reporting", label: "Coverage & Reports", icon: "FileText", href: "/reporting" },
   { id: "users", label: "Users", icon: "User", href: "/users", roles: ["admin", "lead"] },

@@ -539,3 +539,50 @@ func TestCreateScenario_Validation(t *testing.T) {
 		t.Error("expected error for no techniques")
 	}
 }
+
+// TestUpdateDeleteScenario covers the authored-scenario CRUD edges.
+func TestUpdateDeleteScenario(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, service.NewHub())
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+
+	created, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name:       "draft",
+		Techniques: []domain.Technique{{AttackID: "T1059.001", Tactic: "execution"}},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	// Update renames and swaps techniques.
+	updated, err := svcEmu.UpdateScenario(ctx, domain.Scenario{
+		ID:         created.ID,
+		Name:       "renamed",
+		Techniques: []domain.Technique{{AttackID: "T1018", Tactic: "discovery"}, {AttackID: "T1057", Tactic: "discovery"}},
+	}, "op")
+	if err != nil {
+		t.Fatalf("UpdateScenario: %v", err)
+	}
+	if updated.Name != "renamed" || len(updated.Techniques) != 2 {
+		t.Errorf("update not applied: %+v", updated)
+	}
+
+	// Built-in scenarios are immutable.
+	if _, err := svcEmu.UpdateScenario(ctx, domain.Scenario{ID: "apt29", Name: "x", Techniques: []domain.Technique{{AttackID: "T1"}}}, "op"); err == nil {
+		t.Error("expected error editing built-in scenario")
+	}
+	if err := svcEmu.DeleteScenario(ctx, "apt29", "op"); err == nil {
+		t.Error("expected error deleting built-in scenario")
+	}
+
+	// Delete removes it from the listing.
+	if err := svcEmu.DeleteScenario(ctx, created.ID, "op"); err != nil {
+		t.Fatalf("DeleteScenario: %v", err)
+	}
+	for _, sc := range svcEmu.ListScenarios() {
+		if sc.ID == created.ID {
+			t.Error("deleted scenario still listed")
+		}
+	}
+}

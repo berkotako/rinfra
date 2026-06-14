@@ -433,6 +433,31 @@ func (h *handlers) createScenario(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"scenario": scenarioToJSON(created)})
 }
 
+func (h *handlers) updateScenario(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req createScenarioRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	sc := req.toDomain()
+	sc.ID = id
+	updated, err := h.svc.Emulation.UpdateScenario(r.Context(), sc, actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scenario": scenarioToJSON(updated)})
+}
+
+func (h *handlers) deleteScenario(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.Emulation.DeleteScenario(r.Context(), id, actorFrom(r.Context())); err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---------- Runs ----------
 
 func (h *handlers) startRun(w http.ResponseWriter, r *http.Request) {

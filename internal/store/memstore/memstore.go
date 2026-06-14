@@ -338,6 +338,30 @@ func (s *UserScenarioStore) List(_ context.Context) ([]domain.Scenario, error) {
 	return out, nil
 }
 
+// Update replaces an existing scenario, preserving its CreatedAt.
+func (s *UserScenarioStore) Update(_ context.Context, sc domain.Scenario) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.scenarios[sc.ID]
+	if !ok {
+		return fmt.Errorf("scenario %s: %w", sc.ID, store.ErrNotFound)
+	}
+	sc.CreatedAt = existing.CreatedAt
+	s.scenarios[sc.ID] = sc
+	return nil
+}
+
+// Delete removes a scenario by ID.
+func (s *UserScenarioStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.scenarios[id]; !ok {
+		return fmt.Errorf("scenario %s: %w", id, store.ErrNotFound)
+	}
+	delete(s.scenarios, id)
+	return nil
+}
+
 // --- CredentialStore ---
 
 type credKey struct{ engagementID, provider string }

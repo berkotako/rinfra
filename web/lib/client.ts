@@ -248,6 +248,8 @@ export interface RInfraClient {
   // Scenarios & runs
   listScenarios(): Promise<Scenario[]>;
   createScenario(scenario: Scenario): Promise<Scenario>;
+  updateScenario(scenario: Scenario): Promise<Scenario>;
+  deleteScenario(id: string): Promise<void>;
   startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }>;
   getRun(runId: string): Promise<ScenarioRun>;
 }
@@ -567,6 +569,14 @@ export class MockClient implements RInfraClient {
   async createScenario(scenario: Scenario): Promise<Scenario> {
     // Mock mode: echo back; the store keeps it session-local.
     return scenario;
+  }
+
+  async updateScenario(scenario: Scenario): Promise<Scenario> {
+    return scenario;
+  }
+
+  async deleteScenario(id: string): Promise<void> {
+    void id;
   }
 
   async startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }> {
@@ -1170,6 +1180,26 @@ export class RestClient implements RInfraClient {
       }),
     });
     return mapScenarioFromApi(body.scenario ?? {});
+  }
+
+  async updateScenario(scenario: Scenario): Promise<Scenario> {
+    const body = await this.fetch<{ scenario: Record<string, unknown> }>(
+      `/scenarios/${scenario.id}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          name: scenario.name,
+          actor: scenario.actor,
+          desc: scenario.desc,
+          techniques: scenario.techniques.map((t) => ({ id: t.id, name: t.name, tactic: t.tactic })),
+        }),
+      }
+    );
+    return mapScenarioFromApi(body.scenario ?? {});
+  }
+
+  async deleteScenario(id: string): Promise<void> {
+    await this.fetch<undefined>(`/scenarios/${id}`, { method: "DELETE" });
   }
 
   async startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }> {

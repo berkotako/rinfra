@@ -1,11 +1,11 @@
 "use client";
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Icons } from "../icons";
-import { PageHead } from "../ui";
+import { PageHead, Modal } from "../ui";
 import { OperatorStatus } from "../c2/ManualAccess";
 import { useStore } from "../../lib/store";
 import { getClient, isRestMode } from "../../lib/client";
-import { deployedC2FromNode, c2SupportsTactic } from "../../lib/data";
+import { deployedC2FromNode, c2SupportsTactic, SCENARIOS } from "../../lib/data";
 import TechniqueDetail from "./TechniqueDetail";
 import ScenarioBuilder from "./ScenarioBuilder";
 import type { NodeStatus, Technique, DeployedC2, Scenario } from "../../lib/types";
@@ -33,14 +33,25 @@ const TACTIC_TONE: Record<string, number> = {
 };
 
 export default function EmulationScreen() {
-  const { activeEngagement, activeEngagementId, nodes, pushToast, apiStartRun, scenarios, addScenario } =
-    useStore();
+  const {
+    activeEngagement,
+    activeEngagementId,
+    nodes,
+    pushToast,
+    apiStartRun,
+    scenarios,
+    addScenario,
+    updateScenario,
+    deleteScenario,
+  } = useStore();
   const [scenarioId, setScenarioId] = useState(scenarios[0].id);
   const [c2Id, setC2Id] = useState<string>("");
   const [running, setRunning] = useState(false);
   const [stepState, setStepState] = useState<Record<number, StepStatus>>({});
   const [detailIdx, setDetailIdx] = useState<number | null>(null);
   const [builderOpen, setBuilderOpen] = useState(false);
+  const [editing, setEditing] = useState<Scenario | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Scenario | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const runIdRef = useRef<string | null>(null);
   const restMode = isRestMode();
@@ -48,11 +59,24 @@ export default function EmulationScreen() {
 
   const scenario = scenarios.find((s) => s.id === scenarioId) || scenarios[0];
 
-  const handleCreateScenario = (s: Scenario) => {
-    addScenario(s)
-      .then((saved) => setScenarioId(saved.id))
-      .catch(() => undefined);
+  // Built-in catalog scenarios are immutable; only authored ones support edit/delete.
+  const builtinIds = useMemo(() => new Set(SCENARIOS.map((s) => s.id)), []);
+  const isCustom = (s: Scenario) => !builtinIds.has(s.id);
+
+  const handleSubmitScenario = (s: Scenario) => {
+    const op = editing ? updateScenario(s) : addScenario(s);
+    op.then((saved) => setScenarioId(saved.id)).catch(() => undefined);
     setBuilderOpen(false);
+    setEditing(null);
+  };
+
+  const handleDeleteScenario = (s: Scenario) => {
+    deleteScenario(s.id)
+      .then(() => {
+        if (scenarioId === s.id) setScenarioId(SCENARIOS[0].id);
+      })
+      .catch(() => undefined);
+    setConfirmDelete(null);
   };
 
   // Deployed C2 teamservers from the live topology — the emulation targets.
@@ -254,7 +278,13 @@ export default function EmulationScreen() {
           title="Adversary emulation"
           sub={`Run ATT&CK-mapped scenarios against ${activeEngagement.codename}'s deployed infrastructure.`}
         >
-          <button className="btn primary" onClick={() => setBuilderOpen(true)}>
+          <button
+            className="btn primary"
+            onClick={() => {
+              setEditing(null);
+              setBuilderOpen(true);
+            }}
+          >
             <Icons.Plus size={15} /> New scenario
           </button>
         </PageHead>
@@ -296,8 +326,15 @@ export default function EmulationScreen() {
                   <span style={{ color: active ? "var(--accent)" : "var(--text-3)" }}>
                     <Icons.Crosshair size={18} />
                   </span>
-                  <span className="pill" style={{ height: 20 }}>
-                    {s.techniques.length} techniques
+                  <span style={{ display: "flex", gap: 6 }}>
+                    {isCustom(s) && (
+                      <span className="pill accent" style={{ height: 20 }}>
+                        custom
+                      </span>
+                    )}
+                    <span className="pill" style={{ height: 20 }}>
+                      {s.techniques.length} techniques
+                    </span>
                   </span>
                 </div>
                 <div style={{ fontSize: 14, fontWeight: 600 }}>{s.name}</div>
@@ -336,6 +373,28 @@ export default function EmulationScreen() {
                     {scenario.desc}
                   </div>
                 </div>
+                {isCustom(scenario) && (
+                  <div style={{ display: "flex", gap: 6, flex: "none" }}>
+                    <button
+                      className="btn ghost sm"
+                      onClick={() => {
+                        setEditing(scenario);
+                        setBuilderOpen(true);
+                      }}
+                      disabled={running}
+                    >
+                      <Icons.Sliders size={14} /> Edit
+                    </button>
+                    <button
+                      className="btn ghost sm"
+                      onClick={() => setConfirmDelete(scenario)}
+                      disabled={running}
+                      title="Delete scenario"
+                    >
+                      <Icons.Trash size={14} />
+                    </button>
+                  </div>
+                )}
               </div>
               <div style={{ padding: "8px 0" }}>
                 {scenario.techniques.map((t, i) => {
@@ -701,7 +760,32 @@ export default function EmulationScreen() {
         />
       )}
       {builderOpen && (
-        <ScenarioBuilder onClose={() => setBuilderOpen(false)} onCreate={handleCreateScenario} />
+        <ScenarioBuilder
+          initial={editing ?? undefined}
+          onClose={() => {
+            setBuilderOpen(false);
+            setEditing(null);
+          }}
+          onSubmit={handleSubmitScenario}
+        />
+      )}
+      {confirmDelete && (
+        <Modal open onClose={() => setConfirmDelete(null)} width={420} label="Delete scenario">
+          <div style={{ padding: 22 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Delete scenario?</div>
+            <div style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.5 }}>
+              <b>{confirmDelete.name}</b> will be permanently removed. This cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setConfirmDelete(null)}>
+                Cancel
+              </button>
+              <button className="btn danger" onClick={() => handleDeleteScenario(confirmDelete)}>
+                <Icons.Trash size={15} /> Delete
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );
