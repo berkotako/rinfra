@@ -120,9 +120,10 @@ func msfRedirectorConfig(prof domain.Profile) (string, error) {
 }
 
 // Control returns an Orchestrated-tier Operator backed by the msfrpcd RPC API.
+// The live client is wired in metasploit_live.go: the service layer calls
+// LiveOperator with the msfrpcd URL + credentials (from the per-engagement env
+// file). Until then this returns a noop-backed operator so nothing regresses.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	// TODO(live): construct a real MsfRpcdClient from the teamserver connection
-	// info (host, rpc port, credentials from the per-engagement env file).
 	return &operator{ts: ts, client: &noopMsfClient{}}, true
 }
 
