@@ -36,6 +36,22 @@ only works where the framework exposes a usable operator API.
 Brute Ratel) means the emulation engine records every technique as `skipped` and
 a human operates the framework.
 
+### Two usage modes
+
+RInfra supports two ways to use a deployed teamserver:
+
+1. **Automated emulation** — drive the framework through `Operator` (only on
+   frameworks with a usable operator API; see the table above). Live operator
+   clients are wired for Sliver (gRPC/mTLS), Mythic (GraphQL/HTTPS) and
+   Metasploit (msfrpcd/MessagePack).
+2. **Manual access** — for operators who don't want auto-run, RInfra opens an
+   SSH local port-forward to the teamserver's operator port and the operator
+   connects their **native client** (sliver-client, Mythic web UI, Cobalt Strike
+   client, …). This mode works for **every** framework, including Fronted-tier
+   ones with no `Operator`. See `c2.ManualAccessFor` / `c2.OpenLocalForward`.
+   The operator port is never exposed publicly — access is tunneled over the
+   per-engagement SSH key, and the service layer audits it.
+
 ## Payload generators
 
 Initial-access stager tools, modeled separately from C2 frameworks via
