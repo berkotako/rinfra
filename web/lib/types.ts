@@ -135,6 +135,8 @@ export interface Technique {
   id: string; // e.g. T1566.002
   name: string;
   tactic: string;
+  description?: string; // what the TTP is
+  commands?: string[];  // portable procedure — the commands RInfra runs
 }
 
 export interface Scenario {

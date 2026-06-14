@@ -5,8 +5,10 @@ import { PageHead } from "../ui";
 import { OperatorStatus } from "../c2/ManualAccess";
 import { useStore } from "../../lib/store";
 import { getClient, isRestMode } from "../../lib/client";
-import { SCENARIOS, deployedC2FromNode, c2SupportsTechnique } from "../../lib/data";
-import type { NodeStatus, Technique, DeployedC2 } from "../../lib/types";
+import { deployedC2FromNode, c2SupportsTactic } from "../../lib/data";
+import TechniqueDetail from "./TechniqueDetail";
+import ScenarioBuilder from "./ScenarioBuilder";
+import type { NodeStatus, Technique, DeployedC2, Scenario } from "../../lib/types";
 
 type StepStatus = "pending" | "running" | "done" | "detected" | "manual";
 
@@ -31,17 +33,26 @@ const TACTIC_TONE: Record<string, number> = {
 };
 
 export default function EmulationScreen() {
-  const { activeEngagement, activeEngagementId, nodes, pushToast, apiStartRun } = useStore();
-  const [scenarioId, setScenarioId] = useState(SCENARIOS[0].id);
+  const { activeEngagement, activeEngagementId, nodes, pushToast, apiStartRun, scenarios, addScenario } =
+    useStore();
+  const [scenarioId, setScenarioId] = useState(scenarios[0].id);
   const [c2Id, setC2Id] = useState<string>("");
   const [running, setRunning] = useState(false);
   const [stepState, setStepState] = useState<Record<number, StepStatus>>({});
+  const [detailIdx, setDetailIdx] = useState<number | null>(null);
+  const [builderOpen, setBuilderOpen] = useState(false);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const runIdRef = useRef<string | null>(null);
   const restMode = isRestMode();
   const client = getClient();
 
-  const scenario = SCENARIOS.find((s) => s.id === scenarioId) || SCENARIOS[0];
+  const scenario = scenarios.find((s) => s.id === scenarioId) || scenarios[0];
+
+  const handleCreateScenario = (s: Scenario) => {
+    addScenario(s);
+    setScenarioId(s.id);
+    setBuilderOpen(false);
+  };
 
   // Deployed C2 teamservers from the live topology — the emulation targets.
   const c2Targets = useMemo(
@@ -51,9 +62,9 @@ export default function EmulationScreen() {
   const liveC2s = useMemo(() => c2Targets.filter((c) => c.status === "live"), [c2Targets]);
   const selectedC2 = c2Targets.find((c) => c.nodeId === c2Id);
 
-  // Whether the selected C2 can automate a given technique.
+  // Whether the selected C2 can automate a given technique (by its tactic).
   const supports = useCallback(
-    (techId: string) => !!selectedC2 && c2SupportsTechnique(selectedC2.framework, techId),
+    (t: Technique) => !!selectedC2 && c2SupportsTactic(selectedC2.framework, t.tactic),
     [selectedC2]
   );
 
@@ -74,7 +85,7 @@ export default function EmulationScreen() {
   const baseStepState = useCallback((): Record<number, StepStatus> => {
     const b: Record<number, StepStatus> = {};
     scenario.techniques.forEach((t, i) => {
-      if (!supports(t.id)) b[i] = "manual";
+      if (!supports(t)) b[i] = "manual";
     });
     return b;
   }, [scenario, supports]);
@@ -190,7 +201,7 @@ export default function EmulationScreen() {
     // Mock mode: local simulation — animate only techniques the C2 can automate.
     const runnable = scenario.techniques
       .map((t, i) => ({ t, i }))
-      .filter(({ t }) => supports(t.id));
+      .filter(({ t }) => supports(t));
     runnable.forEach(({ i }, order) => {
       timers.current.push(
         setTimeout(() => setStepState((s) => ({ ...s, [i]: "running" })), order * 1500 + 200)
@@ -214,7 +225,7 @@ export default function EmulationScreen() {
     );
   };
 
-  const runnableCount = scenario.techniques.filter((t) => supports(t.id)).length;
+  const runnableCount = scenario.techniques.filter((t) => supports(t)).length;
   const done = scenario.techniques.filter(
     (_, i) => stepState[i] === "done" || stepState[i] === "detected"
   ).length;
@@ -241,7 +252,11 @@ export default function EmulationScreen() {
         <PageHead
           title="Adversary emulation"
           sub={`Run ATT&CK-mapped scenarios against ${activeEngagement.codename}'s deployed infrastructure.`}
-        />
+        >
+          <button className="btn primary" onClick={() => setBuilderOpen(true)}>
+            <Icons.Plus size={15} /> New scenario
+          </button>
+        </PageHead>
 
         {/* scenario picker */}
         <div
@@ -252,7 +267,7 @@ export default function EmulationScreen() {
             marginBottom: 22,
           }}
         >
-          {SCENARIOS.map((s) => {
+          {scenarios.map((s) => {
             const active = s.id === scenarioId;
             return (
               <div
@@ -327,15 +342,19 @@ export default function EmulationScreen() {
                   const m = ST_META[st];
                   const hue = TACTIC_TONE[t.tactic] || 240;
                   const Ico = Icons[m.icon] || Icons.Dot;
-                  const auto = supports(t.id);
+                  const auto = supports(t);
                   return (
                     <div
                       key={t.id}
+                      onClick={() => setDetailIdx(i)}
+                      className="tech-row"
+                      title="View technique detail"
                       style={{
                         display: "flex",
                         gap: 14,
                         padding: "11px 18px",
                         position: "relative",
+                        cursor: "pointer",
                         opacity: st === "manual" ? 0.7 : 1,
                       }}
                     >
@@ -440,7 +459,15 @@ export default function EmulationScreen() {
                           {t.tactic}
                         </div>
                       </div>
-                      <div style={{ flex: "none", alignSelf: "center" }}>
+                      <div
+                        style={{
+                          flex: "none",
+                          alignSelf: "center",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                        }}
+                      >
                         <span
                           style={{
                             fontSize: 11.5,
@@ -453,6 +480,9 @@ export default function EmulationScreen() {
                         >
                           {st !== "pending" && st !== "running" && <Ico size={13} />}
                           {m.label}
+                        </span>
+                        <span style={{ color: "var(--text-4)" }}>
+                          <Icons.ChevronRight size={15} />
                         </span>
                       </div>
                     </div>
@@ -661,6 +691,17 @@ export default function EmulationScreen() {
           </div>
         </div>
       </div>
+
+      {detailIdx !== null && scenario.techniques[detailIdx] && (
+        <TechniqueDetail
+          technique={scenario.techniques[detailIdx]}
+          c2={selectedC2}
+          onClose={() => setDetailIdx(null)}
+        />
+      )}
+      {builderOpen && (
+        <ScenarioBuilder onClose={() => setBuilderOpen(false)} onCreate={handleCreateScenario} />
+      )}
     </div>
   );
 }
