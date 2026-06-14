@@ -23,6 +23,8 @@ type EngagementStore interface {
 	// Update replaces the full engagement record (used when authorization fields
 	// or metadata change). The engagement must already exist.
 	Update(ctx context.Context, e domain.Engagement) error
+	// ListForProject returns all engagements belonging to a project.
+	ListForProject(ctx context.Context, projectID string) ([]domain.Engagement, error)
 }
 
 // InfraStore persists topology (nodes + edges) and their live status. The
@@ -83,4 +85,39 @@ type JobStore interface {
 	// boot-time reconciliation to detect orphaned jobs from a prior server
 	// instance.
 	ListRunning(ctx context.Context) ([]domain.Job, error)
+}
+
+// UserStore persists operator user accounts.
+type UserStore interface {
+	Create(ctx context.Context, u domain.User) (id string, err error)
+	GetByID(ctx context.Context, id string) (domain.User, error)
+	GetByUsername(ctx context.Context, username string) (domain.User, error)
+	List(ctx context.Context) ([]domain.User, error)
+	ListByManager(ctx context.Context, managerID string) ([]domain.User, error)
+	Update(ctx context.Context, u domain.User) error
+	SetPassword(ctx context.Context, id, passwordHash string) error
+	CountAll(ctx context.Context) (int, error)
+}
+
+// ProjectStore persists projects and their membership lists.
+type ProjectStore interface {
+	Create(ctx context.Context, p domain.Project) (id string, err error)
+	Get(ctx context.Context, id string) (domain.Project, error)
+	List(ctx context.Context) ([]domain.Project, error)
+	ListForUser(ctx context.Context, userID string) ([]domain.Project, error)
+	Update(ctx context.Context, p domain.Project) error
+	Delete(ctx context.Context, id string) error
+	AddMember(ctx context.Context, projectID, userID string) error
+	RemoveMember(ctx context.Context, projectID, userID string) error
+	ListMembers(ctx context.Context, projectID string) ([]domain.ProjectMember, error)
+	IsMember(ctx context.Context, projectID, userID string) (bool, error)
+}
+
+// SessionStore persists authentication sessions. Sessions expire; the store
+// does not automatically purge expired rows — callers must check ExpiresAt.
+type SessionStore interface {
+	Create(ctx context.Context, s domain.Session) error
+	GetByTokenHash(ctx context.Context, tokenHash string) (domain.Session, error)
+	Delete(ctx context.Context, tokenHash string) error
+	DeleteForUser(ctx context.Context, userID string) error
 }

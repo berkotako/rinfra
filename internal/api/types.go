@@ -13,6 +13,7 @@ import (
 type createEngagementRequest struct {
 	Client         string   `json:"client"`
 	Codename       string   `json:"codename"`
+	ProjectID      string   `json:"projectId"`
 	LeadOperator   string   `json:"leadOperator"`
 	EngagementType string   `json:"engagementType"`
 	Targets        []string `json:"targets"`
@@ -28,6 +29,7 @@ func (r createEngagementRequest) toDomain() (domain.Engagement, error) {
 	e := domain.Engagement{
 		Client:         r.Client,
 		Codename:       r.Codename,
+		ProjectID:      r.ProjectID,
 		LeadOperator:   r.LeadOperator,
 		EngagementType: domain.EngagementType(r.EngagementType),
 		Status:         domain.EngagementDraft,
@@ -160,6 +162,7 @@ type startRunRequest struct {
 func engagementToJSON(e domain.Engagement) map[string]any {
 	return map[string]any{
 		"id":             e.ID,
+		"projectId":      e.ProjectID,
 		"client":         e.Client,
 		"codename":       e.Codename,
 		"leadOperator":   e.LeadOperator,

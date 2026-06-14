@@ -60,6 +60,11 @@ func (s *EngagementService) List(ctx context.Context) ([]domain.Engagement, erro
 	return s.engagements.List(ctx)
 }
 
+// ListForProject returns the engagements belonging to a project.
+func (s *EngagementService) ListForProject(ctx context.Context, projectID string) ([]domain.Engagement, error) {
+	return s.engagements.ListForProject(ctx, projectID)
+}
+
 // UpdateStatus transitions an engagement to a new status and records an audit
 // event capturing the old and new values.
 func (s *EngagementService) UpdateStatus(ctx context.Context, id string, newStatus domain.EngagementStatus, actor string) error {

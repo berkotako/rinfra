@@ -77,6 +77,28 @@ The install script generates `RINFRA_MASTER_KEY` into a local `.env` (see
 `.env.example`). Live cloud provisioning additionally needs the Pulumi CLI;
 see `cmd/rinfra-server` docs and `docs/RUNBOOK_DO.md`.
 
+## Authentication, roles & projects
+
+The control plane authenticates operators with bearer-token sessions and three
+roles. On first boot, if no users exist, a default **`admin` / `admin`** account
+is seeded (change it immediately).
+
+| Role | Capabilities |
+|------|--------------|
+| `admin` | Everything: manage all users, projects, and engagements. |
+| `lead` | Owns operators and projects; creates operator accounts, creates/manages their own projects, and binds operators to them. |
+| `operator` | Works within the projects they are assigned to. |
+
+A **project** groups one or more **engagements** (which carry the infrastructure
+and emulations). Access flows from role + project membership: admins see all;
+leads see the projects they lead; operators see the projects they're a member of.
+
+Key endpoints (all under `/api/v1`, bearer token required except `auth/login`):
+`POST auth/login` · `POST auth/logout` · `GET auth/me` · `users` (CRUD) ·
+`projects` (CRUD) + `projects/{id}/members` + `projects/{id}/engagements`.
+Auth is enforced when the server wires the auth subsystem; the test suite runs
+it disabled (legacy operator-header identity) to stay hermetic.
+
 ### Local (Go only)
 
 ```bash

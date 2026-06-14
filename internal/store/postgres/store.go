@@ -51,18 +51,21 @@ func (s *EngagementStore) Create(ctx context.Context, e domain.Engagement) (stri
 			client, codename, lead_operator, engagement_type, status,
 			scope_targets, scope_notes, scope_exclusions,
 			roe_document, roe_window_start, roe_window_end, roe_constraints,
-			auth_by, auth_document, auth_granted_at, auth_expires_at
+			auth_by, auth_document, auth_granted_at, auth_expires_at,
+			project_id
 		) VALUES (
 			$1,$2,$3,$4,$5,
 			$6,$7,$8,
 			$9,$10,$11,$12,
-			$13,$14,$15,$16
+			$13,$14,$15,$16,
+			$17
 		) RETURNING id`,
 		e.Client, e.Codename, e.LeadOperator, string(e.EngagementType), string(e.Status),
 		scopeTargets, e.Scope.Notes, scopeExclusions,
 		e.RoE.DocumentRef, nullTime(e.RoE.WindowStart), nullTime(e.RoE.WindowEnd), roeConstraints,
 		e.Authorization.AuthorizedBy, e.Authorization.DocumentRef,
 		nullTime(e.Authorization.GrantedAt), nullTime(e.Authorization.ExpiresAt),
+		nullString(e.ProjectID),
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create engagement: %w", err)
@@ -77,7 +80,7 @@ func (s *EngagementStore) Get(ctx context.Context, id string) (domain.Engagement
 		       scope_targets, scope_notes, scope_exclusions,
 		       roe_document, roe_window_start, roe_window_end, roe_constraints,
 		       auth_by, auth_document, auth_granted_at, auth_expires_at,
-		       created_at, updated_at
+		       created_at, updated_at, project_id
 		FROM engagements WHERE id = $1`, id)
 	e, err := scanEngagement(row)
 	if err != nil {
@@ -96,7 +99,7 @@ func (s *EngagementStore) List(ctx context.Context) ([]domain.Engagement, error)
 		       scope_targets, scope_notes, scope_exclusions,
 		       roe_document, roe_window_start, roe_window_end, roe_constraints,
 		       auth_by, auth_document, auth_granted_at, auth_expires_at,
-		       created_at, updated_at
+		       created_at, updated_at, project_id
 		FROM engagements ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list engagements: %w", err)
@@ -136,13 +139,15 @@ func (s *EngagementStore) Update(ctx context.Context, e domain.Engagement) error
 			scope_targets=$6, scope_notes=$7, scope_exclusions=$8,
 			roe_document=$9, roe_window_start=$10, roe_window_end=$11, roe_constraints=$12,
 			auth_by=$13, auth_document=$14, auth_granted_at=$15, auth_expires_at=$16,
+			project_id=$17,
 			updated_at=now()
-		WHERE id=$17`,
+		WHERE id=$18`,
 		e.Client, e.Codename, e.LeadOperator, string(e.EngagementType), string(e.Status),
 		scopeTargets, e.Scope.Notes, scopeExclusions,
 		e.RoE.DocumentRef, nullTime(e.RoE.WindowStart), nullTime(e.RoE.WindowEnd), roeConstraints,
 		e.Authorization.AuthorizedBy, e.Authorization.DocumentRef,
 		nullTime(e.Authorization.GrantedAt), nullTime(e.Authorization.ExpiresAt),
+		nullString(e.ProjectID),
 		e.ID,
 	)
 	if err != nil {
@@ -185,6 +190,7 @@ func scanEngagement(row rowScanner) (domain.Engagement, error) {
 		roeWinEnd        *time.Time
 		authGrantedAt    *time.Time
 		authExpiresAt    *time.Time
+		projectID        *string
 	)
 	err := row.Scan(
 		&e.ID, &e.Client, &e.Codename, &e.LeadOperator, &engagementType, &status,
@@ -193,6 +199,7 @@ func scanEngagement(row rowScanner) (domain.Engagement, error) {
 		&e.Authorization.AuthorizedBy, &e.Authorization.DocumentRef,
 		&authGrantedAt, &authExpiresAt,
 		&e.CreatedAt, &e.UpdatedAt,
+		&projectID,
 	)
 	if err != nil {
 		return domain.Engagement{}, err
@@ -220,7 +227,35 @@ func scanEngagement(row rowScanner) (domain.Engagement, error) {
 	if authExpiresAt != nil {
 		e.Authorization.ExpiresAt = *authExpiresAt
 	}
+	if projectID != nil {
+		e.ProjectID = *projectID
+	}
 	return e, nil
+}
+
+// ListForProject returns all engagements belonging to the given project.
+func (s *EngagementStore) ListForProject(ctx context.Context, projectID string) ([]domain.Engagement, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, client, codename, lead_operator, engagement_type, status,
+		       scope_targets, scope_notes, scope_exclusions,
+		       roe_document, roe_window_start, roe_window_end, roe_constraints,
+		       auth_by, auth_document, auth_granted_at, auth_expires_at,
+		       created_at, updated_at, project_id
+		FROM engagements WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list engagements for project %s: %w", projectID, err)
+	}
+	defer rows.Close()
+
+	var out []domain.Engagement
+	for rows.Next() {
+		e, err := scanEngagement(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan engagement: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // --- InfraStore ---

@@ -62,6 +62,15 @@ func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
 	case errors.Is(err, service.ErrJobRunning):
 		status = http.StatusConflict
 		code = "job_running"
+	case errors.Is(err, service.ErrInvalidCredentials):
+		status = http.StatusUnauthorized
+		code = "invalid_credentials"
+	case errors.Is(err, service.ErrUnauthorized):
+		status = http.StatusForbidden
+		code = "forbidden"
+	case errors.Is(err, service.ErrUsernameTaken):
+		status = http.StatusConflict
+		code = "username_taken"
 	default:
 		status = http.StatusInternalServerError
 		code = "internal_error"
