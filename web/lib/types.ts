@@ -91,6 +91,45 @@ export interface C2Framework {
   lang: string;
 }
 
+// How RInfra drives a deployed teamserver: an automated operator API ("live"),
+// partial scripting ("scripted"), or human-driven only ("manual").
+export type OperatorMode = "live" | "scripted" | "manual";
+
+// ManualAccess mirrors the control plane's c2.ManualAccess descriptor: how an
+// operator connects a native client to a deployed teamserver by hand.
+export interface ManualAccess {
+  client: string; // native operator client, e.g. "sliver-client"
+  protocol: string; // grpc-mtls | https | web-ui | tcp
+  operatorPort: number;
+  sshCommand: string; // ready-to-run ssh -L local-forward
+  instructions: string;
+}
+
+// OperatorSession is an active implant/agent session reported by the operator API.
+export interface OperatorSession {
+  id: string;
+  host: string;
+  user: string;
+  os: string;
+}
+
+// DeployedC2 is a provisioned teamserver surfaced in the console: both its
+// automated-operator status and its manual-access path.
+export interface DeployedC2 {
+  nodeId: string;
+  name: string;
+  ip: string;
+  status: NodeStatus;
+  framework: string; // C2Framework id
+  frameworkName: string;
+  tier: C2Tier;
+  listener: string;
+  operatorMode: OperatorMode;
+  liveClient: string; // label of the automated operator client ("" if manual-only)
+  manual: ManualAccess;
+  sessions: OperatorSession[];
+}
+
 // ---------- Emulation ----------
 export interface Technique {
   id: string; // e.g. T1566.002

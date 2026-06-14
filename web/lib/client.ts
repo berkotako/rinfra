@@ -13,8 +13,54 @@ import type {
   Project,
   ProjectMember,
   Role,
+  DeployedC2,
+  C2Tier,
 } from "./types";
-import { ENGAGEMENTS, INITIAL_NODES, INITIAL_EDGES, C2_FRAMEWORKS, SCENARIOS } from "./data";
+import {
+  ENGAGEMENTS,
+  INITIAL_NODES,
+  INITIAL_EDGES,
+  C2_FRAMEWORKS,
+  SCENARIOS,
+  C2_OPERATOR_ACCESS,
+  OPERATOR_SESSIONS,
+} from "./data";
+
+// Renders the operator-facing ssh local-forward command, matching the control
+// plane's c2.TunnelSpec.SSHCommand format.
+function buildSSHCommand(ip: string, port: number): string {
+  return `ssh -i <engagement-ssh-key> -N -L ${port}:127.0.0.1:${port} root@${ip} -p 22`;
+}
+
+// Builds a DeployedC2 view for a c2_server node from the framework catalog and
+// the per-framework operator-access spec.
+function deployedC2FromNode(node: CanvasNode): DeployedC2 | null {
+  if (node.type !== "c2_server" || !node.framework) return null;
+  const fw = C2_FRAMEWORKS.find((f) => f.id === node.framework);
+  const access = C2_OPERATOR_ACCESS[node.framework];
+  if (!fw || !access) return null;
+  const live = node.status === "live";
+  return {
+    nodeId: node.id,
+    name: node.name,
+    ip: node.ip,
+    status: node.status,
+    framework: fw.id,
+    frameworkName: fw.name,
+    tier: fw.tier,
+    listener: node.listener ?? fw.listeners[0] ?? "",
+    operatorMode: access.mode,
+    liveClient: access.liveClient,
+    manual: {
+      client: access.client,
+      protocol: access.protocol,
+      operatorPort: access.port,
+      sshCommand: buildSSHCommand(live ? node.ip : "<teamserver-ip>", access.port),
+      instructions: access.instructions,
+    },
+    sessions: live ? OPERATOR_SESSIONS[node.id] ?? [] : [],
+  };
+}
 
 // ---------- Typed error codes coming from the API error envelope ----------
 
@@ -231,6 +277,9 @@ export interface RInfraClient {
 
   // C2 frameworks
   listC2Frameworks(): Promise<C2Framework[]>;
+
+  // Deployed teamservers: automated-operator status + manual-access path.
+  listDeployedC2(engagementId?: string): Promise<DeployedC2[]>;
 
   // Scenarios & runs
   listScenarios(): Promise<Scenario[]>;
@@ -539,6 +588,13 @@ export class MockClient implements RInfraClient {
     return C2_FRAMEWORKS;
   }
 
+  async listDeployedC2(engagementId?: string): Promise<DeployedC2[]> {
+    void engagementId;
+    return INITIAL_NODES.map(deployedC2FromNode).filter(
+      (d): d is DeployedC2 => d !== null
+    );
+  }
+
   async listScenarios(): Promise<Scenario[]> {
     return SCENARIOS;
   }
@@ -652,6 +708,41 @@ function mapC2FrameworkFromApi(f: Record<string, unknown>): C2Framework {
     gated: Boolean(f["gated"]),
     listeners: [],
     lang: "",
+  };
+}
+
+// Backend framework name -> frontend C2Framework id (mostly identical).
+const FRAMEWORK_ALIAS: Record<string, string> = { cobaltstrike: "cobalt" };
+
+// Maps the control plane's c2.ManualAccessView JSON to a DeployedC2.
+function mapManualAccessFromApi(b: Record<string, unknown>): DeployedC2 | null {
+  const apiFw = String(b["framework"] ?? "");
+  if (!apiFw) return null;
+  const fwId = FRAMEWORK_ALIAS[apiFw] ?? apiFw;
+  const fw = C2_FRAMEWORKS.find((f) => f.id === fwId);
+  const tier: C2Tier = fw?.tier ?? "fronted";
+  const mode: DeployedC2["operatorMode"] =
+    tier === "orchestrated" ? "live" : tier === "scripted" ? "scripted" : "manual";
+  const access = C2_OPERATOR_ACCESS[fwId];
+  return {
+    nodeId: String(b["nodeId"] ?? ""),
+    name: fw?.name ?? apiFw,
+    ip: String(b["host"] ?? ""),
+    status: "live",
+    framework: fwId,
+    frameworkName: fw?.name ?? apiFw,
+    tier,
+    listener: fw?.listeners[0] ?? "",
+    operatorMode: mode,
+    liveClient: mode === "manual" ? "" : access?.liveClient ?? "operator API",
+    manual: {
+      client: String(b["client"] ?? access?.client ?? ""),
+      protocol: String(b["protocol"] ?? ""),
+      operatorPort: Number(b["operatorPort"] ?? 0),
+      sshCommand: String(b["sshCommand"] ?? ""),
+      instructions: String(b["instructions"] ?? ""),
+    },
+    sessions: [],
   };
 }
 
@@ -1068,6 +1159,23 @@ export class RestClient implements RInfraClient {
   async listC2Frameworks(): Promise<C2Framework[]> {
     const body = await this.fetch<{ frameworks: Record<string, unknown>[] }>("/c2/frameworks");
     return (body.frameworks ?? []).map(mapC2FrameworkFromApi);
+  }
+
+  async listDeployedC2(engagementId?: string): Promise<DeployedC2[]> {
+    if (!engagementId) return [];
+    try {
+      const body = await this.fetch<Record<string, unknown>>(
+        `/engagements/${engagementId}/c2/manual-access`
+      );
+      const d = mapManualAccessFromApi(body);
+      return d ? [d] : [];
+    } catch (e) {
+      // No live C2 node yet (or not authorized) — surface an empty list.
+      if (e instanceof ApiError && (e.status === 404 || e.code === "not_found")) {
+        return [];
+      }
+      throw e;
+    }
   }
 
   // ---------- Scenarios & Runs ----------

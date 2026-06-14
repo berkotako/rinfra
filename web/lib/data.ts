@@ -8,6 +8,8 @@ import type {
   CanvasNode,
   CanvasEdge,
   NodeTemplate,
+  OperatorMode,
+  OperatorSession,
 } from "./types";
 
 export const PROVIDERS: Record<CloudProvider, ProviderMeta> = {
@@ -355,6 +357,101 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
   { type: "c2_server", subtype: "Sliver", label: "C2 Server", icon: "Server", desc: "Team server host" },
   { type: "payload_host", subtype: "Staging", label: "Staging Host", icon: "HardDrive", desc: "Payload delivery" },
 ];
+
+// Per-framework operator-access spec: how operators connect a native client and
+// how fully RInfra automates it. Mirrors the control plane's per-framework
+// c2.ManualAccess descriptors + support tiers.
+export interface C2AccessSpec {
+  client: string;
+  protocol: string;
+  port: number;
+  mode: OperatorMode;
+  liveClient: string; // "" for manual-only (Fronted tier)
+  instructions: string;
+}
+
+export const C2_OPERATOR_ACCESS: Record<string, C2AccessSpec> = {
+  sliver: {
+    client: "sliver-client",
+    protocol: "grpc-mtls",
+    port: 31337,
+    mode: "live",
+    liveClient: "gRPC operator API (mTLS)",
+    instructions:
+      "Fetch the operator .cfg from the teamserver, open the tunnel, then `sliver-client import <cfg>` — it reaches the multiplayer listener at 127.0.0.1:31337 through the tunnel.",
+  },
+  mythic: {
+    client: "Mythic web UI",
+    protocol: "web-ui",
+    port: 7443,
+    mode: "live",
+    liveClient: "GraphQL scripting API",
+    instructions:
+      "Open the tunnel, then browse https://127.0.0.1:7443 and log in with the operator credentials set at install. Drive tasks from the UI.",
+  },
+  metasploit: {
+    client: "msfconsole / msfrpcd client",
+    protocol: "https",
+    port: 55553,
+    mode: "live",
+    liveClient: "msfrpcd RPC",
+    instructions:
+      "Open the tunnel, then connect your client to 127.0.0.1:55553 with the RPC credentials from /etc/msf/rpc.env.",
+  },
+  custom: {
+    client: "your operator client",
+    protocol: "tcp",
+    port: 8443,
+    mode: "live",
+    liveClient: "your operator surface",
+    instructions:
+      "Open the tunnel and connect your client to the operator port you defined for this framework.",
+  },
+  havoc: {
+    client: "Havoc client",
+    protocol: "tcp",
+    port: 40056,
+    mode: "scripted",
+    liveClient: "scripted operator API",
+    instructions:
+      "Open the tunnel, then connect the Havoc client to 127.0.0.1:40056. Some emulation steps are scripted; the rest are driven by hand.",
+  },
+  poshc2: {
+    client: "PoshC2 ImplantHandler",
+    protocol: "tcp",
+    port: 8443,
+    mode: "scripted",
+    liveClient: "scripted CLI",
+    instructions:
+      "Open the tunnel and use the PoshC2 server CLI over it. Partial scripting; the operator drives the rest.",
+  },
+  cobalt: {
+    client: "Cobalt Strike client (aggressor)",
+    protocol: "tcp",
+    port: 50050,
+    mode: "manual",
+    liveClient: "",
+    instructions:
+      "Open the tunnel, then connect the Cobalt Strike client to 127.0.0.1:50050 with the team server password set at deploy time. RInfra provisions and fronts CS; the operator drives it.",
+  },
+  bruteratel: {
+    client: "Brute Ratel C4 commander",
+    protocol: "https",
+    port: 443,
+    mode: "manual",
+    liveClient: "",
+    instructions:
+      "Open the tunnel, then point the Brute Ratel commander at 127.0.0.1:443 with the operator profile/license for this engagement.",
+  },
+};
+
+// Mock active operator sessions, keyed by C2 node id. Surfaced only for live nodes.
+export const OPERATOR_SESSIONS: Record<string, OperatorSession[]> = {
+  n3: [
+    { id: "9f3c1a2b", host: "WS-FIN-04", user: "CORP\\j.reyes", os: "windows/amd64" },
+    { id: "2b77e0d4", host: "SRV-DC-01", user: "NT AUTHORITY\\SYSTEM", os: "windows/amd64" },
+  ],
+};
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {
   live: { label: "Live", cls: "ok" },
