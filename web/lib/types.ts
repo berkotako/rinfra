@@ -106,6 +106,38 @@ export interface Scenario {
   techniques: Technique[];
 }
 
+// ---------- Users, roles & projects ----------
+// Aligned to internal/domain/user.go and project.go.
+export type Role = "admin" | "lead" | "operator";
+
+export interface User {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  role: Role;
+  managerId: string;
+  disabled: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  clientName: string;
+  leadId: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ProjectMember {
+  projectId: string;
+  userId: string;
+  addedAt?: string;
+}
+
 // ---------- Preferences ----------
 export type AccentId = "indigo" | "slate" | "peri" | "steel";
 export type NodeStyle = "soft" | "compact" | "outline";

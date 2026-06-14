@@ -61,6 +61,7 @@ const (
 // audit.Event is bound to an Engagement.
 type Engagement struct {
 	ID             string
+	ProjectID      string // project this engagement belongs to; may be empty
 	Client         string
 	Codename       string // short operational name, e.g. "OPERATION COBALT"
 	LeadOperator   string // primary operator responsible for the engagement

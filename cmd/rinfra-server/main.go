@@ -165,6 +165,9 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	scenarioStore := memstore.NewScenarioStore()
 	credStore := memstore.NewCredentialStore()
 	jobStore := memstore.NewJobStore()
+	userStore := memstore.NewUserStore()
+	projectStore := memstore.NewProjectStore()
+	sessionStore := memstore.NewSessionStore()
 
 	svcEng := service.NewEngagementService(engStore, auditLog)
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
@@ -172,6 +175,9 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 	// Dev mode: keep the fake resolver so no live teamserver is needed.
 	svcEmu.WithResolver(service.NewFakeResolver())
+	svcAuth := service.NewAuthService(userStore, sessionStore, auditLog, log)
+	svcProject := service.NewProjectService(projectStore, userStore, auditLog)
+	seedAdmin(log, svcAuth)
 
 	svcInfra.ResumeJobs(context.Background())
 
@@ -181,6 +187,8 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Emulation:  svcEmu,
 		Hub:        hub,
 		AuditLog:   audit.Reader(auditLog),
+		Auth:       svcAuth,
+		Projects:   svcProject,
 	}, log)
 
 	runServer(log, router)
@@ -206,6 +214,9 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	scenarioStore := storepostgres.NewScenarioStore(pool)
 	credStore := storepostgres.NewCredentialStore(pool)
 	jobStore := storepostgres.NewJobStore(pool)
+	userStore := storepostgres.NewUserStore(pool)
+	projectStore := storepostgres.NewProjectStore(pool)
+	sessionStore := storepostgres.NewSessionStore(pool)
 
 	svcEng := service.NewEngagementService(engStore, auditLog)
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
@@ -214,6 +225,9 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	// Production mode: use registry-backed resolver that finds the engagement's
 	// deployed C2 topology and calls C2Provider.Control(teamserver).
 	svcEmu.WithResolver(service.NewRegistryResolver(infraStore))
+	svcAuth := service.NewAuthService(userStore, sessionStore, auditLog, log)
+	svcProject := service.NewProjectService(projectStore, userStore, auditLog)
+	seedAdmin(log, svcAuth)
 
 	svcInfra.ResumeJobs(context.Background())
 
@@ -223,9 +237,18 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Emulation:  svcEmu,
 		Hub:        hub,
 		AuditLog:   audit.Reader(auditLog),
+		Auth:       svcAuth,
+		Projects:   svcProject,
 	}, log)
 
 	runServer(log, router)
+}
+
+// seedAdmin creates the bootstrap admin/admin account when no users exist.
+func seedAdmin(log *slog.Logger, svcAuth *service.AuthService) {
+	if _, err := svcAuth.SeedAdmin(context.Background()); err != nil {
+		log.Error("seed admin user", "err", err)
+	}
 }
 
 func runServer(log *slog.Logger, handler http.Handler) {

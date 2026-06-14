@@ -1,11 +1,14 @@
-# Development Postgres instance for RInfra.
-# Use: make db-up   → starts Postgres on :5432
-#      make db-down  → stops and removes the container
-#      make migrate-up / migrate-down → requires the migrate CLI.
+# RInfra full stack for a fresh, self-contained install.
 #
-# Install golang-migrate CLI:
-#   go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.1
-#   or download a release binary from https://github.com/golang-migrate/migrate/releases
+#   scripts/install.sh            → one-shot fresh install / update (recommended)
+#   docker compose up -d          → bring the whole stack up
+#   docker compose up -d postgres → just Postgres (used by the Makefile dev flow)
+#   docker compose down           → stop and remove containers
+#
+# Secrets (RINFRA_MASTER_KEY, PULUMI_CONFIG_PASSPHRASE) are read from a local
+# .env file, which scripts/install.sh generates if it does not exist. See
+# .env.example. Install the golang-migrate CLI only if you run migrations
+# outside Docker; the `migrate` service below handles it in-stack.
 services:
   postgres:
     image: postgres:16
@@ -22,6 +25,54 @@ services:
       retries: 5
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+  # One-shot: applies golang-migrate migrations, then exits.
+  migrate:
+    image: migrate/migrate:v4.18.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://rinfra:rinfra@postgres:5432/rinfra?sslmode=disable",
+        "up",
+      ]
+    restart: "no"
+
+  # Go control plane.
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      RINFRA_ADDR: ":8080"
+      DATABASE_URL: postgres://rinfra:rinfra@postgres:5432/rinfra?sslmode=disable
+      RINFRA_MASTER_KEY: ${RINFRA_MASTER_KEY}
+      PULUMI_CONFIG_PASSPHRASE: ${PULUMI_CONFIG_PASSPHRASE:-rinfra-local}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # Next.js console (static export served by nginx).
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_RINFRA_API: ${NEXT_PUBLIC_RINFRA_API:-http://localhost:8080}
+    depends_on:
+      - server
+    ports:
+      - "3000:80"
+    restart: unless-stopped
 
 volumes:
   postgres_data:

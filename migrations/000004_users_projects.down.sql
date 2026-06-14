@@ -1,0 +1,5 @@
+ALTER TABLE engagements DROP COLUMN IF EXISTS project_id;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS project_members;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS users;

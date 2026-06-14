@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rinfra/rinfra/internal/domain"
 )
 
 type contextKey string
@@ -15,6 +17,7 @@ type contextKey string
 const (
 	ctxKeyRequestID contextKey = "request_id"
 	ctxKeyActor     contextKey = "actor"
+	ctxKeyUser      contextKey = "user"
 )
 
 // RequestID adds a UUID request ID to the context and response headers.
@@ -50,6 +53,90 @@ func actorFrom(ctx context.Context) string {
 		return v
 	}
 	return "anonymous"
+}
+
+// Authenticate validates a bearer-token session and attaches the authenticated
+// user to the request context. It is a NO-OP when svc.Auth is nil — this
+// preserves the legacy header-only identity used by the existing test suite and
+// keeps the control plane runnable without the auth subsystem. When auth IS
+// wired, every route except the public ones requires a valid token.
+func Authenticate(svc Services) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if svc.Auth == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Public routes need no authentication.
+			switch r.URL.Path {
+			case "/healthz", "/api/v1/auth/login":
+				next.ServeHTTP(w, r)
+				return
+			}
+			token := bearerToken(r)
+			if token == "" {
+				writeErrorCode(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+				return
+			}
+			user, err := svc.Auth.Authenticate(r.Context(), token)
+			if err != nil {
+				writeErrorCode(w, http.StatusUnauthorized, "unauthorized", "invalid or expired session")
+				return
+			}
+			ctx := context.WithValue(r.Context(), ctxKeyUser, &user)
+			ctx = context.WithValue(ctx, ctxKeyActor, user.Username)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// RequireRole returns middleware that rejects requests whose authenticated user
+// is not one of the given roles. When no user is present (auth disabled / dev /
+// legacy), it allows the request through — service-layer authorization is the
+// authoritative gate; this is a lightweight guard for enabled-auth deployments.
+func RequireRole(roles ...domain.Role) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, ok := userFrom(r.Context())
+			if !ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			for _, role := range roles {
+				if u.Role == role {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			writeErrorCode(w, http.StatusForbidden, "forbidden", "insufficient role")
+		})
+	}
+}
+
+// bearerToken extracts the token from an "Authorization: Bearer <token>" header.
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
+		return strings.TrimSpace(h[len(prefix):])
+	}
+	return ""
+}
+
+// userFrom returns the authenticated user from context, if present.
+func userFrom(ctx context.Context) (*domain.User, bool) {
+	u, ok := ctx.Value(ctxKeyUser).(*domain.User)
+	return u, ok
+}
+
+// actorUser returns the authenticated user, or a synthetic admin actor when
+// auth is disabled (dev/test/legacy). This lets the user/project endpoints and
+// their service-layer authorization run uniformly in every mode.
+func actorUser(ctx context.Context) domain.User {
+	if u, ok := userFrom(ctx); ok {
+		return *u
+	}
+	return domain.User{ID: "dev", Username: actorFrom(ctx), Role: domain.RoleAdmin}
 }
 
 // requestIDFrom extracts the request ID from context.
@@ -128,7 +215,7 @@ func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-RInfra-Operator, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-RInfra-Operator, X-Request-ID, Authorization")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

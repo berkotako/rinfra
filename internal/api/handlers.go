@@ -23,10 +23,57 @@ type handlers struct {
 // ---------- Engagement handlers ----------
 
 func (h *handlers) listEngagements(w http.ResponseWriter, r *http.Request) {
-	engs, err := h.svc.Engagement.List(r.Context())
+	ctx := r.Context()
+	actor := actorUser(ctx)
+	projectID := r.URL.Query().Get("projectId")
+
+	// Explicit project filter: enforce access then list that project's work.
+	if projectID != "" {
+		if h.svc.Projects != nil {
+			ok, err := h.svc.Projects.CanAccessProject(ctx, actor, projectID)
+			if err != nil {
+				writeError(w, h.log, err)
+				return
+			}
+			if !ok {
+				writeErrorCode(w, http.StatusForbidden, "forbidden", "cannot access project")
+				return
+			}
+		}
+		engs, err := h.svc.Engagement.ListForProject(ctx, projectID)
+		if err != nil {
+			writeError(w, h.log, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"engagements": engagementsToJSON(engs)})
+		return
+	}
+
+	// Admins (and the legacy/dev synthetic admin when auth is disabled) see all.
+	if actor.Role == domain.RoleAdmin || h.svc.Projects == nil {
+		engs, err := h.svc.Engagement.List(ctx)
+		if err != nil {
+			writeError(w, h.log, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"engagements": engagementsToJSON(engs)})
+		return
+	}
+
+	// Non-admins see only engagements within the projects they can access.
+	projs, err := h.svc.Projects.List(ctx, actor)
 	if err != nil {
 		writeError(w, h.log, err)
 		return
+	}
+	var engs []domain.Engagement
+	for _, p := range projs {
+		pe, err := h.svc.Engagement.ListForProject(ctx, p.ID)
+		if err != nil {
+			writeError(w, h.log, err)
+			return
+		}
+		engs = append(engs, pe...)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"engagements": engagementsToJSON(engs)})
 }
@@ -40,6 +87,18 @@ func (h *handlers) createEngagement(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErrorCode(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
+	}
+	// If bound to a project, the actor must be able to access it.
+	if e.ProjectID != "" && h.svc.Projects != nil {
+		ok, err := h.svc.Projects.CanAccessProject(r.Context(), actorUser(r.Context()), e.ProjectID)
+		if err != nil {
+			writeError(w, h.log, err)
+			return
+		}
+		if !ok {
+			writeErrorCode(w, http.StatusForbidden, "forbidden", "cannot access project")
+			return
+		}
 	}
 	created, err := h.svc.Engagement.Create(r.Context(), e, actorFrom(r.Context()))
 	if err != nil {

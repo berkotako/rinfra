@@ -46,14 +46,69 @@ instead, see `web/README.md` (`make web-dev`).
 
 ## Getting started
 
+### Docker (full stack — recommended)
+
+A single script brings up the whole stack (Postgres + migrations + Go control
+plane + web console) in Docker. It is safe to re-run on **every update** — it
+rebuilds from the current checkout, re-applies migrations, and reuses the
+secrets it generated the first time:
+
+```bash
+scripts/install.sh            # build + start everything
+scripts/install.sh --pull     # update to latest, then rebuild + restart
+scripts/install.sh --down     # stop the stack
+scripts/install.sh --fresh    # wipe the Postgres volume (DESTRUCTIVE)
+```
+
+Then open:
+
+| Service | URL |
+|---------|-----|
+| Web console | http://localhost:3000 |
+| Control plane | http://localhost:8080 (`GET /healthz`) |
+
+The console requires sign-in. **Default credentials on a fresh install are
+`admin` / `admin`** — change them under **Settings → Account**. Cloud provider
+keys (AWS / GCP / Azure / DigitalOcean) are added under **Settings → Cloud
+credentials**; they are stored encrypted and bound to a single engagement
+(bring-your-own cloud, never RInfra's tenancy).
+
+The install script generates `RINFRA_MASTER_KEY` into a local `.env` (see
+`.env.example`). Live cloud provisioning additionally needs the Pulumi CLI;
+see `cmd/rinfra-server` docs and `docs/RUNBOOK_DO.md`.
+
+## Authentication, roles & projects
+
+The control plane authenticates operators with bearer-token sessions and three
+roles. On first boot, if no users exist, a default **`admin` / `admin`** account
+is seeded (change it immediately).
+
+| Role | Capabilities |
+|------|--------------|
+| `admin` | Everything: manage all users, projects, and engagements. |
+| `lead` | Owns operators and projects; creates operator accounts, creates/manages their own projects, and binds operators to them. |
+| `operator` | Works within the projects they are assigned to. |
+
+A **project** groups one or more **engagements** (which carry the infrastructure
+and emulations). Access flows from role + project membership: admins see all;
+leads see the projects they lead; operators see the projects they're a member of.
+
+Key endpoints (all under `/api/v1`, bearer token required except `auth/login`):
+`POST auth/login` · `POST auth/logout` · `GET auth/me` · `users` (CRUD) ·
+`projects` (CRUD) + `projects/{id}/members` + `projects/{id}/engagements`.
+Auth is enforced when the server wires the auth subsystem; the test suite runs
+it disabled (legacy operator-header identity) to stay hermetic.
+
+### Local (Go only)
+
 ```bash
 go build ./...
 go vet ./...
 go run ./cmd/rinfra-server   # serves :8080, logs registered C2 tiers
 ```
 
-The frontend (Next.js + React Flow drag-and-drop canvas) lives in a separate
-repo and talks to this control plane over REST/JSON.
+The frontend (Next.js + React Flow drag-and-drop canvas) lives under `web/` and
+talks to this control plane over REST/JSON (`make web-dev`, or `make dev`).
 
 ## Build order
 

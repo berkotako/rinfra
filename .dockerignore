@@ -1,0 +1,10 @@
+.git
+.github
+web
+docs
+*.md
+.env
+.env.*
+postgres_data
+.dockerignore
+Dockerfile

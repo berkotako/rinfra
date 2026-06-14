@@ -96,6 +96,19 @@ func (s *EngagementStore) UpdateStatus(_ context.Context, id string, status doma
 	return nil
 }
 
+// ListForProject returns all engagements that belong to the given project.
+func (s *EngagementStore) ListForProject(_ context.Context, projectID string) ([]domain.Engagement, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []domain.Engagement
+	for _, e := range s.rows {
+		if e.ProjectID == projectID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
 // --- InfraStore ---
 
 // InfraStore is the in-memory implementation of store.InfraStore.

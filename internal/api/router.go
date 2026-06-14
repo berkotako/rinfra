@@ -16,6 +16,11 @@ type Services struct {
 	Emulation  *service.EmulationService
 	Hub        *service.Hub
 	AuditLog   audit.Reader
+	// Auth and Projects are optional: when Auth is nil the Authenticate
+	// middleware is a no-op and the user/project routes act on a synthetic
+	// admin (legacy / dev / test behavior).
+	Auth     *service.AuthService
+	Projects *service.ProjectService
 }
 
 // NewRouter builds and returns the chi router with all API v1 routes mounted.
@@ -26,6 +31,7 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 	r.Use(RequestID)
 	r.Use(OperatorIdentity)
 	r.Use(CORS)
+	r.Use(Authenticate(svc))
 	r.Use(Recoverer(log))
 	r.Use(RequestLogger(log))
 
@@ -37,6 +43,33 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Authentication.
+		r.Post("/auth/login", h.login)
+		r.Post("/auth/logout", h.logout)
+		r.Get("/auth/me", h.me)
+
+		// Users.
+		r.Get("/users", h.listUsers)
+		r.Post("/users", h.createUser)
+		r.Route("/users/{id}", func(r chi.Router) {
+			r.Get("/", h.getUser)
+			r.Patch("/", h.patchUser)
+			r.Post("/password", h.changePassword)
+		})
+
+		// Projects.
+		r.Get("/projects", h.listProjects)
+		r.Post("/projects", h.createProject)
+		r.Route("/projects/{id}", func(r chi.Router) {
+			r.Get("/", h.getProject)
+			r.Patch("/", h.patchProject)
+			r.Delete("/", h.deleteProject)
+			r.Get("/members", h.listProjectMembers)
+			r.Post("/members", h.addProjectMember)
+			r.Delete("/members/{userId}", h.removeProjectMember)
+			r.Get("/engagements", h.listProjectEngagements)
+		})
+
 		// Engagements.
 		r.Get("/engagements", h.listEngagements)
 		r.Post("/engagements", h.createEngagement)
