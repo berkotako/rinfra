@@ -3,17 +3,32 @@ import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Icons } from "../icons";
+import { useAuth } from "../../lib/auth";
+import type { Role } from "../../lib/types";
 
-const NAV = [
+interface NavItem {
+  id: string;
+  label: string;
+  icon: string;
+  href: string;
+  /** Roles allowed to see this item. Omitted = visible to everyone. */
+  roles?: Role[];
+}
+
+const NAV: NavItem[] = [
   { id: "engagements", label: "Engagements", icon: "Target", href: "/engagements" },
+  { id: "projects", label: "Projects", icon: "Building", href: "/projects" },
   { id: "infrastructure", label: "Infrastructure", icon: "Network", href: "/infrastructure" },
   { id: "c2", label: "C2 Frameworks", icon: "Server", href: "/c2" },
   { id: "emulation", label: "Emulation", icon: "Crosshair", href: "/emulation" },
   { id: "reporting", label: "Coverage & Reports", icon: "FileText", href: "/reporting" },
+  { id: "users", label: "Users", icon: "User", href: "/users", roles: ["admin", "lead"] },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { role } = useAuth();
+  const nav = NAV.filter((n) => !n.roles || (role !== null && n.roles.includes(role)));
 
   return (
     <div
@@ -92,7 +107,7 @@ export default function Sidebar() {
         >
           Workspace
         </div>
-        {NAV.map((n) => {
+        {nav.map((n) => {
           const active = pathname === n.href || (n.href !== "/" && pathname.startsWith(n.href));
           const Ico = Icons[n.icon] || Icons.Target;
           return (

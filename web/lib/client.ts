@@ -9,6 +9,10 @@ import type {
   Scenario,
   NodeStatus,
   EngagementStatus,
+  User,
+  Project,
+  ProjectMember,
+  Role,
 } from "./types";
 import { ENGAGEMENTS, INITIAL_NODES, INITIAL_EDGES, C2_FRAMEWORKS, SCENARIOS } from "./data";
 
@@ -22,7 +26,45 @@ export type ApiErrorCode =
   | "job_running"
   | "not_found"
   | "bad_request"
+  | "unauthorized"
+  | "invalid_credentials"
+  | "forbidden"
+  | "username_taken"
+  | "invalid_request"
   | "internal_error";
+
+// ---------- Bearer-token session storage ----------
+//
+// The REST control plane authenticates with opaque bearer tokens (see
+// internal/api/middleware.go). We persist the token in localStorage so a
+// session survives a page reload; the RestClient attaches it as a
+// Authorization header on every request.
+
+const TOKEN_KEY = "rinfra-token";
+
+let _token: string | null = null;
+
+export function getAuthToken(): string | null {
+  if (_token) return _token;
+  if (typeof window === "undefined") return null;
+  try {
+    _token = localStorage.getItem(TOKEN_KEY);
+  } catch {
+    _token = null;
+  }
+  return _token;
+}
+
+export function setAuthToken(token: string | null): void {
+  _token = token;
+  if (typeof window === "undefined") return;
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // ignore (private mode etc.)
+  }
+}
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
@@ -139,6 +181,27 @@ export interface AuditEvent {
 // ---------- The client interface ----------
 
 export interface RInfraClient {
+  // Authentication
+  login(username: string, password: string): Promise<{ token: string; user: User }>;
+  logout(): Promise<void>;
+  me(): Promise<User>;
+
+  // User administration
+  listUsers(): Promise<User[]>;
+  createUser(params: CreateUserParams): Promise<User>;
+  updateUser(id: string, patch: UpdateUserParams): Promise<User>;
+  changePassword(id: string, newPassword: string): Promise<void>;
+
+  // Projects & membership
+  listProjects(): Promise<Project[]>;
+  createProject(params: ProjectParams): Promise<Project>;
+  updateProject(id: string, params: ProjectParams): Promise<Project>;
+  deleteProject(id: string): Promise<void>;
+  listProjectMembers(id: string): Promise<ProjectMember[]>;
+  addProjectMember(id: string, userId: string): Promise<void>;
+  removeProjectMember(id: string, userId: string): Promise<void>;
+  listProjectEngagements(id: string): Promise<Engagement[]>;
+
   // Core read operations
   listEngagements(): Promise<Engagement[]>;
   getEngagement(id: string): Promise<Engagement>;
@@ -175,9 +238,33 @@ export interface RInfraClient {
   getRun(runId: string): Promise<ScenarioRun>;
 }
 
+export interface CreateUserParams {
+  username: string;
+  displayName?: string;
+  email?: string;
+  role: Role;
+  password: string;
+}
+
+export interface UpdateUserParams {
+  displayName?: string;
+  email?: string;
+  role?: Role;
+  disabled?: boolean;
+  managerId?: string;
+}
+
+export interface ProjectParams {
+  name: string;
+  description?: string;
+  clientName?: string;
+  leadId?: string;
+}
+
 export interface CreateEngagementParams {
   client: string;
   codename: string;
+  projectId?: string;
   leadOperator: string;
   engagementType: string;
   targets: string[];
@@ -204,9 +291,141 @@ export interface PatchEngagementParams {
 export const OPERATOR_HEADER = "X-RInfra-Operator";
 export const DEFAULT_OPERATOR = "console-user";
 
+// ---------- Mock directory (demo build only) ----------
+
+const MOCK_USERS: User[] = [
+  { id: "u-admin", username: "admin", displayName: "Administrator", email: "", role: "admin", managerId: "", disabled: false },
+  { id: "u-lead", username: "j.rivera", displayName: "Jordan Rivera", email: "jordan@redcell.example", role: "lead", managerId: "", disabled: false },
+  { id: "u-op1", username: "k.shaw", displayName: "Kai Shaw", email: "kai@redcell.example", role: "operator", managerId: "u-lead", disabled: false },
+  { id: "u-op2", username: "m.olsen", displayName: "Morgan Olsen", email: "morgan@redcell.example", role: "operator", managerId: "u-lead", disabled: false },
+];
+
+const MOCK_PROJECTS: Project[] = [
+  { id: "p-acme", name: "Acme Q2 Red Team", description: "Quarterly external + internal red team.", clientName: "Acme Corp", leadId: "u-lead" },
+  { id: "p-globex", name: "Globex Purple Team", description: "Detection validation engagement.", clientName: "Globex", leadId: "u-lead" },
+];
+
+const MOCK_MEMBERS: ProjectMember[] = [
+  { projectId: "p-acme", userId: "u-op1" },
+  { projectId: "p-acme", userId: "u-op2" },
+  { projectId: "p-globex", userId: "u-op1" },
+];
+
+let _mockSeq = 1;
+
 // ---------- MockClient ----------
 
 export class MockClient implements RInfraClient {
+  // ---------- Auth (demo) ----------
+
+  async login(username: string, password: string): Promise<{ token: string; user: User }> {
+    // The static demo accepts the seeded admin/admin (and any known mock user
+    // with password "admin") so the directory screens are explorable offline.
+    const user = MOCK_USERS.find((u) => u.username === username && !u.disabled);
+    if (!user || password !== "admin") {
+      throw new ApiError("invalid_credentials", "Invalid username or password", 401);
+    }
+    return { token: "mock-token-" + user.id, user };
+  }
+
+  async logout(): Promise<void> {
+    /* no-op in demo */
+  }
+
+  async me(): Promise<User> {
+    return MOCK_USERS[0];
+  }
+
+  // ---------- Users (demo) ----------
+
+  async listUsers(): Promise<User[]> {
+    return [...MOCK_USERS];
+  }
+
+  async createUser(params: CreateUserParams): Promise<User> {
+    if (MOCK_USERS.some((u) => u.username === params.username)) {
+      throw new ApiError("username_taken", "Username already taken", 409);
+    }
+    const u: User = {
+      id: "u-" + _mockSeq++,
+      username: params.username,
+      displayName: params.displayName ?? "",
+      email: params.email ?? "",
+      role: params.role,
+      managerId: "",
+      disabled: false,
+    };
+    MOCK_USERS.push(u);
+    return u;
+  }
+
+  async updateUser(id: string, patch: UpdateUserParams): Promise<User> {
+    const u = MOCK_USERS.find((x) => x.id === id);
+    if (!u) throw new ApiError("not_found", "User not found", 404);
+    if (patch.displayName !== undefined) u.displayName = patch.displayName;
+    if (patch.email !== undefined) u.email = patch.email;
+    if (patch.role !== undefined) u.role = patch.role;
+    if (patch.disabled !== undefined) u.disabled = patch.disabled;
+    if (patch.managerId !== undefined) u.managerId = patch.managerId;
+    return { ...u };
+  }
+
+  async changePassword(): Promise<void> {
+    /* no-op in demo */
+  }
+
+  // ---------- Projects (demo) ----------
+
+  async listProjects(): Promise<Project[]> {
+    return [...MOCK_PROJECTS];
+  }
+
+  async createProject(params: ProjectParams): Promise<Project> {
+    const p: Project = {
+      id: "p-" + _mockSeq++,
+      name: params.name,
+      description: params.description ?? "",
+      clientName: params.clientName ?? "",
+      leadId: params.leadId ?? "u-lead",
+    };
+    MOCK_PROJECTS.unshift(p);
+    return p;
+  }
+
+  async updateProject(id: string, params: ProjectParams): Promise<Project> {
+    const p = MOCK_PROJECTS.find((x) => x.id === id);
+    if (!p) throw new ApiError("not_found", "Project not found", 404);
+    p.name = params.name;
+    p.description = params.description ?? p.description;
+    p.clientName = params.clientName ?? p.clientName;
+    if (params.leadId) p.leadId = params.leadId;
+    return { ...p };
+  }
+
+  async deleteProject(id: string): Promise<void> {
+    const idx = MOCK_PROJECTS.findIndex((x) => x.id === id);
+    if (idx >= 0) MOCK_PROJECTS.splice(idx, 1);
+  }
+
+  async listProjectMembers(id: string): Promise<ProjectMember[]> {
+    return MOCK_MEMBERS.filter((m) => m.projectId === id);
+  }
+
+  async addProjectMember(id: string, userId: string): Promise<void> {
+    if (!MOCK_MEMBERS.some((m) => m.projectId === id && m.userId === userId)) {
+      MOCK_MEMBERS.push({ projectId: id, userId });
+    }
+  }
+
+  async removeProjectMember(id: string, userId: string): Promise<void> {
+    const idx = MOCK_MEMBERS.findIndex((m) => m.projectId === id && m.userId === userId);
+    if (idx >= 0) MOCK_MEMBERS.splice(idx, 1);
+  }
+
+  async listProjectEngagements(): Promise<Engagement[]> {
+    return ENGAGEMENTS;
+  }
+
   async listEngagements(): Promise<Engagement[]> {
     return ENGAGEMENTS;
   }
@@ -453,6 +672,40 @@ function mapScenarioFromApi(s: Record<string, unknown>): Scenario {
   };
 }
 
+function mapUserFromApi(u: Record<string, unknown>): User {
+  return {
+    id: String(u["id"] ?? ""),
+    username: String(u["username"] ?? ""),
+    displayName: String(u["displayName"] ?? ""),
+    email: String(u["email"] ?? ""),
+    role: (String(u["role"] ?? "operator") as Role),
+    managerId: String(u["managerId"] ?? ""),
+    disabled: Boolean(u["disabled"]),
+    createdAt: u["createdAt"] ? String(u["createdAt"]) : undefined,
+    updatedAt: u["updatedAt"] ? String(u["updatedAt"]) : undefined,
+  };
+}
+
+function mapProjectFromApi(p: Record<string, unknown>): Project {
+  return {
+    id: String(p["id"] ?? ""),
+    name: String(p["name"] ?? ""),
+    description: String(p["description"] ?? ""),
+    clientName: String(p["clientName"] ?? ""),
+    leadId: String(p["leadId"] ?? ""),
+    createdAt: p["createdAt"] ? String(p["createdAt"]) : undefined,
+    updatedAt: p["updatedAt"] ? String(p["updatedAt"]) : undefined,
+  };
+}
+
+function mapMemberFromApi(m: Record<string, unknown>): ProjectMember {
+  return {
+    projectId: String(m["projectId"] ?? ""),
+    userId: String(m["userId"] ?? ""),
+    addedAt: m["addedAt"] ? String(m["addedAt"]) : undefined,
+  };
+}
+
 export class RestClient implements RInfraClient {
   private readonly base: string;
   private readonly operator: string;
@@ -463,10 +716,13 @@ export class RestClient implements RInfraClient {
   }
 
   private headers(): Record<string, string> {
-    return {
+    const h: Record<string, string> = {
       "Content-Type": "application/json",
       [OPERATOR_HEADER]: this.operator,
     };
+    const token = getAuthToken();
+    if (token) h["Authorization"] = `Bearer ${token}`;
+    return h;
   }
 
   private async fetch<T>(
@@ -517,6 +773,103 @@ export class RestClient implements RInfraClient {
     }
 
     return body as T;
+  }
+
+  // ---------- Auth ----------
+
+  async login(username: string, password: string): Promise<{ token: string; user: User }> {
+    const body = await this.fetch<{ token: string; user: Record<string, unknown> }>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    return { token: String(body.token ?? ""), user: mapUserFromApi(body.user ?? {}) };
+  }
+
+  async logout(): Promise<void> {
+    await this.fetch<undefined>("/auth/logout", { method: "POST" });
+  }
+
+  async me(): Promise<User> {
+    const body = await this.fetch<{ user: Record<string, unknown> }>("/auth/me");
+    return mapUserFromApi(body.user ?? {});
+  }
+
+  // ---------- Users ----------
+
+  async listUsers(): Promise<User[]> {
+    const body = await this.fetch<{ users: Record<string, unknown>[] }>("/users");
+    return (body.users ?? []).map(mapUserFromApi);
+  }
+
+  async createUser(params: CreateUserParams): Promise<User> {
+    const body = await this.fetch<{ user: Record<string, unknown> }>("/users", {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+    return mapUserFromApi(body.user ?? {});
+  }
+
+  async updateUser(id: string, patch: UpdateUserParams): Promise<User> {
+    const body = await this.fetch<{ user: Record<string, unknown> }>(`/users/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+    return mapUserFromApi(body.user ?? {});
+  }
+
+  async changePassword(id: string, newPassword: string): Promise<void> {
+    await this.fetch<undefined>(`/users/${id}/password`, {
+      method: "POST",
+      body: JSON.stringify({ newPassword }),
+    });
+  }
+
+  // ---------- Projects ----------
+
+  async listProjects(): Promise<Project[]> {
+    const body = await this.fetch<{ projects: Record<string, unknown>[] }>("/projects");
+    return (body.projects ?? []).map(mapProjectFromApi);
+  }
+
+  async createProject(params: ProjectParams): Promise<Project> {
+    const body = await this.fetch<{ project: Record<string, unknown> }>("/projects", {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+    return mapProjectFromApi(body.project ?? {});
+  }
+
+  async updateProject(id: string, params: ProjectParams): Promise<Project> {
+    const body = await this.fetch<{ project: Record<string, unknown> }>(`/projects/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(params),
+    });
+    return mapProjectFromApi(body.project ?? {});
+  }
+
+  async deleteProject(id: string): Promise<void> {
+    await this.fetch<undefined>(`/projects/${id}`, { method: "DELETE" });
+  }
+
+  async listProjectMembers(id: string): Promise<ProjectMember[]> {
+    const body = await this.fetch<{ members: Record<string, unknown>[] }>(`/projects/${id}/members`);
+    return (body.members ?? []).map(mapMemberFromApi);
+  }
+
+  async addProjectMember(id: string, userId: string): Promise<void> {
+    await this.fetch<undefined>(`/projects/${id}/members`, {
+      method: "POST",
+      body: JSON.stringify({ userId }),
+    });
+  }
+
+  async removeProjectMember(id: string, userId: string): Promise<void> {
+    await this.fetch<undefined>(`/projects/${id}/members/${userId}`, { method: "DELETE" });
+  }
+
+  async listProjectEngagements(id: string): Promise<Engagement[]> {
+    const body = await this.fetch<{ engagements: Record<string, unknown>[] }>(`/projects/${id}/engagements`);
+    return (body.engagements ?? []).map(mapEngagementFromApi);
   }
 
   // ---------- Engagements ----------

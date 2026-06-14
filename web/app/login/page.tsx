@@ -11,19 +11,23 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   // Already signed in → go straight to the console.
   useEffect(() => {
     if (ready && authed) router.replace("/engagements");
   }, [ready, authed, router]);
 
-  function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (login(username, password)) {
+    setSubmitting(true);
+    const err = await login(username, password);
+    setSubmitting(false);
+    if (err === null) {
       setError(null);
       router.replace("/engagements");
     } else {
-      setError("Invalid username or password.");
+      setError(err);
     }
   }
 
@@ -119,8 +123,9 @@ export default function LoginPage() {
             type="submit"
             className="btn primary"
             style={{ width: "100%", height: 40 }}
+            disabled={submitting}
           >
-            <Icons.Shield size={16} /> Sign in
+            <Icons.Shield size={16} /> {submitting ? "Signing in…" : "Sign in"}
           </button>
 
           <div

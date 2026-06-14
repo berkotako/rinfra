@@ -6,23 +6,28 @@ import React, {
   useEffect,
   useCallback,
 } from "react";
+import type { Role, User } from "./types";
+import {
+  getClient,
+  isRestMode,
+  setAuthToken,
+  getAuthToken,
+  ApiError,
+} from "./client";
 
 // ---------------------------------------------------------------------------
-// Client-side authentication gate.
+// Authentication gate — dual mode.
 //
-// RInfra's control plane authenticates operators via the X-RInfra-Operator
-// header (a slot for real OIDC later — see internal/api/middleware.go). The web
-// console, which also ships as a static demo build (no backend), needs a
-// lightweight gate of its own so the operator screens aren't world-open. This
-// provider implements that gate entirely in the browser.
+//   REST mode  (NEXT_PUBLIC_RINFRA_API set): real authentication against the
+//   control plane. login() posts to /auth/login, stores the opaque bearer
+//   token, and resolves the operator's role via /auth/me. Role drives nav
+//   visibility; the server remains the authoritative authorization gate.
 //
-// NOTE: this is a console access gate, NOT a cryptographic auth system. The
-// credential lives in localStorage (lightly obfuscated), so it keeps casual
-// visitors out of the demo and gives a place to manage the admin login — it is
-// not a substitute for server-side authn, which lands with the OIDC phase.
-//
-// The default account at first start is username "admin" / password "admin".
-// It can be changed from Settings → Account.
+//   Mock mode  (static demo build, no backend): a lightweight browser-side
+//   gate over a localStorage credential. Not cryptographic — it keeps casual
+//   visitors out of the demo. The default account is admin / admin and is
+//   editable from Settings → Account. The demo always runs as an admin so all
+//   screens are explorable.
 // ---------------------------------------------------------------------------
 
 const ACCOUNT_KEY = "rinfra-account";
@@ -37,20 +42,32 @@ interface StoredAccount {
   secret: string;
 }
 
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string;
+  role: Role;
+}
+
 interface AuthState {
-  /** True once localStorage has been read (avoids SSR/hydration flicker). */
+  /** True once the initial session probe completes (avoids hydration flicker). */
   ready: boolean;
   /** Whether the current browser session is signed in. */
   authed: boolean;
-  /** The configured admin username. */
+  /** The signed-in operator (null until authenticated). */
+  user: AuthUser | null;
+  /** The signed-in username (convenience; "" when signed out). */
   username: string;
-  /** Validate credentials and start a session. Returns true on success. */
-  login: (username: string, password: string) => boolean;
+  /** The signed-in role (null when signed out). */
+  role: Role | null;
+  /** Validate credentials and start a session. Returns null on success, else an error message. */
+  login: (username: string, password: string) => Promise<string | null>;
   /** End the current session. */
   logout: () => void;
   /**
-   * Change the admin username and/or password. The current password must
-   * match. Returns an error string, or null on success.
+   * Mock-mode only: change the local admin username/password (Settings →
+   * Account). In REST mode account management lives in the Users screen, so
+   * this is a no-op that reports as much.
    */
   updateAccount: (args: {
     currentPassword: string;
@@ -66,6 +83,7 @@ const enc = (s: string): string => {
     return s;
   }
 };
+
 function loadAccount(): StoredAccount {
   if (typeof window === "undefined") {
     return { username: DEFAULT_USERNAME, secret: enc(DEFAULT_PASSWORD) };
@@ -92,53 +110,104 @@ function saveAccount(acct: StoredAccount) {
   }
 }
 
+function toAuthUser(u: User): AuthUser {
+  return { id: u.id, username: u.username, displayName: u.displayName || u.username, role: u.role };
+}
+
 const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const rest = isRestMode();
   const [ready, setReady] = useState(false);
-  const [authed, setAuthed] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  // Mock-mode local account (unused in REST mode).
   const [account, setAccount] = useState<StoredAccount>(() => ({
     username: DEFAULT_USERNAME,
     secret: enc(DEFAULT_PASSWORD),
   }));
 
-  // Hydrate from localStorage on mount (client only).
+  // Initial session probe.
   useEffect(() => {
-    setAccount(loadAccount());
-    try {
-      setAuthed(sessionStorage.getItem(SESSION_KEY) === "1");
-    } catch {
-      setAuthed(false);
+    let cancelled = false;
+    if (rest) {
+      // Restore a persisted bearer token by resolving /auth/me.
+      const token = getAuthToken();
+      if (!token) {
+        setReady(true);
+        return;
+      }
+      getClient()
+        .me()
+        .then((u) => {
+          if (!cancelled) setUser(toAuthUser(u));
+        })
+        .catch(() => {
+          setAuthToken(null);
+        })
+        .finally(() => {
+          if (!cancelled) setReady(true);
+        });
+    } else {
+      setAccount(loadAccount());
+      let signedIn = false;
+      try {
+        signedIn = sessionStorage.getItem(SESSION_KEY) === "1";
+      } catch {
+        signedIn = false;
+      }
+      if (signedIn) {
+        const acct = loadAccount();
+        setUser({ id: "local", username: acct.username, displayName: acct.username, role: "admin" });
+      }
+      setReady(true);
     }
-    setReady(true);
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [rest]);
 
   const login = useCallback(
-    (username: string, password: string): boolean => {
-      const acct = loadAccount();
-      const ok =
-        username.trim() === acct.username && enc(password) === acct.secret;
-      if (ok) {
-        setAuthed(true);
+    async (username: string, password: string): Promise<string | null> => {
+      if (rest) {
         try {
-          sessionStorage.setItem(SESSION_KEY, "1");
-        } catch {
-          // ignore
+          const { token, user: u } = await getClient().login(username.trim(), password);
+          setAuthToken(token);
+          setUser(toAuthUser(u));
+          return null;
+        } catch (e) {
+          if (e instanceof ApiError) return e.message || "Invalid username or password.";
+          return "Could not reach the control plane.";
         }
       }
-      return ok;
+      // Mock mode.
+      const acct = loadAccount();
+      const ok = username.trim() === acct.username && enc(password) === acct.secret;
+      if (!ok) return "Invalid username or password.";
+      try {
+        sessionStorage.setItem(SESSION_KEY, "1");
+      } catch {
+        // ignore
+      }
+      setUser({ id: "local", username: acct.username, displayName: acct.username, role: "admin" });
+      return null;
     },
-    []
+    [rest]
   );
 
   const logout = useCallback(() => {
-    setAuthed(false);
-    try {
-      sessionStorage.removeItem(SESSION_KEY);
-    } catch {
-      // ignore
+    if (rest) {
+      // Best-effort server-side invalidation; clear local state regardless.
+      void getClient().logout().catch(() => undefined);
+      setAuthToken(null);
+    } else {
+      try {
+        sessionStorage.removeItem(SESSION_KEY);
+      } catch {
+        // ignore
+      }
     }
-  }, []);
+    setUser(null);
+  }, [rest]);
 
   const updateAccount = useCallback(
     ({
@@ -150,6 +219,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       newUsername?: string;
       newPassword?: string;
     }): string | null => {
+      if (rest) {
+        return "Account changes are managed from the Users screen.";
+      }
       const acct = loadAccount();
       if (enc(currentPassword) !== acct.secret) {
         return "Current password is incorrect.";
@@ -167,17 +239,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       };
       saveAccount(next);
       setAccount(next);
+      setUser((prev) => (prev ? { ...prev, username: nextUsername, displayName: nextUsername } : prev));
       return null;
     },
-    []
+    [rest]
   );
 
   return (
     <AuthContext.Provider
       value={{
         ready,
-        authed,
-        username: account.username,
+        authed: user !== null,
+        user,
+        username: user?.username ?? account.username,
+        role: user?.role ?? null,
         login,
         logout,
         updateAccount,
