@@ -152,3 +152,10 @@ layer assumes reverse-proxy + categorized-domain patterns, not fronting tricks.
 - `internal/store` — persistence interfaces.
 - `migrations` — Postgres schema.
 - `docs` — architecture + support matrix.
+
+## Working preferences (Claude Code)
+
+- **Model floor: minimum Sonnet.** Never dispatch work to Haiku — not for
+  subagents / the Task tool, not for any delegated step. Use Sonnet at minimum,
+  Opus for anything non-trivial. When spawning agents, set the model explicitly
+  (≥ Sonnet) rather than relying on inheritance.

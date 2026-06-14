@@ -129,11 +129,12 @@ func redirectorConfig(prof domain.Profile) (string, error) {
 // API. The live client requires a multiplayer operator config file generated
 // by sliver-server; tests inject a FakeSliverClient.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	// TODO(live): dial the real mTLS gRPC multiplayer listener using the
-	// operator config generated during Deploy (see
-	// github.com/bishopfox/sliver/client/transport.MTLSGenerateConfig).
-	// For now the operator is initialised without a live client; callers must
-	// call SetClient before using it, or inject via NewOperatorWithClient.
+	// The mTLS transport to the multiplayer listener is wired in transport.go:
+	// load the operator config generated during Deploy with LoadOperatorConfig,
+	// then DialOperator to obtain an authenticated *grpc.ClientConn. The
+	// remaining inch is binding that conn to Sliver's generated rpcpb/sliverpb
+	// stubs so SliverClient calls issue real RPCs; until those stubs are linked
+	// the operator uses the noop client. Tests inject via NewOperatorWithClient.
 	return &operator{ts: ts, client: noopSliverClient{}}, true
 }
 

@@ -14,6 +14,7 @@ type Services struct {
 	Engagement *service.EngagementService
 	Infra      *service.InfraService
 	Emulation  *service.EmulationService
+	C2         *service.C2Service
 	Hub        *service.Hub
 	AuditLog   audit.Reader
 	// Auth and Projects are optional: when Auth is nil the Authenticate
@@ -88,6 +89,10 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			r.Post("/runs", h.startRun)
 			r.Get("/coverage", h.getCoverage)
 			r.Get("/navigator", h.getNavigator)
+			// Manual access: drive the deployed C2 by hand instead of auto-run.
+			r.Get("/c2/manual-access", h.c2ManualAccess)
+			r.Post("/c2/tunnel", h.c2OpenTunnel)
+			r.Delete("/c2/tunnel/{tunnelId}", h.c2CloseTunnel)
 		})
 
 		// C2 frameworks (from registry).
