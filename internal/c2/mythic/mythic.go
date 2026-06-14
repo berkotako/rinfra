@@ -18,7 +18,6 @@
 package mythic
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -122,9 +121,11 @@ func mythicRedirectorConfig(prof domain.Profile) (string, error) {
 }
 
 // Control returns an Operator backed by a MythicClient for the REST/GraphQL API.
+// The live client is wired in mythic_live.go: the service layer calls
+// LiveOperator with the Mythic base URL + operator credentials (from the
+// install) to obtain a fully live Operator. Until then this returns a
+// noop-backed operator so nothing regresses.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	// TODO(live): construct a real MythicClient from the teamserver connection
-	// info (host, port, API key obtained from the Mythic install).
 	return &operator{ts: ts, client: &noopMythicClient{}}, true
 }
 
@@ -380,7 +381,3 @@ func (n *noopMythicClient) TaskOutput(_ context.Context, _ string) (string, erro
 func (n *noopMythicClient) CreateListener(_ context.Context, _, _ string, _ int) error {
 	return fmt.Errorf("mythic: HTTP client not wired (TODO(live))")
 }
-
-// ensure paramsToJSON is used to avoid lint errors.
-var _ = paramsToJSON
-var _ = bytes.NewBuffer
