@@ -23,44 +23,8 @@ import {
   C2_FRAMEWORKS,
   SCENARIOS,
   C2_OPERATOR_ACCESS,
-  OPERATOR_SESSIONS,
+  deployedC2FromNode,
 } from "./data";
-
-// Renders the operator-facing ssh local-forward command, matching the control
-// plane's c2.TunnelSpec.SSHCommand format.
-function buildSSHCommand(ip: string, port: number): string {
-  return `ssh -i <engagement-ssh-key> -N -L ${port}:127.0.0.1:${port} root@${ip} -p 22`;
-}
-
-// Builds a DeployedC2 view for a c2_server node from the framework catalog and
-// the per-framework operator-access spec.
-function deployedC2FromNode(node: CanvasNode): DeployedC2 | null {
-  if (node.type !== "c2_server" || !node.framework) return null;
-  const fw = C2_FRAMEWORKS.find((f) => f.id === node.framework);
-  const access = C2_OPERATOR_ACCESS[node.framework];
-  if (!fw || !access) return null;
-  const live = node.status === "live";
-  return {
-    nodeId: node.id,
-    name: node.name,
-    ip: node.ip,
-    status: node.status,
-    framework: fw.id,
-    frameworkName: fw.name,
-    tier: fw.tier,
-    listener: node.listener ?? fw.listeners[0] ?? "",
-    operatorMode: access.mode,
-    liveClient: access.liveClient,
-    manual: {
-      client: access.client,
-      protocol: access.protocol,
-      operatorPort: access.port,
-      sshCommand: buildSSHCommand(live ? node.ip : "<teamserver-ip>", access.port),
-      instructions: access.instructions,
-    },
-    sessions: live ? OPERATOR_SESSIONS[node.id] ?? [] : [],
-  };
-}
 
 // ---------- Typed error codes coming from the API error envelope ----------
 

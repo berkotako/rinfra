@@ -10,6 +10,7 @@ import type {
   NodeTemplate,
   OperatorMode,
   OperatorSession,
+  DeployedC2,
 } from "./types";
 
 export const PROVIDERS: Record<CloudProvider, ProviderMeta> = {
@@ -254,9 +255,37 @@ export const SCENARIOS: Scenario[] = [
     desc: "Modern intrusion-to-encryption chain: valid accounts, defense impairment, mass discovery and staged impact (dry-run, no payload).",
     techniques: [
       { id: "T1078", name: "Valid Accounts", tactic: "Initial Access" },
+      { id: "T1562.001", name: "Disable Security Tools", tactic: "Defense Evasion" },
+      { id: "T1018", name: "Remote System Discovery", tactic: "Discovery" },
       { id: "T1486", name: "Data Encrypted for Impact", tactic: "Impact" },
       { id: "T1490", name: "Inhibit System Recovery", tactic: "Impact" },
-      { id: "T1562.001", name: "Disable Security Tools", tactic: "Defense Evasion" },
+    ],
+  },
+  {
+    id: "scattered",
+    name: "Scattered Spider — Octo Tempest",
+    actor: "eCrime · identity-driven",
+    desc: "Help-desk social engineering into cloud identity: MFA fatigue, OAuth/credential abuse, and SaaS data theft over HTTPS.",
+    techniques: [
+      { id: "T1078.004", name: "Valid Accounts: Cloud", tactic: "Initial Access" },
+      { id: "T1621", name: "MFA Request Generation", tactic: "Credential Access" },
+      { id: "T1098.001", name: "Additional Cloud Credentials", tactic: "Persistence" },
+      { id: "T1538", name: "Cloud Service Dashboard", tactic: "Discovery" },
+      { id: "T1567.002", name: "Exfil to Cloud Storage", tactic: "Exfiltration" },
+    ],
+  },
+  {
+    id: "lotl",
+    name: "Living off the Land",
+    actor: "Generic · detection baseline",
+    desc: "Built-in-binary baseline: WMI execution, BITS transfer, scheduled tasks, signed-binary proxy execution and host discovery.",
+    techniques: [
+      { id: "T1047", name: "Windows Management Instrumentation", tactic: "Execution" },
+      { id: "T1197", name: "BITS Jobs", tactic: "Defense Evasion" },
+      { id: "T1053.005", name: "Scheduled Task", tactic: "Persistence" },
+      { id: "T1218.011", name: "Signed Binary Proxy: Rundll32", tactic: "Defense Evasion" },
+      { id: "T1082", name: "System Information Discovery", tactic: "Discovery" },
+      { id: "T1016", name: "System Network Configuration Discovery", tactic: "Discovery" },
     ],
   },
 ];
@@ -452,6 +481,76 @@ export const OPERATOR_SESSIONS: Record<string, OperatorSession[]> = {
     { id: "2b77e0d4", host: "SRV-DC-01", user: "NT AUTHORITY\\SYSTEM", os: "windows/amd64" },
   ],
 };
+
+// Renders the operator ssh local-forward command, matching the control plane's
+// c2.TunnelSpec.SSHCommand format.
+export function buildSSHCommand(ip: string, port: number): string {
+  return `ssh -i <engagement-ssh-key> -N -L ${port}:127.0.0.1:${port} root@${ip} -p 22`;
+}
+
+// Builds a DeployedC2 view for a c2_server node from the framework catalog and
+// the per-framework operator-access spec. Returns null for non-C2 / unknown
+// nodes so callers can filter cleanly.
+export function deployedC2FromNode(node: CanvasNode): DeployedC2 | null {
+  if (node.type !== "c2_server" || !node.framework) return null;
+  const fw = C2_FRAMEWORKS.find((f) => f.id === node.framework);
+  const access = C2_OPERATOR_ACCESS[node.framework];
+  if (!fw || !access) return null;
+  const live = node.status === "live";
+  return {
+    nodeId: node.id,
+    name: node.name,
+    ip: node.ip,
+    status: node.status,
+    framework: fw.id,
+    frameworkName: fw.name,
+    tier: fw.tier,
+    listener: node.listener ?? fw.listeners[0] ?? "",
+    operatorMode: access.mode,
+    liveClient: access.liveClient,
+    manual: {
+      client: access.client,
+      protocol: access.protocol,
+      operatorPort: access.port,
+      sshCommand: buildSSHCommand(live ? node.ip : "<teamserver-ip>", access.port),
+      instructions: access.instructions,
+    },
+    sessions: live ? OPERATOR_SESSIONS[node.id] ?? [] : [],
+  };
+}
+
+// ---------- TTP <-> C2 capability mapping ----------
+// Which ATT&CK techniques each framework can automate through its operator API.
+// Scripted frameworks cover a documented subset; fronted frameworks expose no
+// operator API, so every technique is driven manually.
+const SCRIPTED_SUPPORT: Record<string, string[]> = {
+  havoc: [
+    "T1059.001", "T1055", "T1003.001", "T1018", "T1057", "T1021.001",
+    "T1570", "T1112", "T1547.001", "T1082", "T1016",
+  ],
+  poshc2: [
+    "T1059.001", "T1547.001", "T1053.005", "T1018", "T1057", "T1003.001",
+    "T1021.001", "T1555.003", "T1082", "T1016", "T1047",
+  ],
+};
+
+// Orchestrated frameworks automate nearly everything; these are the gaps each
+// can't do natively (driven by hand instead).
+const ORCHESTRATED_GAPS: Record<string, string[]> = {
+  sliver: ["T1486", "T1490"], // no native ransomware-impact tooling
+  mythic: ["T1486"],
+  metasploit: ["T1567.002", "T1490"],
+  custom: [], // bring-your-own operator surface — you own coverage
+};
+
+// c2SupportsTechnique reports whether the framework can automate the technique.
+export function c2SupportsTechnique(frameworkId: string, techniqueId: string): boolean {
+  const fw = C2_FRAMEWORKS.find((f) => f.id === frameworkId);
+  if (!fw) return false;
+  if (fw.tier === "fronted") return false;
+  if (fw.tier === "scripted") return (SCRIPTED_SUPPORT[frameworkId] ?? []).includes(techniqueId);
+  return !(ORCHESTRATED_GAPS[frameworkId] ?? []).includes(techniqueId);
+}
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {
   live: { label: "Live", cls: "ok" },

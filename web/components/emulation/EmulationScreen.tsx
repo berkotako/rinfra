@@ -1,19 +1,21 @@
 "use client";
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Icons } from "../icons";
 import { PageHead } from "../ui";
+import { OperatorStatus } from "../c2/ManualAccess";
 import { useStore } from "../../lib/store";
 import { getClient, isRestMode } from "../../lib/client";
-import { SCENARIOS } from "../../lib/data";
-import type { NodeStatus, Technique } from "../../lib/types";
+import { SCENARIOS, deployedC2FromNode, c2SupportsTechnique } from "../../lib/data";
+import type { NodeStatus, Technique, DeployedC2 } from "../../lib/types";
 
-type StepStatus = "pending" | "running" | "done" | "detected";
+type StepStatus = "pending" | "running" | "done" | "detected" | "manual";
 
 const ST_META: Record<StepStatus, { c: string; icon: string; label: string }> = {
   pending: { c: "var(--text-4)", icon: "Dot", label: "Queued" },
   running: { c: "var(--warn)", icon: "Activity", label: "Running" },
   done: { c: "var(--ok)", icon: "CheckCircle", label: "Executed" },
   detected: { c: "var(--info)", icon: "Eye", label: "Detected" },
+  manual: { c: "var(--text-3)", icon: "Power", label: "Manual" },
 };
 
 const TACTIC_TONE: Record<string, number> = {
@@ -31,6 +33,7 @@ const TACTIC_TONE: Record<string, number> = {
 export default function EmulationScreen() {
   const { activeEngagement, activeEngagementId, nodes, pushToast, apiStartRun } = useStore();
   const [scenarioId, setScenarioId] = useState(SCENARIOS[0].id);
+  const [c2Id, setC2Id] = useState<string>("");
   const [running, setRunning] = useState(false);
   const [stepState, setStepState] = useState<Record<number, StepStatus>>({});
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -40,10 +43,46 @@ export default function EmulationScreen() {
 
   const scenario = SCENARIOS.find((s) => s.id === scenarioId) || SCENARIOS[0];
 
+  // Deployed C2 teamservers from the live topology — the emulation targets.
+  const c2Targets = useMemo(
+    () => nodes.map(deployedC2FromNode).filter((d): d is DeployedC2 => d !== null),
+    [nodes]
+  );
+  const liveC2s = useMemo(() => c2Targets.filter((c) => c.status === "live"), [c2Targets]);
+  const selectedC2 = c2Targets.find((c) => c.nodeId === c2Id);
+
+  // Whether the selected C2 can automate a given technique.
+  const supports = useCallback(
+    (techId: string) => !!selectedC2 && c2SupportsTechnique(selectedC2.framework, techId),
+    [selectedC2]
+  );
+
+  // Default the C2 target to the first live, automatable teamserver.
+  useEffect(() => {
+    if (liveC2s.length === 0) {
+      if (c2Id) setC2Id("");
+      return;
+    }
+    if (!liveC2s.some((c) => c.nodeId === c2Id)) {
+      const pref = liveC2s.find((c) => c.operatorMode !== "manual") ?? liveC2s[0];
+      setC2Id(pref.nodeId);
+    }
+  }, [liveC2s, c2Id]);
+
+  // Base step state for the current scenario + C2: unsupported techniques are
+  // pre-marked "manual" so the TTP <-> C2 mapping is visible before any run.
+  const baseStepState = useCallback((): Record<number, StepStatus> => {
+    const b: Record<number, StepStatus> = {};
+    scenario.techniques.forEach((t, i) => {
+      if (!supports(t.id)) b[i] = "manual";
+    });
+    return b;
+  }, [scenario, supports]);
+
   const reset = () => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
-    setStepState({});
+    setStepState(baseStepState());
     setRunning(false);
   };
 
@@ -54,12 +93,14 @@ export default function EmulationScreen() {
     };
   }, []);
 
+  // Re-derive the resting view whenever the scenario or C2 target changes.
   useEffect(() => {
+    if (running) return;
     timers.current.forEach(clearTimeout);
     timers.current = [];
-    setStepState({});
-    setRunning(false);
-  }, [scenarioId]);
+    setStepState(baseStepState());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenarioId, c2Id]);
 
   // SSE subscription for run events in REST mode.
   const subscribeRunEvents = useCallback(
@@ -70,7 +111,6 @@ export default function EmulationScreen() {
 
         const { techniqueId, status } = ev.data;
         if (techniqueId) {
-          // Per-technique update.
           const idx = techniques.findIndex((t) => t.id === techniqueId);
           if (idx >= 0) {
             const st: StepStatus =
@@ -123,16 +163,17 @@ export default function EmulationScreen() {
   );
 
   const run = () => {
-    reset();
+    if (!selectedC2 || runnableCount === 0) return;
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+    setStepState(baseStepState());
     setRunning(true);
-    pushToast(`Emulation started — ${scenario.name}`, "info");
+    pushToast(`Emulation started — ${scenario.name} via ${selectedC2.frameworkName}`, "info");
 
     if (restMode) {
       apiStartRun(activeEngagementId, scenarioId).then((runId) => {
         runIdRef.current = runId;
-        // Try SSE first; poll as fallback.
         const unsub = subscribeRunEvents(activeEngagementId, runId, scenario.techniques);
-        // Poll fallback kicks in after 5 s if SSE doesn't deliver results.
         const fallbackTimer = setTimeout(() => {
           unsub();
           pollRun(runId, scenario.techniques);
@@ -146,14 +187,13 @@ export default function EmulationScreen() {
       return;
     }
 
-    // Mock mode: local simulation.
-    const n = scenario.techniques.length;
-    scenario.techniques.forEach((t, i) => {
+    // Mock mode: local simulation — animate only techniques the C2 can automate.
+    const runnable = scenario.techniques
+      .map((t, i) => ({ t, i }))
+      .filter(({ t }) => supports(t.id));
+    runnable.forEach(({ i }, order) => {
       timers.current.push(
-        setTimeout(
-          () => setStepState((s) => ({ ...s, [i]: "running" })),
-          i * 1500 + 200
-        )
+        setTimeout(() => setStepState((s) => ({ ...s, [i]: "running" })), order * 1500 + 200)
       );
       timers.current.push(
         setTimeout(
@@ -162,7 +202,7 @@ export default function EmulationScreen() {
               ...s,
               [i]: Math.random() < 0.28 ? "detected" : "done",
             })),
-          i * 1500 + 1300
+          order * 1500 + 1300
         )
       );
     });
@@ -170,24 +210,21 @@ export default function EmulationScreen() {
       setTimeout(() => {
         setRunning(false);
         pushToast("Emulation complete — results captured", "ok");
-      }, n * 1500 + 600)
+      }, runnable.length * 1500 + 600)
     );
   };
 
+  const runnableCount = scenario.techniques.filter((t) => supports(t.id)).length;
   const done = scenario.techniques.filter(
     (_, i) => stepState[i] === "done" || stepState[i] === "detected"
   ).length;
-  const detected = scenario.techniques.filter(
-    (_, i) => stepState[i] === "detected"
-  ).length;
-  const pct = Math.round((done / scenario.techniques.length) * 100);
+  const detected = scenario.techniques.filter((_, i) => stepState[i] === "detected").length;
+  const pct = runnableCount ? Math.round((done / runnableCount) * 100) : 0;
+  const canRun = !!selectedC2 && runnableCount > 0;
 
   // Live infrastructure from actual topology state
   const liveNodes = nodes.filter((n) => n.status === "live");
   const targetInfra = [
-    ...liveNodes
-      .filter((n) => n.type === "c2_server")
-      .map((n) => ({ role: "C2 channel", name: n.name, status: "live" as NodeStatus })),
     ...liveNodes
       .filter((n) => n.type === "redirector")
       .map((n) => ({ role: "Redirector", name: n.name, status: "live" as NodeStatus })),
@@ -199,10 +236,7 @@ export default function EmulationScreen() {
   const circumference = 2 * Math.PI * 26;
 
   return (
-    <div
-      className="scroll"
-      style={{ height: "100%", padding: "26px 32px 40px" }}
-    >
+    <div className="scroll" style={{ height: "100%", padding: "26px 32px 40px" }}>
       <div style={{ maxWidth: 1080, margin: "0 auto" }}>
         <PageHead
           title="Adversary emulation"
@@ -230,9 +264,7 @@ export default function EmulationScreen() {
                   cursor: running ? "default" : "pointer",
                   border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
                   background: active ? "var(--accent-soft)" : "var(--surface)",
-                  boxShadow: active
-                    ? "0 0 0 3px var(--accent-soft)"
-                    : "var(--shadow-xs)",
+                  boxShadow: active ? "0 0 0 3px var(--accent-soft)" : "var(--shadow-xs)",
                   opacity: running && !active ? 0.55 : 1,
                   transition: "all .14s",
                 }}
@@ -245,11 +277,7 @@ export default function EmulationScreen() {
                     marginBottom: 8,
                   }}
                 >
-                  <span
-                    style={{
-                      color: active ? "var(--accent)" : "var(--text-3)",
-                    }}
-                  >
+                  <span style={{ color: active ? "var(--accent)" : "var(--text-3)" }}>
                     <Icons.Crosshair size={18} />
                   </span>
                   <span className="pill" style={{ height: 20 }}>
@@ -279,9 +307,7 @@ export default function EmulationScreen() {
                 }}
               >
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>
-                    {scenario.name}
-                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{scenario.name}</div>
                   <div
                     style={{
                       fontSize: 12,
@@ -301,6 +327,7 @@ export default function EmulationScreen() {
                   const m = ST_META[st];
                   const hue = TACTIC_TONE[t.tactic] || 240;
                   const Ico = Icons[m.icon] || Icons.Dot;
+                  const auto = supports(t.id);
                   return (
                     <div
                       key={t.id}
@@ -309,6 +336,7 @@ export default function EmulationScreen() {
                         gap: 14,
                         padding: "11px 18px",
                         position: "relative",
+                        opacity: st === "manual" ? 0.7 : 1,
                       }}
                     >
                       {/* rail */}
@@ -329,10 +357,12 @@ export default function EmulationScreen() {
                             placeItems: "center",
                             flex: "none",
                             background:
-                              st === "pending"
+                              st === "pending" || st === "manual"
                                 ? "var(--surface-3)"
                                 : `color-mix(in oklch, ${m.c} 16%, var(--surface))`,
-                            border: `1.5px solid ${st === "pending" ? "var(--border-2)" : m.c}`,
+                            border: `1.5px solid ${
+                              st === "pending" ? "var(--border-2)" : st === "manual" ? "var(--border-2)" : m.c
+                            }`,
                             color: m.c,
                             transition: "all .3s",
                           }}
@@ -366,13 +396,7 @@ export default function EmulationScreen() {
                         )}
                       </div>
                       {/* content */}
-                      <div
-                        style={{
-                          flex: 1,
-                          minWidth: 0,
-                          paddingBottom: 2,
-                        }}
-                      >
+                      <div style={{ flex: 1, minWidth: 0, paddingBottom: 2 }}>
                         <div
                           style={{
                             display: "flex",
@@ -381,9 +405,7 @@ export default function EmulationScreen() {
                             flexWrap: "wrap",
                           }}
                         >
-                          <span style={{ fontSize: 13.5, fontWeight: 600 }}>
-                            {t.name}
-                          </span>
+                          <span style={{ fontSize: 13.5, fontWeight: 600 }}>{t.name}</span>
                           <span
                             className="mono"
                             style={{
@@ -397,14 +419,24 @@ export default function EmulationScreen() {
                           >
                             {t.id}
                           </span>
+                          {selectedC2 && (
+                            <span
+                              className={"pill " + (auto ? "ok" : "")}
+                              style={{ height: 19, fontSize: 10.5 }}
+                            >
+                              {auto ? (
+                                <>
+                                  <Icons.Bolt size={10} /> auto
+                                </>
+                              ) : (
+                                <>
+                                  <Icons.Power size={10} /> manual
+                                </>
+                              )}
+                            </span>
+                          )}
                         </div>
-                        <div
-                          style={{
-                            fontSize: 11.5,
-                            color: "var(--text-3)",
-                            marginTop: 2,
-                          }}
-                        >
+                        <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>
                           {t.tactic}
                         </div>
                       </div>
@@ -419,9 +451,7 @@ export default function EmulationScreen() {
                             gap: 5,
                           }}
                         >
-                          {st !== "pending" && st !== "running" && (
-                            <Ico size={13} />
-                          )}
+                          {st !== "pending" && st !== "running" && <Ico size={13} />}
                           {m.label}
                         </span>
                       </div>
@@ -444,39 +474,78 @@ export default function EmulationScreen() {
               gap: 12,
             }}
           >
+            {/* C2 target & agents */}
+            <div className="card" style={{ padding: 16 }}>
+              <div className="eyebrow" style={{ marginBottom: 10 }}>
+                C2 target
+              </div>
+              {liveC2s.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  {liveC2s.map((c) => {
+                    const active = c.nodeId === c2Id;
+                    return (
+                      <button
+                        key={c.nodeId}
+                        onClick={() => !running && setC2Id(c.nodeId)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 9,
+                          padding: "9px 11px",
+                          borderRadius: "var(--r-sm)",
+                          textAlign: "left",
+                          border: `1px solid ${active ? "var(--accent)" : "var(--border-2)"}`,
+                          background: active ? "var(--accent-soft)" : "var(--surface-inset)",
+                          boxShadow: active ? "0 0 0 2px var(--accent-soft)" : "none",
+                          cursor: running ? "default" : "pointer",
+                        }}
+                      >
+                        <span style={{ color: active ? "var(--accent)" : "var(--text-3)" }}>
+                          <Icons.Server size={15} />
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 600, display: "block" }}>
+                            {c.frameworkName}
+                          </span>
+                          <span className="mono" style={{ fontSize: 10.5, color: "var(--text-3)" }}>
+                            {c.name}
+                          </span>
+                        </span>
+                        {active && (
+                          <span style={{ color: "var(--accent)" }}>
+                            <Icons.Check size={15} />
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--text-3)", padding: "4px 0" }}>
+                  No live C2 server — deploy a teamserver in Infrastructure first.
+                </div>
+              )}
+
+              {selectedC2 && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                  <div className="eyebrow" style={{ marginBottom: 10 }}>
+                    Agents
+                  </div>
+                  <OperatorStatus d={selectedC2} />
+                </div>
+              )}
+            </div>
+
+            {/* run control */}
             <div className="card" style={{ padding: 18 }}>
               <div className="eyebrow" style={{ marginBottom: 14 }}>
                 Run control
               </div>
               {/* progress ring */}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 16,
-                  marginBottom: 16,
-                }}
-              >
-                <div
-                  style={{
-                    position: "relative",
-                    width: 62,
-                    height: 62,
-                  }}
-                >
-                  <svg
-                    width="62"
-                    height="62"
-                    style={{ transform: "rotate(-90deg)" }}
-                  >
-                    <circle
-                      cx="31"
-                      cy="31"
-                      r="26"
-                      fill="none"
-                      stroke="var(--surface-3)"
-                      strokeWidth="6"
-                    />
+              <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16 }}>
+                <div style={{ position: "relative", width: 62, height: 62 }}>
+                  <svg width="62" height="62" style={{ transform: "rotate(-90deg)" }}>
+                    <circle cx="31" cy="31" r="26" fill="none" stroke="var(--surface-3)" strokeWidth="6" />
                     <circle
                       cx="31"
                       cy="31"
@@ -486,9 +555,7 @@ export default function EmulationScreen() {
                       strokeWidth="6"
                       strokeLinecap="round"
                       strokeDasharray={circumference}
-                      strokeDashoffset={
-                        circumference * (1 - pct / 100)
-                      }
+                      strokeDashoffset={circumference * (1 - pct / 100)}
                       style={{ transition: "stroke-dashoffset .4s" }}
                     />
                   </svg>
@@ -508,8 +575,7 @@ export default function EmulationScreen() {
                 </div>
                 <div>
                   <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>
-                    <b style={{ color: "var(--text)" }}>{done}</b> /{" "}
-                    {scenario.techniques.length} executed
+                    <b style={{ color: "var(--text)" }}>{done}</b> / {runnableCount} automated
                   </div>
                   <div
                     style={{
@@ -538,9 +604,9 @@ export default function EmulationScreen() {
                   className="btn primary"
                   style={{ width: "100%", justifyContent: "center" }}
                   onClick={run}
+                  disabled={!canRun}
                 >
-                  <Icons.Play size={15} />{" "}
-                  {done > 0 ? "Re-run scenario" : "Run scenario"}
+                  <Icons.Play size={15} /> {done > 0 ? "Re-run scenario" : "Run scenario"}
                 </button>
               )}
               <div
@@ -552,45 +618,28 @@ export default function EmulationScreen() {
                   lineHeight: 1.5,
                 }}
               >
-                Executes against live infrastructure in {activeEngagement.codename}.
+                {!selectedC2
+                  ? "Select a live C2 server to run automated emulation."
+                  : selectedC2.operatorMode === "manual"
+                  ? `${selectedC2.frameworkName} is operated manually — drive these techniques from your native client.`
+                  : `Executes via ${selectedC2.frameworkName} against ${activeEngagement.codename}. ${
+                      scenario.techniques.length - runnableCount
+                    } technique(s) run by hand.`}
               </div>
             </div>
 
+            {/* supporting infrastructure */}
             <div className="card" style={{ padding: 16 }}>
               <div className="eyebrow" style={{ marginBottom: 10 }}>
-                Target infrastructure
+                Supporting infrastructure
               </div>
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 9,
-                }}
-              >
+              <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
                 {targetInfra.length > 0 ? (
                   targetInfra.map(({ role, name, status }) => (
-                    <div
-                      key={name}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 9,
-                      }}
-                    >
+                    <div key={name} style={{ display: "flex", alignItems: "center", gap: 9 }}>
                       <span className={"status-dot " + status} />
-                      <span
-                        style={{
-                          fontSize: 12,
-                          color: "var(--text-2)",
-                          flex: 1,
-                        }}
-                      >
-                        {role}
-                      </span>
-                      <span
-                        className="mono"
-                        style={{ fontSize: 11, color: "var(--text-3)" }}
-                      >
+                      <span style={{ fontSize: 12, color: "var(--text-2)", flex: 1 }}>{role}</span>
+                      <span className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>
                         {name}
                       </span>
                     </div>
@@ -604,7 +653,7 @@ export default function EmulationScreen() {
                       padding: "8px 0",
                     }}
                   >
-                    No live infrastructure — deploy assets first.
+                    No live redirectors or staging hosts.
                   </div>
                 )}
               </div>

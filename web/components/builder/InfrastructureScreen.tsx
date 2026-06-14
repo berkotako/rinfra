@@ -4,8 +4,9 @@ import { Icons } from "../icons";
 import { NodeGlyph, EmptyState, ProviderBadge, StatusPill, HealthMeter, Modal } from "../ui";
 import { NODE_TYPE_META } from "../ui";
 import { useStore } from "../../lib/store";
-import { NODE_TEMPLATES, REGIONS, C2_FRAMEWORKS, PROVIDERS } from "../../lib/data";
+import { NODE_TEMPLATES, REGIONS, C2_FRAMEWORKS, PROVIDERS, deployedC2FromNode } from "../../lib/data";
 import { C2Selector } from "../c2/C2Screen";
+import { ManualAccessBody } from "../c2/ManualAccess";
 import type { CanvasNode, NodeType, NodeStyle } from "../../lib/types";
 
 // Node card dimensions per style
@@ -448,6 +449,8 @@ function Inspector({
   onClose: () => void;
   onDelete: (id: string) => void;
 }) {
+  const [manualOpen, setManualOpen] = useState(false);
+  const deployed = node ? deployedC2FromNode(node) : null;
   if (!node) {
     return (
       <div
@@ -496,6 +499,35 @@ function Inspector({
     onChange({ ...node, [k]: v });
 
   return (
+    <>
+    {manualOpen && deployed && (
+      <Modal open onClose={() => setManualOpen(false)} width={520} label="Manual access">
+        <div
+          style={{
+            padding: "16px 20px",
+            borderBottom: "1px solid var(--border)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>
+              {deployed.frameworkName} · {deployed.name}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 2 }}>
+              Operator access for this teamserver.
+            </div>
+          </div>
+          <button className="btn ghost sm" onClick={() => setManualOpen(false)} style={{ padding: 6 }}>
+            <Icons.X size={16} />
+          </button>
+        </div>
+        <div className="scroll" style={{ padding: 18 }}>
+          <ManualAccessBody d={deployed} />
+        </div>
+      </Modal>
+    )}
     <div
       className="scroll"
       style={{ height: "100%", display: "flex", flexDirection: "column" }}
@@ -652,6 +684,23 @@ function Inspector({
                 ))}
               </div>
             </div>
+            {deployed && (
+              <div className="field">
+                <label>Operator access</label>
+                <button
+                  className="btn"
+                  style={{ width: "100%", justifyContent: "center" }}
+                  onClick={() => setManualOpen(true)}
+                >
+                  <Icons.Terminal size={15} /> Manual access &amp; tunnel
+                </button>
+                <div className="hint">
+                  {deployed.operatorMode === "manual"
+                    ? "Fronted framework — connect your native client to operate it."
+                    : "Live operator API. You can also connect a native client manually."}
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -750,6 +799,7 @@ function Inspector({
         </button>
       </div>
     </div>
+    </>
   );
 }
 
