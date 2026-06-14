@@ -1,9 +1,10 @@
 "use client";
 import React from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Icons } from "../icons";
 import { Dropdown, MenuItem, Avatar } from "../ui";
 import { useStore } from "../../lib/store";
+import { useAuth } from "../../lib/auth";
 
 const TITLES: Record<string, string> = {
   "/engagements": "Engagements",
@@ -17,7 +18,9 @@ const CLOUDS = ["All providers", "AWS", "GCP", "Azure", "DigitalOcean"];
 
 export default function TopBar({ onAppearance }: { onAppearance?: () => void }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { engagements, activeEngagement, setActiveEngagementId } = useStore();
+  const { username, logout } = useAuth();
   const [cloudEnv, setCloudEnv] = React.useState("All providers");
 
   const title = TITLES[pathname] || "RInfra";
@@ -160,7 +163,7 @@ export default function TopBar({ onAppearance }: { onAppearance?: () => void }) 
               borderRadius: 99,
             }}
           >
-            <Avatar name="Rina Okafor" size={32} />
+            <Avatar name={username} size={32} />
           </button>
         )}
       >
@@ -171,15 +174,23 @@ export default function TopBar({ onAppearance }: { onAppearance?: () => void }) 
             marginBottom: 4,
           }}
         >
-          <div style={{ fontSize: 13, fontWeight: 600 }}>Rina Okafor</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{username}</div>
           <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
-            Lead operator · Acme Offensive
+            Operator · console access
           </div>
         </div>
         <MenuItem icon="Sliders" label="Appearance" onClick={onAppearance} />
-        <MenuItem icon="User" label="Profile & API keys" />
-        <MenuItem icon="Shield" label="Audit log" />
-        <MenuItem icon="Settings" label="Workspace settings" />
+        <MenuItem
+          icon="Lock"
+          label="Cloud keys & settings"
+          onClick={() => router.push("/settings")}
+        />
+        <MenuItem
+          icon="User"
+          label="Account"
+          onClick={() => router.push("/settings")}
+        />
+        <MenuItem icon="Power" label="Sign out" onClick={logout} />
       </Dropdown>
     </div>
   );

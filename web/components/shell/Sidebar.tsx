@@ -115,9 +115,17 @@ export default function Sidebar() {
           gap: 2,
         }}
       >
-        <button className="nav-item">
-          <Icons.Settings size={17} /> Settings
-        </button>
+        <Link href="/settings" style={{ textDecoration: "none" }}>
+          <button
+            className={
+              "nav-item" +
+              (pathname === "/settings" || pathname.startsWith("/settings/") ? " active" : "")
+            }
+            style={{ width: "100%" }}
+          >
+            <Icons.Settings size={17} /> Settings
+          </button>
+        </Link>
         <div
           style={{
             display: "flex",

@@ -46,14 +46,47 @@ instead, see `web/README.md` (`make web-dev`).
 
 ## Getting started
 
+### Docker (full stack — recommended)
+
+A single script brings up the whole stack (Postgres + migrations + Go control
+plane + web console) in Docker. It is safe to re-run on **every update** — it
+rebuilds from the current checkout, re-applies migrations, and reuses the
+secrets it generated the first time:
+
+```bash
+scripts/install.sh            # build + start everything
+scripts/install.sh --pull     # update to latest, then rebuild + restart
+scripts/install.sh --down     # stop the stack
+scripts/install.sh --fresh    # wipe the Postgres volume (DESTRUCTIVE)
+```
+
+Then open:
+
+| Service | URL |
+|---------|-----|
+| Web console | http://localhost:3000 |
+| Control plane | http://localhost:8080 (`GET /healthz`) |
+
+The console requires sign-in. **Default credentials on a fresh install are
+`admin` / `admin`** — change them under **Settings → Account**. Cloud provider
+keys (AWS / GCP / Azure / DigitalOcean) are added under **Settings → Cloud
+credentials**; they are stored encrypted and bound to a single engagement
+(bring-your-own cloud, never RInfra's tenancy).
+
+The install script generates `RINFRA_MASTER_KEY` into a local `.env` (see
+`.env.example`). Live cloud provisioning additionally needs the Pulumi CLI;
+see `cmd/rinfra-server` docs and `docs/RUNBOOK_DO.md`.
+
+### Local (Go only)
+
 ```bash
 go build ./...
 go vet ./...
 go run ./cmd/rinfra-server   # serves :8080, logs registered C2 tiers
 ```
 
-The frontend (Next.js + React Flow drag-and-drop canvas) lives in a separate
-repo and talks to this control plane over REST/JSON.
+The frontend (Next.js + React Flow drag-and-drop canvas) lives under `web/` and
+talks to this control plane over REST/JSON (`make web-dev`, or `make dev`).
 
 ## Build order
 
