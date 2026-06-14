@@ -139,28 +139,69 @@ type Tunnel struct {
 	dialer   RemoteDialer
 
 	closeOnce sync.Once
+	quit      chan struct{}
 	wg        sync.WaitGroup
+
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{} // active local connections
+	closed bool
 }
 
 // LocalAddr is the actual local address the tunnel is listening on (useful when
 // the spec requested an OS-assigned port).
 func (t *Tunnel) LocalAddr() string { return t.listener.Addr().String() }
 
-// Close stops the tunnel.
+// Close stops the tunnel: it closes the listener and tears down any in-flight
+// connections, then waits for the handlers to finish. Safe to call while an
+// operator is still connected.
 func (t *Tunnel) Close() error {
 	var err error
-	t.closeOnce.Do(func() {
-		err = t.listener.Close()
-	})
+	t.closeOnce.Do(func() { err = t.shutdown() })
 	t.wg.Wait()
 	return err
+}
+
+// shutdown closes the listener and all tracked connections exactly once. The
+// connection close is what unblocks handlers parked in io.Copy.
+func (t *Tunnel) shutdown() error {
+	t.mu.Lock()
+	t.closed = true
+	conns := make([]net.Conn, 0, len(t.conns))
+	for c := range t.conns {
+		conns = append(conns, c)
+	}
+	t.mu.Unlock()
+
+	close(t.quit)
+	err := t.listener.Close()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	return err
+}
+
+func (t *Tunnel) track(c net.Conn) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return false
+	}
+	t.conns[c] = struct{}{}
+	return true
+}
+
+func (t *Tunnel) untrack(c net.Conn) {
+	t.mu.Lock()
+	delete(t.conns, c)
+	t.mu.Unlock()
 }
 
 // OpenLocalForward starts a local TCP listener that forwards each accepted
 // connection to spec.RemoteAddr() via the RemoteDialer. The operator points
 // their native C2 client at Tunnel.LocalAddr(). This is the mechanism behind
 // manual-access mode; the service layer supplies an SSH-backed RemoteDialer
-// built from the engagement key, and audits the access.
+// built from the engagement key, and audits the access. The tunnel runs until
+// Close is called or ctx is cancelled.
 func OpenLocalForward(ctx context.Context, dialer RemoteDialer, spec TunnelSpec) (*Tunnel, error) {
 	if dialer == nil {
 		return nil, fmt.Errorf("c2: OpenLocalForward requires a RemoteDialer")
@@ -173,6 +214,8 @@ func OpenLocalForward(ctx context.Context, dialer RemoteDialer, spec TunnelSpec)
 		listener: ln,
 		remote:   spec.RemoteAddr(),
 		dialer:   dialer,
+		quit:     make(chan struct{}),
+		conns:    make(map[net.Conn]struct{}),
 	}
 	t.wg.Add(1)
 	go t.serve(ctx)
@@ -181,19 +224,28 @@ func OpenLocalForward(ctx context.Context, dialer RemoteDialer, spec TunnelSpec)
 
 func (t *Tunnel) serve(ctx context.Context) {
 	defer t.wg.Done()
-	// Close the listener if the context is cancelled.
+	// Tear down if the context is cancelled; exit cleanly once shut down so the
+	// watcher goroutine does not leak.
 	go func() {
-		<-ctx.Done()
-		_ = t.listener.Close()
+		select {
+		case <-ctx.Done():
+			t.closeOnce.Do(func() { _ = t.shutdown() })
+		case <-t.quit:
+		}
 	}()
 	for {
 		local, err := t.listener.Accept()
 		if err != nil {
 			return // listener closed
 		}
+		if !t.track(local) {
+			_ = local.Close()
+			continue
+		}
 		t.wg.Add(1)
 		go func() {
 			defer t.wg.Done()
+			defer t.untrack(local)
 			t.handle(local)
 		}()
 	}

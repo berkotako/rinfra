@@ -175,6 +175,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 	// Dev mode: keep the fake resolver so no live teamserver is needed.
 	svcEmu.WithResolver(service.NewFakeResolver())
+	svcC2 := service.NewC2Service(engStore, infraStore, auditLog, log)
 	svcAuth := service.NewAuthService(userStore, sessionStore, auditLog, log)
 	svcProject := service.NewProjectService(projectStore, userStore, auditLog)
 	seedAdmin(log, svcAuth)
@@ -185,6 +186,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Engagement: svcEng,
 		Infra:      svcInfra,
 		Emulation:  svcEmu,
+		C2:         svcC2,
 		Hub:        hub,
 		AuditLog:   audit.Reader(auditLog),
 		Auth:       svcAuth,
@@ -225,6 +227,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	// Production mode: use registry-backed resolver that finds the engagement's
 	// deployed C2 topology and calls C2Provider.Control(teamserver).
 	svcEmu.WithResolver(service.NewRegistryResolver(infraStore))
+	svcC2 := service.NewC2Service(engStore, infraStore, auditLog, log)
 	svcAuth := service.NewAuthService(userStore, sessionStore, auditLog, log)
 	svcProject := service.NewProjectService(projectStore, userStore, auditLog)
 	seedAdmin(log, svcAuth)
@@ -235,6 +238,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Engagement: svcEng,
 		Infra:      svcInfra,
 		Emulation:  svcEmu,
+		C2:         svcC2,
 		Hub:        hub,
 		AuditLog:   audit.Reader(auditLog),
 		Auth:       svcAuth,

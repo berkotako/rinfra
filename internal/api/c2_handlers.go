@@ -1,0 +1,53 @@
+package api
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+)
+
+// c2ManualAccess returns how to connect a native operator client to the
+// engagement's deployed C2 teamserver by hand (manual-access usage mode).
+func (h *handlers) c2ManualAccess(w http.ResponseWriter, r *http.Request) {
+	if h.svc.C2 == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "manual access is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	view, err := h.svc.C2.ManualAccess(r.Context(), id, actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// c2OpenTunnel opens an SSH local port-forward to the teamserver operator port.
+func (h *handlers) c2OpenTunnel(w http.ResponseWriter, r *http.Request) {
+	if h.svc.C2 == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "manual access is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	view, err := h.svc.C2.OpenTunnel(r.Context(), id, actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// c2CloseTunnel tears down a previously opened tunnel.
+func (h *handlers) c2CloseTunnel(w http.ResponseWriter, r *http.Request) {
+	if h.svc.C2 == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "manual access is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	tunnelID := chi.URLParam(r, "tunnelId")
+	if err := h.svc.C2.CloseTunnel(r.Context(), id, tunnelID, actorFrom(r.Context())); err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"closed": true})
+}
