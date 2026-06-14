@@ -4,6 +4,7 @@ import { Icons } from "../icons";
 import { TierBadge, PageHead, Modal } from "../ui";
 import { C2_FRAMEWORKS } from "../../lib/data";
 import type { C2Framework } from "../../lib/types";
+import DeployedTeamservers from "./DeployedTeamservers";
 
 interface C2SelectorProps {
   asModal?: boolean;
@@ -356,6 +357,7 @@ export function C2Selector({
           sub="Choose which command-and-control framework powers each server. Orchestration tier shows what RInfra automates for you."
         />
         {body}
+        <DeployedTeamservers />
       </div>
     </div>
   );
