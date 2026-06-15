@@ -75,6 +75,9 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		r.Get("/engagements", h.listEngagements)
 		r.Post("/engagements", h.createEngagement)
 		r.Route("/engagements/{id}", func(r chi.Router) {
+			// Authorize the actor against project membership for every
+			// engagement-scoped route before any handler runs.
+			r.Use(h.requireEngagementAccess)
 			r.Get("/", h.getEngagement)
 			r.Patch("/", h.patchEngagement)
 			r.Get("/topology", h.getTopology)

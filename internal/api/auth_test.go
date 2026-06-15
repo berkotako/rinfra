@@ -171,3 +171,111 @@ func TestAPI_ProjectAndRoleFlow(t *testing.T) {
 		t.Fatalf("operator should see 1 user, got %v", out["users"])
 	}
 }
+
+// ---- helpers for project-membership authorization tests ----
+
+func mustCreateUser(t *testing.T, router http.Handler, adminTok, username, password, role string) string {
+	t.Helper()
+	resp := authedRequest(t, router, "POST", "/api/v1/users", adminTok, map[string]any{
+		"username": username, "password": password, "role": role,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create user %s: want 201, got %d: %s", username, resp.StatusCode, b)
+	}
+	var out map[string]any
+	decodeBody(t, resp, &out)
+	return out["user"].(map[string]any)["id"].(string)
+}
+
+func mustCreateProject(t *testing.T, router http.Handler, adminTok, name string) string {
+	t.Helper()
+	resp := authedRequest(t, router, "POST", "/api/v1/projects", adminTok, map[string]any{"name": name})
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create project %s: want 201, got %d: %s", name, resp.StatusCode, b)
+	}
+	var out map[string]any
+	decodeBody(t, resp, &out)
+	return out["project"].(map[string]any)["id"].(string)
+}
+
+func mustAddMember(t *testing.T, router http.Handler, adminTok, projectID, userID string) {
+	t.Helper()
+	resp := authedRequest(t, router, "POST", "/api/v1/projects/"+projectID+"/members", adminTok,
+		map[string]any{"userId": userID})
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("add member: got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func mustCreateEngagement(t *testing.T, router http.Handler, adminTok, projectID string) string {
+	t.Helper()
+	resp := authedRequest(t, router, "POST", "/api/v1/engagements", adminTok, map[string]any{
+		"client": "Acme", "codename": "OP-AUTHZ", "projectId": projectID,
+		"targets": []string{"10.0.0.0/8"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create engagement: want 201, got %d: %s", resp.StatusCode, b)
+	}
+	var out map[string]any
+	decodeBody(t, resp, &out)
+	return out["engagement"].(map[string]any)["id"].(string)
+}
+
+// TestEngagementProjectAuthorization proves an operator who is not a member of
+// an engagement's project cannot read, update, deploy, teardown, upload
+// credentials for, or run emulation against it — across every engagement-scoped
+// route — while a member of the project can.
+func TestEngagementProjectAuthorization(t *testing.T) {
+	router := buildAuthRouter(t)
+	admin := loginViaAPI(t, router, "admin", "admin")
+
+	opAID := mustCreateUser(t, router, admin, "op-a", "operator-a-pw", "operator")
+	opBID := mustCreateUser(t, router, admin, "op-b", "operator-b-pw", "operator")
+
+	projA := mustCreateProject(t, router, admin, "Project A")
+	projB := mustCreateProject(t, router, admin, "Project B")
+	mustAddMember(t, router, admin, projA, opAID)
+	mustAddMember(t, router, admin, projB, opBID)
+
+	engA := mustCreateEngagement(t, router, admin, projA)
+
+	tokA := loginViaAPI(t, router, "op-a", "operator-a-pw")
+	tokB := loginViaAPI(t, router, "op-b", "operator-b-pw")
+
+	// A member of project A can read its engagement.
+	if resp := authedRequest(t, router, "GET", "/api/v1/engagements/"+engA, tokA, nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("op-a GET own-project engagement: want 200, got %d", resp.StatusCode)
+	}
+
+	// op-b (project B) must be forbidden on every engagement-scoped operation.
+	base := "/api/v1/engagements/" + engA
+	cases := []struct {
+		method, path string
+		body         any
+	}{
+		{"GET", base, nil},
+		{"PATCH", base, map[string]any{"status": "authorized"}},
+		{"GET", base + "/topology", nil},
+		{"PUT", base + "/topology", map[string]any{"nodes": []any{}, "edges": []any{}}},
+		{"POST", base + "/validate", nil},
+		{"POST", base + "/deploy", nil},
+		{"POST", base + "/teardown", nil},
+		{"PUT", base + "/credentials/aws", map[string]any{"values": map[string]string{"AWS_ACCESS_KEY_ID": "x"}}},
+		{"GET", base + "/audit", nil},
+		{"POST", base + "/runs", map[string]any{"scenarioId": "apt29"}},
+		{"GET", base + "/coverage", nil},
+		{"GET", base + "/c2/manual-access", nil},
+		{"GET", base + "/c2/teamservers", nil},
+	}
+	for _, c := range cases {
+		resp := authedRequest(t, router, c.method, c.path, tokB, c.body)
+		if resp.StatusCode != http.StatusForbidden {
+			b, _ := io.ReadAll(resp.Body)
+			t.Errorf("op-b %s %s: want 403, got %d: %s", c.method, c.path, resp.StatusCode, b)
+		}
+	}
+}
