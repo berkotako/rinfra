@@ -197,7 +197,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Projects:   svcProject,
 	}, log)
 
-	runServer(log, router)
+	runServer(log, router, svcC2)
 }
 
 func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hub) {
@@ -253,7 +253,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Projects:   svcProject,
 	}, log)
 
-	runServer(log, router)
+	runServer(log, router, svcC2)
 }
 
 // seedAdmin creates the bootstrap admin/admin account when no users exist.
@@ -263,7 +263,7 @@ func seedAdmin(log *slog.Logger, svcAuth *service.AuthService) {
 	}
 }
 
-func runServer(log *slog.Logger, handler http.Handler) {
+func runServer(log *slog.Logger, handler http.Handler, c2 *service.C2Service) {
 	addr := envOr("RINFRA_ADDR", ":8080")
 	srv := &http.Server{
 		Addr:              addr,
@@ -284,6 +284,10 @@ func runServer(log *slog.Logger, handler http.Handler) {
 
 	<-ctx.Done()
 	log.Info("shutting down")
+	// Close any open C2 tunnels so none are orphaned across restart.
+	if c2 != nil {
+		c2.Shutdown()
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)

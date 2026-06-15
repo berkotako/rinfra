@@ -34,8 +34,38 @@ type C2Service struct {
 	dialer     TunnelDialerFactory
 	sshKeyHint string // path shown in the rendered ssh -L command (informational)
 
-	mu      sync.Mutex
-	tunnels map[string]*c2.Tunnel
+	mu          sync.Mutex
+	tunnels     map[string]*tunnelRecord
+	idleTTL     time.Duration // close after this long with no activity
+	absTTL      time.Duration // hard cap on a tunnel's total lifetime
+	stopJanitor chan struct{}
+	janitorOnce sync.Once
+	stopOnce    sync.Once
+}
+
+// tunnelRecord binds a live tunnel to the engagement, node, opener, and lifetime
+// metadata used for authorization, reconciliation, and cleanup.
+type tunnelRecord struct {
+	tun          *c2.Tunnel
+	engagementID string
+	nodeID       string
+	framework    string
+	openerID     string
+	openerName   string
+	createdAt    time.Time
+	lastUsedAt   time.Time
+	expiresAt    time.Time
+}
+
+// TunnelInfo is the non-sensitive view of an active tunnel for reconcile/audit.
+type TunnelInfo struct {
+	TunnelID  string `json:"tunnelId"`
+	NodeID    string `json:"nodeId"`
+	Framework string `json:"framework"`
+	LocalAddr string `json:"localAddr"`
+	Opener    string `json:"opener"`
+	CreatedAt string `json:"createdAt"`
+	ExpiresAt string `json:"expiresAt"`
 }
 
 // TunnelDialerFactory opens a RemoteDialer (e.g. an *ssh.Client) to the given
@@ -49,8 +79,19 @@ func NewC2Service(engagements store.EngagementStore, infra store.InfraStore, a a
 		infra:       infra,
 		audit:       a,
 		log:         log,
-		tunnels:     make(map[string]*c2.Tunnel),
+		tunnels:     make(map[string]*tunnelRecord),
+		idleTTL:     30 * time.Minute,
+		absTTL:      8 * time.Hour,
+		stopJanitor: make(chan struct{}),
 	}
+}
+
+// WithTunnelTTLs overrides the idle and absolute tunnel lifetimes (used in tests
+// and tunable in production).
+func (s *C2Service) WithTunnelTTLs(idle, absolute time.Duration) *C2Service {
+	s.idleTTL = idle
+	s.absTTL = absolute
+	return s
 }
 
 // WithTunnelDialer enables OpenTunnel by supplying the dialer factory and the
@@ -179,13 +220,14 @@ type TunnelView struct {
 	LocalAddr    string `json:"localAddr"`
 	Framework    string `json:"framework"`
 	OperatorPort int    `json:"operatorPort"`
+	ExpiresAt    string `json:"expiresAt"`
 }
 
 // OpenTunnel opens an SSH local port-forward to the engagement's C2 teamserver
 // operator port and returns the local address the operator points their native
 // client at. Gated by CanDeploy and audited. Requires a tunnel dialer (see
 // WithTunnelDialer); otherwise it reports the feature is not configured.
-func (s *C2Service) OpenTunnel(ctx context.Context, engagementID, actor string) (TunnelView, error) {
+func (s *C2Service) OpenTunnel(ctx context.Context, engagementID string, actor domain.User) (TunnelView, error) {
 	eng, err := s.engagements.Get(ctx, engagementID)
 	if err != nil {
 		return TunnelView{}, fmt.Errorf("c2.OpenTunnel: %w", err)
@@ -219,18 +261,31 @@ func (s *C2Service) OpenTunnel(ctx context.Context, engagementID, actor string) 
 		return TunnelView{}, fmt.Errorf("c2.OpenTunnel: %w", err)
 	}
 
+	now := time.Now()
 	id := uuid.NewString()
+	rec := &tunnelRecord{
+		tun:          tun,
+		engagementID: engagementID,
+		nodeID:       node.ID,
+		framework:    ma.Framework,
+		openerID:     actor.ID,
+		openerName:   actor.Username,
+		createdAt:    now,
+		lastUsedAt:   now,
+		expiresAt:    now.Add(s.absTTL),
+	}
 	s.mu.Lock()
-	s.tunnels[id] = tun
+	s.tunnels[id] = rec
 	s.mu.Unlock()
+	s.startJanitor()
 
 	_ = s.audit.Record(ctx, audit.Event{
 		EngagementID: engagementID,
-		Actor:        actor,
+		Actor:        actor.Username,
 		Action:       "c2.tunnel_open",
 		Target:       node.ID,
-		Detail:       fmt.Sprintf("framework=%s local=%s operator_port=%d", ma.Framework, tun.LocalAddr(), ma.OperatorPort),
-		At:           time.Now().UTC(),
+		Detail:       fmt.Sprintf("framework=%s local=%s operator_port=%d expires=%s", ma.Framework, tun.LocalAddr(), ma.OperatorPort, rec.expiresAt.UTC().Format(time.RFC3339)),
+		At:           now.UTC(),
 	})
 
 	return TunnelView{
@@ -238,33 +293,158 @@ func (s *C2Service) OpenTunnel(ctx context.Context, engagementID, actor string) 
 		LocalAddr:    tun.LocalAddr(),
 		Framework:    ma.Framework,
 		OperatorPort: ma.OperatorPort,
+		ExpiresAt:    rec.expiresAt.UTC().Format(time.RFC3339),
 	}, nil
 }
 
-// CloseTunnel tears down a previously opened tunnel.
-func (s *C2Service) CloseTunnel(ctx context.Context, engagementID, tunnelID, actor string) error {
-	s.mu.Lock()
-	tun, ok := s.tunnels[tunnelID]
-	if ok {
-		delete(s.tunnels, tunnelID)
+// canManageTunnel reports whether the actor may close a tunnel: the opener, or
+// an admin/lead.
+func canManageTunnel(actor domain.User, rec *tunnelRecord) bool {
+	if actor.Role == domain.RoleAdmin || actor.Role == domain.RoleLead {
+		return true
 	}
-	s.mu.Unlock()
-	if !ok {
+	return actor.ID != "" && actor.ID == rec.openerID
+}
+
+// CloseTunnel tears down a previously opened tunnel. It verifies the tunnel
+// belongs to the given engagement and that the caller is the opener or an
+// admin/lead.
+func (s *C2Service) CloseTunnel(ctx context.Context, engagementID, tunnelID string, actor domain.User) error {
+	s.mu.Lock()
+	rec, ok := s.tunnels[tunnelID]
+	if !ok || rec.engagementID != engagementID {
+		s.mu.Unlock()
 		return fmt.Errorf("c2.CloseTunnel: %w", store.ErrNotFound)
 	}
-	err := tun.Close()
+	if !canManageTunnel(actor, rec) {
+		s.mu.Unlock()
+		return fmt.Errorf("c2.CloseTunnel: %w: only the opener or an admin/lead may close this tunnel", ErrUnauthorized)
+	}
+	delete(s.tunnels, tunnelID)
+	s.mu.Unlock()
+
+	err := rec.tun.Close()
 	_ = s.audit.Record(ctx, audit.Event{
 		EngagementID: engagementID,
-		Actor:        actor,
+		Actor:        actor.Username,
 		Action:       "c2.tunnel_close",
 		Target:       tunnelID,
-		Detail:       "tunnel closed",
+		Detail:       fmt.Sprintf("closed by %s (opener=%s)", actor.Username, rec.openerName),
 		At:           time.Now().UTC(),
 	})
 	if err != nil {
 		return fmt.Errorf("c2.CloseTunnel: %w", err)
 	}
 	return nil
+}
+
+// ListTunnels returns metadata for the engagement's active tunnels (reconcile /
+// audit view). Secrets are never included.
+func (s *C2Service) ListTunnels(_ context.Context, engagementID string) []TunnelInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]TunnelInfo, 0)
+	for id, rec := range s.tunnels {
+		if rec.engagementID != engagementID {
+			continue
+		}
+		out = append(out, TunnelInfo{
+			TunnelID:  id,
+			NodeID:    rec.nodeID,
+			Framework: rec.framework,
+			LocalAddr: rec.tun.LocalAddr(),
+			Opener:    rec.openerName,
+			CreatedAt: rec.createdAt.UTC().Format(time.RFC3339),
+			ExpiresAt: rec.expiresAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
+// ReapTunnels closes every tunnel past its idle or absolute TTL at time `now`,
+// auditing each. It is invoked on a timer by the janitor and can be called
+// directly. Returns the number of tunnels reaped.
+func (s *C2Service) ReapTunnels(now time.Time) int {
+	type expired struct {
+		id  string
+		rec *tunnelRecord
+	}
+	var dead []expired
+	s.mu.Lock()
+	for id, rec := range s.tunnels {
+		if now.After(rec.expiresAt) || now.Sub(rec.lastUsedAt) > s.idleTTL {
+			dead = append(dead, expired{id, rec})
+			delete(s.tunnels, id)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, d := range dead {
+		_ = d.rec.tun.Close()
+		_ = s.audit.Record(context.Background(), audit.Event{
+			EngagementID: d.rec.engagementID,
+			Actor:        "system",
+			Action:       "c2.tunnel_expired",
+			Target:       d.id,
+			Detail:       fmt.Sprintf("idle/absolute TTL reached; opener=%s", d.rec.openerName),
+			At:           now.UTC(),
+		})
+	}
+	return len(dead)
+}
+
+// startJanitor launches the background reaper exactly once.
+func (s *C2Service) startJanitor() {
+	s.janitorOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(s.janitorInterval())
+			defer t.Stop()
+			for {
+				select {
+				case <-s.stopJanitor:
+					return
+				case <-t.C:
+					s.ReapTunnels(time.Now())
+				}
+			}
+		}()
+	})
+}
+
+func (s *C2Service) janitorInterval() time.Duration {
+	iv := s.idleTTL
+	if s.absTTL < iv {
+		iv = s.absTTL
+	}
+	iv /= 4
+	if iv < time.Second {
+		iv = time.Second
+	}
+	if iv > time.Minute {
+		iv = time.Minute
+	}
+	return iv
+}
+
+// Shutdown stops the janitor and closes all active tunnels. Wire it into the
+// server's graceful-shutdown path so no tunnel is orphaned on exit.
+func (s *C2Service) Shutdown() {
+	s.stopOnce.Do(func() { close(s.stopJanitor) })
+	s.mu.Lock()
+	recs := s.tunnels
+	s.tunnels = make(map[string]*tunnelRecord)
+	s.mu.Unlock()
+	for id, rec := range recs {
+		_ = rec.tun.Close()
+		_ = s.audit.Record(context.Background(), audit.Event{
+			EngagementID: rec.engagementID,
+			Actor:        "system",
+			Action:       "c2.tunnel_close",
+			Target:       id,
+			Detail:       "closed on shutdown",
+			At:           time.Now().UTC(),
+		})
+	}
 }
 
 // liveC2Node finds the engagement's first live C2 server node and its provider,
