@@ -147,6 +147,28 @@ export interface Scenario {
   techniques: Technique[];
 }
 
+// ---------- Coverage (ATT&CK rollup) — mirrors service.Coverage ----------
+export interface CoverageTechnique {
+  attackID: string;
+  name: string;
+  tactic: string;
+  level: number; // 0 none, 1 attempted, 2 executed, 3 validated
+}
+
+export interface CoverageTactic {
+  tactic: string;
+  techniques: CoverageTechnique[];
+}
+
+export interface Coverage {
+  engagementId: string;
+  tactics: CoverageTactic[];
+  totalTechniques: number;
+  exercisedCount: number;
+  executedCount: number;
+  validatedCount: number;
+}
+
 // ---------- Users, roles & projects ----------
 // Aligned to internal/domain/user.go and project.go.
 export type Role = "admin" | "lead" | "operator";

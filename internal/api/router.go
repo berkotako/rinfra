@@ -91,6 +91,7 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			r.Get("/navigator", h.getNavigator)
 			// Manual access: drive the deployed C2 by hand instead of auto-run.
 			r.Get("/c2/manual-access", h.c2ManualAccess)
+			r.Get("/c2/teamservers", h.c2ListTeamservers)
 			r.Post("/c2/tunnel", h.c2OpenTunnel)
 			r.Delete("/c2/tunnel/{tunnelId}", h.c2CloseTunnel)
 			// In-browser operator web shell (WebSocket) for a specific live C2 node.
