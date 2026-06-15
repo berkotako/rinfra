@@ -7,11 +7,30 @@ import (
 	"time"
 
 	"github.com/rinfra/rinfra/internal/audit"
+	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/emulation"
 	"github.com/rinfra/rinfra/internal/emulation/catalog"
 	"github.com/rinfra/rinfra/internal/store"
 )
+
+// selectInScopeSession returns the id of the first active operator session whose
+// host is within the engagement scope (enforcing scope at execution time). It
+// returns ok=false when sessions exist but none are in scope, so the caller can
+// refuse to execute. When sessions can't be enumerated it falls back to the
+// resolver-provided session id to preserve existing behavior.
+func selectInScopeSession(ctx context.Context, eng *domain.Engagement, op c2.Operator, fallback string) (string, bool) {
+	sessions, err := op.Sessions(ctx)
+	if err != nil || len(sessions) == 0 {
+		return fallback, true
+	}
+	for _, sess := range sessions {
+		if sess.Host == "" || eng.TargetInScope(sess.Host) {
+			return sess.ID, true
+		}
+	}
+	return "", false
+}
 
 // EmulationService runs adversary-emulation scenarios and tracks their results.
 type EmulationService struct {
@@ -298,11 +317,24 @@ func (s *EmulationService) runScenario(ctx context.Context, eng domain.Engagemen
 	// Resolve the operator: may be nil for Fronted-tier (all techniques → Skipped).
 	op, sessionID, _ := s.resolver.Resolve(ctx, eng)
 
-	// Find the right agent to execute against: enumerate the operator's active
-	// sessions and target the first one, rather than a placeholder session id.
+	// Find the right agent to execute against, enforcing scope: pick the first
+	// active session whose host is in the engagement scope. If sessions exist but
+	// none are in scope, refuse to execute (techniques are recorded Skipped) —
+	// scope is enforced at execution time, not just at deploy time.
 	if op != nil {
-		if sessions, err := op.Sessions(ctx); err == nil && len(sessions) > 0 {
-			sessionID = sessions[0].ID
+		sid, ok := selectInScopeSession(ctx, &eng, op, sessionID)
+		if !ok {
+			_ = s.audit.Record(ctx, audit.Event{
+				EngagementID: eng.ID,
+				Actor:        actor,
+				Action:       "emulation.scope_block",
+				Target:       sc.ID,
+				Detail:       "no in-scope agent session; execution refused",
+				At:           time.Now().UTC(),
+			})
+			op = nil
+		} else {
+			sessionID = sid
 		}
 	}
 
