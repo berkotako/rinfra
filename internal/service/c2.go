@@ -90,14 +90,9 @@ func (s *C2Service) ManualAccess(ctx context.Context, engagementID, actor string
 		return ManualAccessView{}, err
 	}
 
-	ma, err := c2.ManualAccessFor(provider, c2.Teamserver{Host: node.PublicIP, Status: string(node.Status)})
+	view, err := s.manualAccessView(node, provider)
 	if err != nil {
 		return ManualAccessView{}, fmt.Errorf("c2.ManualAccess: %w", err)
-	}
-
-	keyHint := s.sshKeyHint
-	if keyHint == "" {
-		keyHint = "<engagement-ssh-key>"
 	}
 
 	_ = s.audit.Record(ctx, audit.Event{
@@ -105,10 +100,23 @@ func (s *C2Service) ManualAccess(ctx context.Context, engagementID, actor string
 		Actor:        actor,
 		Action:       "c2.manual_access",
 		Target:       node.ID,
-		Detail:       fmt.Sprintf("framework=%s client=%s operator_port=%d", ma.Framework, ma.Client, ma.OperatorPort),
+		Detail:       fmt.Sprintf("framework=%s client=%s operator_port=%d", view.Framework, view.Client, view.OperatorPort),
 		At:           time.Now().UTC(),
 	})
 
+	return view, nil
+}
+
+// manualAccessView builds the manual-access descriptor for one teamserver node.
+func (s *C2Service) manualAccessView(node domain.Node, provider c2.C2Provider) (ManualAccessView, error) {
+	ma, err := c2.ManualAccessFor(provider, c2.Teamserver{Host: node.PublicIP, Status: string(node.Status)})
+	if err != nil {
+		return ManualAccessView{}, err
+	}
+	keyHint := s.sshKeyHint
+	if keyHint == "" {
+		keyHint = "<engagement-ssh-key>"
+	}
 	return ManualAccessView{
 		Framework:    ma.Framework,
 		Client:       ma.Client,
@@ -119,6 +127,50 @@ func (s *C2Service) ManualAccess(ctx context.Context, engagementID, actor string
 		SSHCommand:   ma.Tunnel.SSHCommand(keyHint),
 		Instructions: ma.Instructions,
 	}, nil
+}
+
+// ListTeamservers returns a manual-access descriptor for every live C2 server
+// node in the engagement (the Alive C2s view). Gated by CanDeploy and audited.
+func (s *C2Service) ListTeamservers(ctx context.Context, engagementID, actor string) ([]ManualAccessView, error) {
+	eng, err := s.engagements.Get(ctx, engagementID)
+	if err != nil {
+		return nil, fmt.Errorf("c2.ListTeamservers: %w", err)
+	}
+	if err := eng.CanDeploy(time.Now()); err != nil {
+		return nil, fmt.Errorf("c2.ListTeamservers: %w", err)
+	}
+
+	nodes, err := s.infra.NodesForEngagement(ctx, engagementID)
+	if err != nil {
+		return nil, fmt.Errorf("c2.ListTeamservers: load nodes: %w", err)
+	}
+
+	out := make([]ManualAccessView, 0)
+	for _, n := range nodes {
+		if n.Spec.Type != domain.NodeC2Server || n.Status != domain.NodeLive || n.Spec.C2Framework == "" {
+			continue
+		}
+		provider, err := c2.Get(n.Spec.C2Framework)
+		if err != nil {
+			continue
+		}
+		view, err := s.manualAccessView(n, provider)
+		if err != nil {
+			continue
+		}
+		out = append(out, view)
+	}
+
+	_ = s.audit.Record(ctx, audit.Event{
+		EngagementID: engagementID,
+		Actor:        actor,
+		Action:       "c2.teamservers_list",
+		Target:       engagementID,
+		Detail:       fmt.Sprintf("count=%d", len(out)),
+		At:           time.Now().UTC(),
+	})
+
+	return out, nil
 }
 
 // TunnelView identifies a live local port-forward.

@@ -12,6 +12,7 @@ import type {
   OperatorMode,
   OperatorSession,
   DeployedC2,
+  Coverage,
 } from "./types";
 
 export const PROVIDERS: Record<CloudProvider, ProviderMeta> = {
@@ -785,6 +786,47 @@ export function c2SupportsTactic(frameworkId: string, tactic: string): boolean {
 // Framework ids that can automate the given tactic (for capability chips).
 export function frameworksSupportingTactic(tactic: string): string[] {
   return C2_FRAMEWORKS.filter((f) => c2SupportsTactic(f.id, tactic)).map((f) => f.id);
+}
+
+// Demo ATT&CK coverage rollup — what MockClient.getCoverage returns so the
+// reporting page renders the same shape it gets from the real backend.
+function cov(tactic: string, techs: [string, string, number][]): { tactic: string; techniques: { attackID: string; name: string; tactic: string; level: number }[] } {
+  return {
+    tactic,
+    techniques: techs.map(([attackID, name, level]) => ({ attackID, name, tactic, level })),
+  };
+}
+
+export function buildMockCoverage(engagementId: string): Coverage {
+  const tactics = [
+    cov("Initial Access", [["T1566", "Phishing", 3], ["T1078", "Valid Accounts", 2], ["T1190", "Exploit Public App", 1], ["T1189", "Drive-by", 0]]),
+    cov("Execution", [["T1059.001", "PowerShell", 3], ["T1053.005", "Scheduled Task", 2], ["T1047", "WMI", 1], ["T1204.002", "User Execution", 3]]),
+    cov("Persistence", [["T1547.001", "Run Keys", 3], ["T1053.005", "Scheduled Task", 2], ["T1078", "Valid Accounts", 2], ["T1543", "Services", 0]]),
+    cov("Defense Evasion", [["T1055", "Process Injection", 3], ["T1027", "Obfuscation", 2], ["T1562.001", "Disable Tools", 1], ["T1112", "Modify Registry", 2]]),
+    cov("Credential Access", [["T1003.001", "LSASS Memory", 3], ["T1555.003", "Browser Creds", 2], ["T1558.003", "Kerberoasting", 1], ["T1056.001", "Keylogging", 0]]),
+    cov("Discovery", [["T1018", "Remote System", 3], ["T1057", "Process Disc.", 3], ["T1087", "Account Disc.", 2], ["T1135", "Network Share", 1]]),
+    cov("Lateral Movement", [["T1021.001", "RDP", 2], ["T1570", "Tool Transfer", 2], ["T1550.002", "Pass the Hash", 1], ["T1021.002", "SMB/Admin$", 0]]),
+    cov("Exfiltration", [["T1567.002", "Cloud Storage", 2], ["T1041", "C2 Channel", 3], ["T1567", "Web Service", 1]]),
+  ];
+  let total = 0,
+    exercised = 0,
+    executed = 0,
+    validated = 0;
+  for (const t of tactics)
+    for (const te of t.techniques) {
+      total++;
+      if (te.level >= 1) exercised++;
+      if (te.level >= 2) executed++;
+      if (te.level === 3) validated++;
+    }
+  return {
+    engagementId,
+    tactics,
+    totalTechniques: total,
+    exercisedCount: exercised,
+    executedCount: executed,
+    validatedCount: validated,
+  };
 }
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {

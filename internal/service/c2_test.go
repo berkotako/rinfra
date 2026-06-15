@@ -243,3 +243,34 @@ func TestC2OpenShell_GateBlocksUnauthorized(t *testing.T) {
 		t.Fatal("expected CanDeploy gate to block shell on draft engagement")
 	}
 }
+
+func TestC2ListTeamservers(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	eng := deployLiveC2(t, ctx, s, hub)
+
+	svcC2 := service.NewC2Service(s.eng, s.infra, s.audit, testLogger())
+	views, err := svcC2.ListTeamservers(ctx, eng.ID, "op1")
+	if err != nil {
+		t.Fatalf("ListTeamservers: %v", err)
+	}
+	if len(views) == 0 {
+		t.Fatal("expected at least one live teamserver")
+	}
+	found := false
+	for _, v := range views {
+		if v.Framework == "sliver" && v.OperatorPort == 31337 && v.NodeID != "" {
+			found = true
+		}
+		if v.Host == "" || v.SSHCommand == "" {
+			t.Errorf("incomplete teamserver view: %+v", v)
+		}
+	}
+	if !found {
+		t.Errorf("expected the live sliver teamserver in the list: %+v", views)
+	}
+	if !hasAuditAction(s.audit, "c2.teamservers_list", eng.ID) {
+		t.Error("expected c2.teamservers_list audit event")
+	}
+}

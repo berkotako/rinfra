@@ -22,6 +22,22 @@ func (h *handlers) c2ManualAccess(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// c2ListTeamservers returns a manual-access descriptor for every live C2 server
+// node in the engagement (the Alive C2s view).
+func (h *handlers) c2ListTeamservers(w http.ResponseWriter, r *http.Request) {
+	if h.svc.C2 == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "manual access is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	views, err := h.svc.C2.ListTeamservers(r.Context(), id, actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"teamservers": views})
+}
+
 // c2OpenTunnel opens an SSH local port-forward to the teamserver operator port.
 func (h *handlers) c2OpenTunnel(w http.ResponseWriter, r *http.Request) {
 	if h.svc.C2 == nil {

@@ -8,6 +8,7 @@ import type {
   C2Framework,
   Scenario,
   Technique,
+  Coverage,
   NodeStatus,
   EngagementStatus,
   User,
@@ -25,7 +26,30 @@ import {
   SCENARIOS,
   C2_OPERATOR_ACCESS,
   deployedC2FromNode,
+  buildMockCoverage,
 } from "./data";
+
+// Builds an ATT&CK Navigator layer from a coverage rollup (used by MockClient;
+// the REST backend produces its own).
+function navigatorLayerFromCoverage(c: Coverage): unknown {
+  const colors = ["", "#ffd966", "#6aa84f", "#274e13"];
+  const techniques = c.tactics.flatMap((t) =>
+    t.techniques.map((te) => ({
+      techniqueID: te.attackID,
+      score: te.level,
+      color: colors[te.level] ?? "",
+      enabled: te.level > 0,
+    }))
+  );
+  return {
+    name: "RInfra Coverage Export",
+    versions: { attack: "14", navigator: "4.9", layer: "4.5" },
+    domain: "enterprise-attack",
+    description: `RInfra coverage export for engagement ${c.engagementId}`,
+    techniques,
+    gradient: { colors: ["#ffffff", "#ffd966", "#6aa84f", "#274e13"], minValue: 0, maxValue: 3 },
+  };
+}
 
 // ---------- Typed error codes coming from the API error envelope ----------
 
@@ -259,6 +283,10 @@ export interface RInfraClient {
   createTechnique(t: Technique): Promise<Technique>;
   updateTechnique(t: Technique): Promise<Technique>;
   deleteTechnique(id: string): Promise<void>;
+
+  // Coverage & ATT&CK Navigator export
+  getCoverage(engagementId: string): Promise<Coverage>;
+  getNavigatorLayer(engagementId: string): Promise<unknown>;
 }
 
 export interface CreateUserParams {
@@ -616,6 +644,14 @@ export class MockClient implements RInfraClient {
   }
   async deleteTechnique(id: string): Promise<void> {
     void id;
+  }
+
+  async getCoverage(engagementId: string): Promise<Coverage> {
+    return buildMockCoverage(engagementId);
+  }
+
+  async getNavigatorLayer(engagementId: string): Promise<unknown> {
+    return navigatorLayerFromCoverage(buildMockCoverage(engagementId));
   }
 }
 
@@ -1175,11 +1211,12 @@ export class RestClient implements RInfraClient {
   async listDeployedC2(engagementId?: string): Promise<DeployedC2[]> {
     if (!engagementId) return [];
     try {
-      const body = await this.fetch<Record<string, unknown>>(
-        `/engagements/${engagementId}/c2/manual-access`
+      const body = await this.fetch<{ teamservers: Record<string, unknown>[] }>(
+        `/engagements/${engagementId}/c2/teamservers`
       );
-      const d = mapManualAccessFromApi(body);
-      return d ? [d] : [];
+      return (body.teamservers ?? [])
+        .map(mapManualAccessFromApi)
+        .filter((d): d is DeployedC2 => d !== null);
     } catch (e) {
       // No live C2 node yet (or not authorized) — surface an empty list.
       if (e instanceof ApiError && (e.status === 404 || e.code === "not_found")) {
@@ -1302,6 +1339,14 @@ export class RestClient implements RInfraClient {
 
   async deleteTechnique(id: string): Promise<void> {
     await this.fetch<undefined>(`/ttps/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  async getCoverage(engagementId: string): Promise<Coverage> {
+    return this.fetch<Coverage>(`/engagements/${engagementId}/coverage`);
+  }
+
+  async getNavigatorLayer(engagementId: string): Promise<unknown> {
+    return this.fetch<unknown>(`/engagements/${engagementId}/navigator`);
   }
 }
 

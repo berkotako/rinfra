@@ -4,81 +4,19 @@ import { Icons } from "../icons";
 import { PageHead } from "../ui";
 import { useStore } from "../../lib/store";
 import { getClient } from "../../lib/client";
-import type { Project } from "../../lib/types";
+import type { Project, Coverage } from "../../lib/types";
 
-const TACTICS = [
-  {
-    name: "Initial Access",
-    techs: [
-      ["Phishing", 3],
-      ["Valid Accounts", 2],
-      ["Exploit Public App", 1],
-      ["Drive-by", 0],
-    ],
-  },
-  {
-    name: "Execution",
-    techs: [
-      ["PowerShell", 3],
-      ["Scheduled Task", 2],
-      ["WMI", 1],
-      ["User Execution", 3],
-    ],
-  },
-  {
-    name: "Persistence",
-    techs: [
-      ["Run Keys", 3],
-      ["Scheduled Task", 2],
-      ["Valid Accounts", 2],
-      ["Services", 0],
-    ],
-  },
-  {
-    name: "Defense Evasion",
-    techs: [
-      ["Process Injection", 3],
-      ["Obfuscation", 2],
-      ["Disable Tools", 1],
-      ["Modify Registry", 2],
-    ],
-  },
-  {
-    name: "Credential Access",
-    techs: [
-      ["LSASS Memory", 3],
-      ["Browser Creds", 2],
-      ["Kerberoasting", 1],
-      ["Keylogging", 0],
-    ],
-  },
-  {
-    name: "Discovery",
-    techs: [
-      ["Remote System", 3],
-      ["Process Disc.", 3],
-      ["Account Disc.", 2],
-      ["Network Share", 1],
-    ],
-  },
-  {
-    name: "Lateral Movement",
-    techs: [
-      ["RDP", 2],
-      ["Tool Transfer", 2],
-      ["Pass the Hash", 1],
-      ["SMB/Admin$", 0],
-    ],
-  },
-  {
-    name: "Exfiltration",
-    techs: [
-      ["Cloud Storage", 2],
-      ["C2 Channel", 3],
-      ["Web Service", 1],
-    ],
-  },
-] as { name: string; techs: [string, number][] }[];
+// Format a tactic label, accepting both backend ("initial-access") and demo
+// ("Initial Access") forms.
+function tacticLabel(t: string): string {
+  if (t.includes("-")) {
+    return t
+      .split("-")
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+  }
+  return t;
+}
 
 const LVL_COLOR = [
   "var(--surface-3)",
@@ -89,7 +27,8 @@ const LVL_COLOR = [
 const LVL_TEXT = ["var(--text-4)", "var(--text-2)", "#fff", "#fff"];
 
 export default function ReportingScreen() {
-  const { activeEngagement, engagements, activeEngagementId, setActiveEngagementId } = useStore();
+  const { activeEngagement, engagements, activeEngagementId, setActiveEngagementId, pushToast } =
+    useStore();
   const [tab, setTab] = useState<"coverage" | "report">("coverage");
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("all");
@@ -113,9 +52,33 @@ export default function ReportingScreen() {
       ? engagements.filter((e) => e.client === project.clientName)
       : engagements;
 
-  const allTechs = TACTICS.flatMap((t) => t.techs);
-  const covered = allTechs.filter(([, l]) => (l as number) > 0).length;
-  const tested = allTechs.filter(([, l]) => (l as number) >= 2).length;
+  // Coverage rollup from the data layer — real backend in REST mode, demo data
+  // in mock mode (same render path either way).
+  const [coverage, setCoverage] = useState<Coverage | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getClient()
+      .getCoverage(activeEngagementId)
+      .then((c) => alive && setCoverage(c))
+      .catch(() => alive && setCoverage(null));
+    return () => {
+      alive = false;
+    };
+  }, [activeEngagementId]);
+
+  const total = coverage?.totalTechniques ?? 0;
+  const covered = coverage?.exercisedCount ?? 0;
+  const executed = coverage?.executedCount ?? 0;
+  const validated = coverage?.validatedCount ?? 0;
+  const coveragePct = total > 0 ? Math.round((covered / total) * 100) : 0;
+
+  const copyNavigator = () => {
+    getClient()
+      .getNavigatorLayer(activeEngagementId)
+      .then((layer) => navigator.clipboard?.writeText(JSON.stringify(layer, null, 2)))
+      .then(() => pushToast("ATT&CK Navigator layer copied to clipboard", "ok"))
+      .catch(() => pushToast("Could not export Navigator layer", "danger"));
+  };
 
   return (
     <div
@@ -197,18 +160,10 @@ export default function ReportingScreen() {
             <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
               {(
                 [
-                  [
-                    "Techniques exercised",
-                    `${covered} / ${allTechs.length}`,
-                    "var(--accent)",
-                  ],
-                  ["Validated (2+ coverage)", tested, "var(--ok)"],
-                  ["Detected by defenders", "9", "var(--info)"],
-                  [
-                    "Coverage score",
-                    `${Math.round((covered / allTechs.length) * 100)}%`,
-                    "var(--text)",
-                  ],
+                  ["Techniques exercised", `${covered} / ${total}`, "var(--accent)"],
+                  ["Executed (2+ coverage)", executed, "var(--ok)"],
+                  ["Validated", validated, "var(--info)"],
+                  ["Coverage score", `${coveragePct}%`, "var(--text)"],
                 ] as [string, string | number, string][]
               ).map(([l, v, c], i) => (
                 <div
@@ -236,8 +191,8 @@ export default function ReportingScreen() {
 
             <div className="card" style={{ padding: 18, overflowX: "auto" }}>
               <div style={{ display: "flex", gap: 10, minWidth: 880 }}>
-                {TACTICS.map((tac) => (
-                  <div key={tac.name} style={{ flex: 1, minWidth: 96 }}>
+                {(coverage?.tactics ?? []).map((tac) => (
+                  <div key={tac.tactic} style={{ flex: 1, minWidth: 96 }}>
                     <div
                       style={{
                         fontSize: 11,
@@ -248,7 +203,7 @@ export default function ReportingScreen() {
                         lineHeight: 1.25,
                       }}
                     >
-                      {tac.name}
+                      {tacticLabel(tac.tactic)}
                     </div>
                     <div
                       style={{
@@ -257,23 +212,23 @@ export default function ReportingScreen() {
                         gap: 5,
                       }}
                     >
-                      {tac.techs.map(([name, lvl], i) => (
+                      {tac.techniques.map((te, i) => (
                         <div
-                          key={i}
-                          title={`${name} — coverage ${lvl}/3`}
+                          key={te.attackID + i}
+                          title={`${te.name} (${te.attackID}) — coverage ${te.level}/3`}
                           style={{
                             padding: "7px 8px",
                             borderRadius: 6,
                             fontSize: 10.5,
                             lineHeight: 1.2,
                             cursor: "default",
-                            background: LVL_COLOR[lvl as number],
-                            color: LVL_TEXT[lvl as number],
+                            background: LVL_COLOR[te.level],
+                            color: LVL_TEXT[te.level],
                             border:
-                              lvl === 0
+                              te.level === 0
                                 ? "1px solid var(--border)"
                                 : "1px solid transparent",
-                            fontWeight: (lvl as number) >= 2 ? 500 : 400,
+                            fontWeight: te.level >= 2 ? 500 : 400,
                             transition: "transform .1s",
                           }}
                           onMouseEnter={(e) =>
@@ -285,7 +240,7 @@ export default function ReportingScreen() {
                               "none")
                           }
                         >
-                          {name}
+                          {te.name}
                         </div>
                       ))}
                     </div>
@@ -620,6 +575,7 @@ export default function ReportingScreen() {
               <button
                 className="btn"
                 style={{ justifyContent: "center" }}
+                onClick={copyNavigator}
               >
                 <Icons.Copy size={15} /> Copy ATT&CK Navigator JSON
               </button>
