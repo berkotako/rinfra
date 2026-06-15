@@ -6,6 +6,8 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 )
 
@@ -108,15 +110,115 @@ func (e *Engagement) CanDeploy(now time.Time) error {
 	return nil
 }
 
-// TargetInScope reports whether a given target (IP, CIDR, or domain) falls
-// within the engagement scope. NOTE: implement real CIDR/domain matching when
-// wiring this up; this signature is the contract callers rely on.
+// TargetInScope reports whether a given target (IP, CIDR, or domain) is allowed
+// by the engagement scope. Exclusions take precedence: a target matching any
+// exclusion is out of scope even if it also matches an allowed entry.
+//
+// Matching rules (entry → target):
+//   - CIDR entry: matches an IP inside it, or a CIDR fully contained within it.
+//   - IP entry: matches that exact IP (or a /32/-/128 single-host CIDR of it).
+//   - domain entry "example.com": matches "example.com" and any subdomain
+//     "*.example.com" (label-boundary suffix).
+//   - wildcard entry "*.example.com": matches subdomains only, not the apex.
+//
+// Unparseable / empty targets are treated as out of scope.
 func (e *Engagement) TargetInScope(target string) bool {
-	for _, t := range e.Scope.AllowedTargets {
-		if t == target {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, ex := range e.Scope.Exclusions {
+		if scopeEntryMatches(ex, target) {
+			return false
+		}
+	}
+	for _, al := range e.Scope.AllowedTargets {
+		if scopeEntryMatches(al, target) {
 			return true
 		}
 	}
-	// TODO(claude-code): CIDR containment + domain suffix matching.
 	return false
+}
+
+// EnforceTargetInScope returns ErrTargetNotInScope when target is out of scope.
+// Call this from every operation that acts on a target host/domain (emulation
+// execution against a session host, etc.), not just at deploy time.
+func (e *Engagement) EnforceTargetInScope(target string) error {
+	if !e.TargetInScope(target) {
+		return fmt.Errorf("%w: %q", ErrTargetNotInScope, target)
+	}
+	return nil
+}
+
+// scopeEntryMatches reports whether a single scope entry matches a target. It is
+// used for both allowed targets and exclusions.
+func scopeEntryMatches(entry, target string) bool {
+	entry = strings.TrimSpace(entry)
+	target = strings.TrimSpace(target)
+	if entry == "" || target == "" {
+		return false
+	}
+
+	// CIDR entry.
+	if _, entryNet, err := net.ParseCIDR(entry); err == nil {
+		if ip := net.ParseIP(target); ip != nil {
+			return entryNet.Contains(ip)
+		}
+		if tIP, tNet, err := net.ParseCIDR(target); err == nil {
+			if !entryNet.Contains(tIP) {
+				return false
+			}
+			eOnes, eBits := entryNet.Mask.Size()
+			tOnes, tBits := tNet.Mask.Size()
+			return eBits == tBits && tOnes >= eOnes // target range fits inside entry
+		}
+		return false // domain target vs CIDR entry never matches
+	}
+
+	// Bare IP entry.
+	if entryIP := net.ParseIP(entry); entryIP != nil {
+		if tIP := net.ParseIP(target); tIP != nil {
+			return entryIP.Equal(tIP)
+		}
+		if tIP, tNet, err := net.ParseCIDR(target); err == nil {
+			ones, bits := tNet.Mask.Size()
+			return ones == bits && entryIP.Equal(tIP) // single-host CIDR == entry IP
+		}
+		return false
+	}
+
+	// Domain / wildcard entry — only matches domain targets.
+	if net.ParseIP(target) != nil {
+		return false
+	}
+	if _, _, err := net.ParseCIDR(target); err == nil {
+		return false
+	}
+	td, ok := normalizeDomain(target)
+	if !ok {
+		return false
+	}
+	if strings.HasPrefix(entry, "*.") {
+		base, ok := normalizeDomain(entry[2:])
+		if !ok {
+			return false
+		}
+		return strings.HasSuffix(td, "."+base) && td != base
+	}
+	ed, ok := normalizeDomain(entry)
+	if !ok {
+		return false
+	}
+	return td == ed || strings.HasSuffix(td, "."+ed)
+}
+
+// normalizeDomain lowercases a hostname and strips a trailing dot. It returns
+// ok=false for empty input or values that are clearly not hostnames.
+func normalizeDomain(s string) (string, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimSuffix(s, ".")
+	if s == "" || strings.ContainsAny(s, " /\\:") {
+		return "", false
+	}
+	return s, true
 }

@@ -76,9 +76,9 @@ func (r *RegistryResolver) Resolve(ctx context.Context, eng domain.Engagement) (
 			// Fronted-tier: no automation API.
 			return nil, "", false
 		}
-		// For Orchestrated/Scripted tier: use "fake-session-1" as a placeholder
-		// session ID until session enumeration is wired in Phase 6 live path.
-		// TODO(live): call op.Sessions() and pick the first active session.
+		// Orchestrated/Scripted tier. The emulation engine enumerates op.Sessions()
+		// and picks the first in-scope active agent; this fallback session id is
+		// only used if enumeration is unavailable.
 		return op, fmt.Sprintf("session-%s", n.ID), true
 	}
 	return nil, "", false
@@ -105,7 +105,9 @@ type fakeOperator struct{}
 
 func (fakeOperator) StartListener(_ context.Context, _ c2.ListenerSpec) error { return nil }
 func (fakeOperator) Sessions(_ context.Context) ([]c2.Session, error) {
-	return []c2.Session{{ID: "fake-session-1", Host: "203.0.113.1", User: "SYSTEM"}}, nil
+	// Host is inside the common test/dev scope (10.0.0.0/8) so scope enforcement
+	// admits the fake agent.
+	return []c2.Session{{ID: "fake-session-1", Host: "10.10.10.10", User: "SYSTEM"}}, nil
 }
 func (fakeOperator) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
 	return domain.Result{

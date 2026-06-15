@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/service"
 	"github.com/rinfra/rinfra/internal/store"
@@ -638,5 +639,81 @@ func TestTechniqueCRUD(t *testing.T) {
 	}
 	if list, _ := svcEmu.ListTechniques(ctx); len(list) != 0 {
 		t.Errorf("expected empty list after delete, got %d", len(list))
+	}
+}
+
+// scopeTestOperator is a c2.Operator whose single session lives on a configurable
+// host, used to verify execution-time scope enforcement.
+type scopeTestOperator struct{ host string }
+
+func (scopeTestOperator) StartListener(context.Context, c2.ListenerSpec) error { return nil }
+func (o scopeTestOperator) Sessions(context.Context) ([]c2.Session, error) {
+	return []c2.Session{{ID: "s1", Host: o.host, User: "SYSTEM"}}, nil
+}
+func (scopeTestOperator) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	return domain.Result{TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess}, nil
+}
+
+type scopeTestResolver struct{ op c2.Operator }
+
+func (r scopeTestResolver) Resolve(context.Context, domain.Engagement) (c2.Operator, string, bool) {
+	return r.op, "fallback-session", true
+}
+
+// TestEmulationScopeEnforcement verifies that when the only available agent is
+// outside the engagement scope, emulation refuses to execute (all Skipped) and
+// audits the scope block — scope is enforced at execution time.
+func TestEmulationScopeEnforcement(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng) // scope 10.0.0.0/8
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	// Agent host 8.8.8.8 is out of scope.
+	svcEmu.WithResolver(scopeTestResolver{op: scopeTestOperator{host: "8.8.8.8"}})
+
+	runID, err := svcEmu.Start(ctx, eng.ID, "apt29", "op1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var run domain.ScenarioRun
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ = svcEmu.GetRun(ctx, runID)
+		if run.Status != domain.ExecRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != domain.ExecSkipped {
+		t.Errorf("out-of-scope run status: want skipped, got %s", run.Status)
+	}
+	for _, r := range run.Results {
+		if r.Status != domain.ExecSkipped {
+			t.Errorf("technique %s: want skipped (out of scope), got %s", r.TechniqueAttackID, r.Status)
+		}
+	}
+	if !hasAuditAction(s.audit, "emulation.scope_block", eng.ID) {
+		t.Error("expected emulation.scope_block audit event")
+	}
+
+	// Sanity: an in-scope agent runs successfully.
+	svcEmu.WithResolver(scopeTestResolver{op: scopeTestOperator{host: "10.20.30.40"}})
+	runID2, err := svcEmu.Start(ctx, eng.ID, "apt29", "op1")
+	if err != nil {
+		t.Fatalf("Start (in-scope): %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ = svcEmu.GetRun(ctx, runID2)
+		if run.Status != domain.ExecRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != domain.ExecSuccess {
+		t.Errorf("in-scope run status: want success, got %s", run.Status)
 	}
 }
