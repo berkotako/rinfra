@@ -113,12 +113,18 @@ func RequireRole(roles ...domain.Role) func(http.Handler) http.Handler {
 	}
 }
 
-// bearerToken extracts the token from an "Authorization: Bearer <token>" header.
+// bearerToken extracts the token from an "Authorization: Bearer <token>" header,
+// falling back to a "token" query parameter. The query fallback exists because
+// browser-native streaming clients (EventSource for SSE, WebSocket for the web
+// shell) cannot set request headers.
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
 		return strings.TrimSpace(h[len(prefix):])
+	}
+	if t := r.URL.Query().Get("token"); t != "" {
+		return t
 	}
 	return ""
 }

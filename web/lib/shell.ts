@@ -6,6 +6,7 @@
 //   ws(s)://<api>/api/v1/engagements/{id}/c2/{nodeId}/shell
 // and streams bytes both ways. getShellSession() picks the right one.
 import type { DeployedC2 } from "./types";
+import { getAuthToken } from "./client";
 
 export interface ShellSession {
   open(): void;
@@ -206,7 +207,11 @@ export function getShellSession(engagementId: string, d: DeployedC2): ShellSessi
   const api = process.env.NEXT_PUBLIC_RINFRA_API;
   if (api) {
     const wsBase = api.replace(/^http/, "ws");
-    return new WsShellSession(`${wsBase}/api/v1/engagements/${engagementId}/c2/${d.nodeId}/shell`);
+    // Browser WebSocket can't set an Authorization header, so the bearer token
+    // is passed as a query param (the backend accepts it for streaming routes).
+    const token = getAuthToken();
+    const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+    return new WsShellSession(`${wsBase}/api/v1/engagements/${engagementId}/c2/${d.nodeId}/shell${qs}`);
   }
   return new MockShellSession(d);
 }

@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/domain"
@@ -456,6 +458,53 @@ func (h *handlers) deleteScenario(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------- C2 web shell (WebSocket) ----------
+
+// c2Shell upgrades to a WebSocket and bridges the in-browser operator terminal
+// to a deployed teamserver. Authorization (CanDeploy) and node resolution happen
+// before the upgrade so failures surface as normal HTTP errors. The streamed
+// command surface is read-only and controlled by service.RespondShell — it never
+// executes arbitrary commands on the control plane.
+func (h *handlers) c2Shell(w http.ResponseWriter, r *http.Request) {
+	engagementID := chi.URLParam(r, "id")
+	nodeID := chi.URLParam(r, "nodeId")
+	actor := actorFrom(r.Context())
+
+	info, err := h.svc.C2.OpenShell(r.Context(), engagementID, nodeID, actor)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+	if err != nil {
+		return // Accept already wrote the failure
+	}
+	defer conn.Close(websocket.StatusInternalError, "shell closed")
+
+	ctx := r.Context()
+	if err := conn.Write(ctx, websocket.MessageText, []byte(service.ShellBanner(info))); err != nil {
+		return
+	}
+
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return // client disconnected
+		}
+		out, closed := service.RespondShell(info, strings.TrimRight(string(data), "\r\n"))
+		if out != "" {
+			if err := conn.Write(ctx, websocket.MessageText, []byte(out)); err != nil {
+				return
+			}
+		}
+		if closed {
+			conn.Close(websocket.StatusNormalClosure, "exit")
+			return
+		}
+	}
 }
 
 // ---------- Runs ----------

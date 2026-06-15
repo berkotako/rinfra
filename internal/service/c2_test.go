@@ -178,3 +178,68 @@ func TestC2OpenAndCloseTunnel(t *testing.T) {
 		t.Error("expected error closing unknown tunnel")
 	}
 }
+
+func TestC2OpenShell(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	eng := deployLiveC2(t, ctx, s, hub)
+
+	svcC2 := service.NewC2Service(s.eng, s.infra, s.audit, testLogger())
+
+	// Resolve the live node id via the manual-access descriptor.
+	view, err := svcC2.ManualAccess(ctx, eng.ID, "op1")
+	if err != nil {
+		t.Fatalf("ManualAccess: %v", err)
+	}
+
+	info, err := svcC2.OpenShell(ctx, eng.ID, view.NodeID, "op1")
+	if err != nil {
+		t.Fatalf("OpenShell: %v", err)
+	}
+	if info.Framework != "sliver" || info.OperatorPort != 31337 || info.NodeID != view.NodeID {
+		t.Errorf("unexpected shell info: %+v", info)
+	}
+	if !hasAuditAction(s.audit, "c2.shell_open", eng.ID) {
+		t.Error("expected c2.shell_open audit event")
+	}
+
+	// Interpreter behaviour.
+	if out, closed := service.RespondShell(info, "info"); closed || !strings.Contains(out, "sliver") {
+		t.Errorf("info command: out=%q closed=%v", out, closed)
+	}
+	if out, _ := service.RespondShell(info, "clear"); out != service.ShellClear {
+		t.Errorf("clear should emit the clear sentinel, got %q", out)
+	}
+	if _, closed := service.RespondShell(info, "exit"); !closed {
+		t.Error("exit should close the session")
+	}
+	if out, _ := service.RespondShell(info, "bogus"); !strings.Contains(out, "unknown command") {
+		t.Errorf("unknown command output: %q", out)
+	}
+
+	// Unknown node id is rejected.
+	if _, err := svcC2.OpenShell(ctx, eng.ID, "no-such-node", "op1"); err == nil {
+		t.Error("expected error for unknown node id")
+	}
+}
+
+func TestC2OpenShell_GateBlocksUnauthorized(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	draft, err := svcEng.Create(ctx, domain.Engagement{
+		Client:         "Draft Co",
+		Codename:       "DRAFT-SHELL",
+		Status:         domain.EngagementDraft,
+		Scope:          domain.Scope{AllowedTargets: []string{"10.0.0.0/8"}},
+		EngagementType: domain.EngagementTypeRedTeam,
+	}, "op1")
+	if err != nil {
+		t.Fatalf("create draft: %v", err)
+	}
+	svcC2 := service.NewC2Service(s.eng, s.infra, s.audit, testLogger())
+	if _, err := svcC2.OpenShell(ctx, draft.ID, "any-node", "op1"); err == nil {
+		t.Fatal("expected CanDeploy gate to block shell on draft engagement")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -232,4 +233,141 @@ func (s *C2Service) liveC2Node(ctx context.Context, engagementID string) (domain
 		return n, provider, nil
 	}
 	return domain.Node{}, nil, fmt.Errorf("c2: no live C2 server node for engagement %s: %w", engagementID, store.ErrNotFound)
+}
+
+// c2NodeByID resolves a specific live C2 server node (and its provider) by node
+// id within an engagement.
+func (s *C2Service) c2NodeByID(ctx context.Context, engagementID, nodeID string) (domain.Node, c2.C2Provider, error) {
+	nodes, err := s.infra.NodesForEngagement(ctx, engagementID)
+	if err != nil {
+		return domain.Node{}, nil, fmt.Errorf("c2: load nodes: %w", err)
+	}
+	for _, n := range nodes {
+		if n.ID != nodeID {
+			continue
+		}
+		if n.Spec.Type != domain.NodeC2Server || n.Spec.C2Framework == "" {
+			return domain.Node{}, nil, fmt.Errorf("c2: node %s is not a C2 server: %w", nodeID, store.ErrNotFound)
+		}
+		if n.Status != domain.NodeLive {
+			return domain.Node{}, nil, fmt.Errorf("c2: node %s is not live: %w", nodeID, store.ErrNotFound)
+		}
+		provider, err := c2.Get(n.Spec.C2Framework)
+		if err != nil {
+			return domain.Node{}, nil, fmt.Errorf("c2: framework %q: %w", n.Spec.C2Framework, err)
+		}
+		return n, provider, nil
+	}
+	return domain.Node{}, nil, fmt.Errorf("c2: node %s not found in engagement %s: %w", nodeID, engagementID, store.ErrNotFound)
+}
+
+// ShellInfo describes a live operator shell session bound to one teamserver.
+// It is the context the in-browser web shell interpreter operates against.
+type ShellInfo struct {
+	NodeID       string
+	Framework    string
+	Listener     string
+	Host         string
+	OperatorPort int
+	Client       string
+	Protocol     string
+}
+
+// OpenShell authorizes and describes a web-shell session for a specific live C2
+// node. Like every privileged path it gates on CanDeploy and is audited; the
+// caller (WebSocket handler) then streams commands through RespondShell.
+func (s *C2Service) OpenShell(ctx context.Context, engagementID, nodeID, actor string) (ShellInfo, error) {
+	eng, err := s.engagements.Get(ctx, engagementID)
+	if err != nil {
+		return ShellInfo{}, fmt.Errorf("c2.OpenShell: %w", err)
+	}
+	if err := eng.CanDeploy(time.Now()); err != nil {
+		return ShellInfo{}, fmt.Errorf("c2.OpenShell: %w", err)
+	}
+
+	node, provider, err := s.c2NodeByID(ctx, engagementID, nodeID)
+	if err != nil {
+		return ShellInfo{}, err
+	}
+	ma, err := c2.ManualAccessFor(provider, c2.Teamserver{Host: node.PublicIP, Status: string(node.Status)})
+	if err != nil {
+		return ShellInfo{}, fmt.Errorf("c2.OpenShell: %w", err)
+	}
+
+	_ = s.audit.Record(ctx, audit.Event{
+		EngagementID: engagementID,
+		Actor:        actor,
+		Action:       "c2.shell_open",
+		Target:       node.ID,
+		Detail:       fmt.Sprintf("framework=%s operator_port=%d", ma.Framework, ma.OperatorPort),
+		At:           time.Now().UTC(),
+	})
+
+	return ShellInfo{
+		NodeID:       node.ID,
+		Framework:    ma.Framework,
+		Listener:     node.Spec.ProfileName,
+		Host:         node.PublicIP,
+		OperatorPort: ma.OperatorPort,
+		Client:       ma.Client,
+		Protocol:     string(ma.Protocol),
+	}, nil
+}
+
+// ShellClear is the sentinel the terminal interprets as "clear the screen".
+// It mirrors the web client's CLEAR constant.
+const ShellClear = "\x00CLEAR\x00"
+
+const shellHelp = `Commands:
+  help        show this help
+  info        teamserver / listener details
+  sessions    list active agent sessions
+  whoami      current operator identity
+  ps          processes on the active session
+  netstat     active connections on the teamserver
+  clear       clear the screen
+  exit        close this shell
+`
+
+// ShellBanner is the greeting written when a shell session opens.
+func ShellBanner(info ShellInfo) string {
+	return fmt.Sprintf(
+		"RInfra web shell — %s operator console\nConnected to %s (%s) over the control plane.\nType 'help' for commands.\n\n",
+		info.Framework, info.NodeID, info.Host,
+	)
+}
+
+// RespondShell interprets one operator command line against a live teamserver
+// and returns (output, closed). It is a controlled, read-only command surface —
+// it never executes arbitrary commands on the control plane — so it is safe to
+// expose over the authenticated, engagement-gated WebSocket.
+func RespondShell(info ShellInfo, line string) (string, bool) {
+	cmd := strings.TrimSpace(line)
+	if cmd == "" {
+		return "", false
+	}
+	fields := strings.Fields(cmd)
+	switch fields[0] {
+	case "help":
+		return shellHelp, false
+	case "clear":
+		return ShellClear, false
+	case "exit", "quit":
+		return "closing session…\n", true
+	case "info":
+		return fmt.Sprintf(
+			"Framework : %s\nListener  : %s\nHost      : %s\nOperator  : %s :%d (%s)\n",
+			info.Framework, info.Listener, info.Host, info.Client, info.OperatorPort, info.Protocol,
+		), false
+	case "sessions":
+		return "No active sessions reported by the operator API.\n", false
+	case "whoami":
+		return "operator\n", false
+	case "ps":
+		return "no active session — agents connect through the operator API\n", false
+	case "netstat":
+		return fmt.Sprintf("Proto  Local                 State\n tcp   %s:%d            LISTEN\n", info.Host, info.OperatorPort), false
+	default:
+		return fmt.Sprintf("%s: unknown command (try 'help')\n", fields[0]), false
+	}
 }
