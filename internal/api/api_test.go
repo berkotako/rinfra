@@ -168,15 +168,20 @@ func saveTopologyViaAPI(t *testing.T, router http.Handler, engID string) {
 	resp := doRequest(t, router, "PUT", "/api/v1/engagements/"+engID+"/topology", map[string]any{
 		"nodes": []map[string]any{
 			{
-				"id":       "node-redir-1",
-				"type":     "redirector",
-				"provider": provType,
-				"name":     "redir-01",
+				"id":          "node-redir-1",
+				"type":        "redirector",
+				"provider":    provType,
+				"region":      "nyc3",
+				"size":        "s-1vcpu-1gb",
+				"profileName": "https",
+				"name":        "redir-01",
 			},
 			{
 				"id":        "node-c2-1",
 				"type":      "c2_server",
 				"provider":  provType,
+				"region":    "nyc3",
+				"size":      "s-2vcpu-4gb",
 				"framework": "sliver",
 				"name":      "c2-01",
 			},

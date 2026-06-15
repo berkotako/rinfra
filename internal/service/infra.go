@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rinfra/rinfra/internal/audit"
+	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
@@ -19,6 +21,9 @@ import (
 // ErrJobRunning is returned when a deploy or teardown job is already in
 // progress for an engagement.
 var ErrJobRunning = errors.New("a deploy or teardown job is already running for this engagement")
+
+// ErrInvalidTopology is returned by Deploy when the topology fails validation.
+var ErrInvalidTopology = errors.New("topology validation failed")
 
 // ErrNoCloudCredentials is returned when no cloud credentials exist for the
 // engagement's provider.
@@ -109,7 +114,16 @@ func (s *InfraService) ValidateTopology(ctx context.Context, engagementID string
 	if err != nil {
 		return nil, err
 	}
+	return topologyProblems(t, eng), nil
+}
 
+// topologyProblems returns every validation problem for a topology; an empty
+// result means it is deployable. It checks topology shape (nodes present, at
+// least one c2_server + redirector, each c2_server fronted by a redirector),
+// per-node validity (registered cloud provider, region/size present, a
+// registered C2 framework for c2_servers, a profile for redirectors), and the
+// engagement authorization gate.
+func topologyProblems(t domain.Topology, eng domain.Engagement) []string {
 	var problems []string
 	if len(t.Nodes) == 0 {
 		problems = append(problems, "topology has no nodes")
@@ -148,9 +162,36 @@ func (s *InfraService) ValidateTopology(ctx context.Context, engagementID string
 			inboundFromRedirector[e.ToNodeID] = true
 		}
 	}
+
+	// Per-node validity.
 	for _, n := range t.Nodes {
-		if n.Spec.Type == domain.NodeC2Server && !inboundFromRedirector[n.ID] {
-			problems = append(problems, fmt.Sprintf("c2_server %q has no inbound edge from a redirector", n.Canvas.Name))
+		label := n.Canvas.Name
+		if label == "" {
+			label = n.ID
+		}
+		if _, err := cloud.Get(n.Spec.Cloud); err != nil {
+			problems = append(problems, fmt.Sprintf("node %q: unknown cloud provider %q", label, n.Spec.Cloud))
+		}
+		if strings.TrimSpace(n.Spec.Region) == "" {
+			problems = append(problems, fmt.Sprintf("node %q: missing region", label))
+		}
+		if strings.TrimSpace(n.Spec.Size) == "" {
+			problems = append(problems, fmt.Sprintf("node %q: missing size", label))
+		}
+		switch n.Spec.Type {
+		case domain.NodeC2Server:
+			if strings.TrimSpace(n.Spec.C2Framework) == "" {
+				problems = append(problems, fmt.Sprintf("c2_server %q: missing C2 framework", label))
+			} else if _, err := c2.Get(n.Spec.C2Framework); err != nil {
+				problems = append(problems, fmt.Sprintf("c2_server %q: unknown C2 framework %q", label, n.Spec.C2Framework))
+			}
+			if !inboundFromRedirector[n.ID] {
+				problems = append(problems, fmt.Sprintf("c2_server %q has no inbound edge from a redirector", label))
+			}
+		case domain.NodeRedirector:
+			if strings.TrimSpace(n.Spec.ProfileName) == "" {
+				problems = append(problems, fmt.Sprintf("redirector %q: missing profile", label))
+			}
 		}
 	}
 
@@ -159,7 +200,7 @@ func (s *InfraService) ValidateTopology(ctx context.Context, engagementID string
 		problems = append(problems, fmt.Sprintf("authorization check: %v", err))
 	}
 
-	return problems, nil
+	return problems
 }
 
 // Deploy provisions all pending nodes for an engagement asynchronously.
@@ -173,6 +214,16 @@ func (s *InfraService) Deploy(ctx context.Context, engagementID string, actor st
 	}
 	if err := eng.CanDeploy(time.Now()); err != nil {
 		return "", err
+	}
+
+	// Mandatory topology validation — never provision a malformed topology even
+	// if the client skipped the validate endpoint.
+	t, err := s.infra.GetTopology(ctx, engagementID)
+	if err != nil {
+		return "", err
+	}
+	if problems := topologyProblems(t, eng); len(problems) > 0 {
+		return "", fmt.Errorf("%w: %s", ErrInvalidTopology, strings.Join(problems, "; "))
 	}
 
 	// Reject if a job is already running.

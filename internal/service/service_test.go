@@ -104,12 +104,12 @@ func saveTestTopology(t *testing.T, ctx context.Context, svc *service.InfraServi
 		Nodes: []domain.Node{
 			{
 				ID:     "node-redir-1",
-				Spec:   domain.NodeSpec{Type: domain.NodeRedirector, Cloud: provType},
+				Spec:   domain.NodeSpec{Type: domain.NodeRedirector, Cloud: provType, Region: "nyc3", Size: "s-1vcpu-1gb", ProfileName: "https"},
 				Canvas: domain.NodeCanvas{Name: "redir-01"},
 			},
 			{
 				ID:     "node-c2-1",
-				Spec:   domain.NodeSpec{Type: domain.NodeC2Server, Cloud: provType, C2Framework: "sliver"},
+				Spec:   domain.NodeSpec{Type: domain.NodeC2Server, Cloud: provType, Region: "nyc3", Size: "s-2vcpu-4gb", C2Framework: "sliver"},
 				Canvas: domain.NodeCanvas{Name: "c2-01"},
 			},
 		},
