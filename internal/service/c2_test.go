@@ -3,6 +3,7 @@ package service_test
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -13,7 +14,13 @@ import (
 	_ "github.com/rinfra/rinfra/internal/c2/sliver" // register the sliver provider in the test binary
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/service"
+	"github.com/rinfra/rinfra/internal/store"
 )
+
+// opUser builds an operator-role user for tunnel tests.
+func opUser(id string) domain.User {
+	return domain.User{ID: id, Username: id, Role: domain.RoleOperator}
+}
 
 // deployLiveC2 authorizes an engagement, deploys the standard topology (which
 // includes a live Sliver c2_server node with a public IP), and returns it.
@@ -93,7 +100,7 @@ func TestC2OpenTunnel_NotConfigured(t *testing.T) {
 	// No tunnel dialer wired -> OpenTunnel reports unsupported (but the gate and
 	// node lookup still pass, so the error is specifically about the dialer).
 	svcC2 := service.NewC2Service(s.eng, s.infra, s.audit, testLogger())
-	_, err := svcC2.OpenTunnel(ctx, eng.ID, "op1")
+	_, err := svcC2.OpenTunnel(ctx, eng.ID, opUser("op1"))
 	if err == nil || !strings.Contains(err.Error(), "dialer not configured") {
 		t.Fatalf("expected dialer-not-configured error, got %v", err)
 	}
@@ -140,7 +147,7 @@ func TestC2OpenAndCloseTunnel(t *testing.T) {
 			return tunnelFakeDialer{target: upstream.Addr().String()}, nil
 		}, "/keys/eng.pem")
 
-	view, err := svcC2.OpenTunnel(ctx, eng.ID, "op1")
+	view, err := svcC2.OpenTunnel(ctx, eng.ID, opUser("op1"))
 	if err != nil {
 		t.Fatalf("OpenTunnel: %v", err)
 	}
@@ -167,14 +174,14 @@ func TestC2OpenAndCloseTunnel(t *testing.T) {
 		t.Errorf("tunnel echo = %q, want PING", strings.TrimSpace(line))
 	}
 
-	if err := svcC2.CloseTunnel(ctx, eng.ID, view.TunnelID, "op1"); err != nil {
+	if err := svcC2.CloseTunnel(ctx, eng.ID, view.TunnelID, opUser("op1")); err != nil {
 		t.Fatalf("CloseTunnel: %v", err)
 	}
 	if !hasAuditAction(s.audit, "c2.tunnel_close", eng.ID) {
 		t.Error("expected c2.tunnel_close audit event")
 	}
 	// Closing an unknown tunnel is an error.
-	if err := svcC2.CloseTunnel(ctx, eng.ID, "no-such-tunnel", "op1"); err == nil {
+	if err := svcC2.CloseTunnel(ctx, eng.ID, "no-such-tunnel", opUser("op1")); err == nil {
 		t.Error("expected error closing unknown tunnel")
 	}
 }
@@ -272,5 +279,96 @@ func TestC2ListTeamservers(t *testing.T) {
 	}
 	if !hasAuditAction(s.audit, "c2.teamservers_list", eng.ID) {
 		t.Error("expected c2.teamservers_list audit event")
+	}
+}
+
+// tunnelService builds a C2Service with a fake dialer (whose Dial is never
+// invoked in these tests since no traffic flows).
+func tunnelService(t *testing.T, s testStores) *service.C2Service {
+	t.Helper()
+	return service.NewC2Service(s.eng, s.infra, s.audit, testLogger()).
+		WithTunnelDialer(func(_ context.Context, _ domain.Node) (c2.RemoteDialer, error) {
+			return tunnelFakeDialer{target: "127.0.0.1:9"}, nil
+		}, "/keys/eng.pem")
+}
+
+// TestC2CloseTunnel_Authorization verifies tunnel close is bound to the
+// engagement and restricted to the opener or an admin/lead.
+func TestC2CloseTunnel_Authorization(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	eng := deployLiveC2(t, ctx, s, hub)
+	svcC2 := tunnelService(t, s)
+	defer svcC2.Shutdown()
+
+	view, err := svcC2.OpenTunnel(ctx, eng.ID, opUser("op1"))
+	if err != nil {
+		t.Fatalf("OpenTunnel: %v", err)
+	}
+
+	// Wrong engagement id must not find the tunnel.
+	if err := svcC2.CloseTunnel(ctx, "ENG-OTHER", view.TunnelID, opUser("op1")); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("cross-engagement close: want ErrNotFound, got %v", err)
+	}
+	// A different operator (not the opener) is forbidden.
+	if err := svcC2.CloseTunnel(ctx, eng.ID, view.TunnelID, opUser("op2")); !errors.Is(err, service.ErrUnauthorized) {
+		t.Errorf("non-opener close: want ErrUnauthorized, got %v", err)
+	}
+	// The tunnel is still active after the denied attempts.
+	if got := len(svcC2.ListTunnels(ctx, eng.ID)); got != 1 {
+		t.Fatalf("active tunnels after denied closes = %d, want 1", got)
+	}
+	// An admin (not the opener) may close it.
+	admin := domain.User{ID: "admin1", Username: "admin1", Role: domain.RoleAdmin}
+	if err := svcC2.CloseTunnel(ctx, eng.ID, view.TunnelID, admin); err != nil {
+		t.Fatalf("admin close: %v", err)
+	}
+	if got := len(svcC2.ListTunnels(ctx, eng.ID)); got != 0 {
+		t.Errorf("active tunnels after close = %d, want 0", got)
+	}
+}
+
+// TestC2TunnelReap verifies idle and absolute TTL cleanup, and Shutdown.
+func TestC2TunnelReap(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	eng := deployLiveC2(t, ctx, s, hub)
+
+	// Idle TTL: short idle, long absolute -> reaped by idle.
+	idleSvc := tunnelService(t, s).WithTunnelTTLs(10*time.Millisecond, time.Hour)
+	if _, err := idleSvc.OpenTunnel(ctx, eng.ID, opUser("op1")); err != nil {
+		t.Fatalf("OpenTunnel: %v", err)
+	}
+	if n := idleSvc.ReapTunnels(time.Now().Add(time.Second)); n != 1 {
+		t.Errorf("idle reap count = %d, want 1", n)
+	}
+	if got := len(idleSvc.ListTunnels(ctx, eng.ID)); got != 0 {
+		t.Errorf("tunnels after idle reap = %d, want 0", got)
+	}
+	if !hasAuditAction(s.audit, "c2.tunnel_expired", eng.ID) {
+		t.Error("expected c2.tunnel_expired audit event")
+	}
+	idleSvc.Shutdown()
+
+	// Absolute TTL: long idle, tiny absolute -> reaped by absolute cap.
+	absSvc := tunnelService(t, s).WithTunnelTTLs(time.Hour, 10*time.Millisecond)
+	if _, err := absSvc.OpenTunnel(ctx, eng.ID, opUser("op1")); err != nil {
+		t.Fatalf("OpenTunnel: %v", err)
+	}
+	if n := absSvc.ReapTunnels(time.Now().Add(time.Second)); n != 1 {
+		t.Errorf("absolute reap count = %d, want 1", n)
+	}
+	absSvc.Shutdown()
+
+	// Shutdown closes any remaining tunnels.
+	downSvc := tunnelService(t, s)
+	if _, err := downSvc.OpenTunnel(ctx, eng.ID, opUser("op1")); err != nil {
+		t.Fatalf("OpenTunnel: %v", err)
+	}
+	downSvc.Shutdown()
+	if got := len(downSvc.ListTunnels(ctx, eng.ID)); got != 0 {
+		t.Errorf("tunnels after shutdown = %d, want 0", got)
 	}
 }

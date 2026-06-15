@@ -45,12 +45,22 @@ func (h *handlers) c2OpenTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	view, err := h.svc.C2.OpenTunnel(r.Context(), id, actorFrom(r.Context()))
+	view, err := h.svc.C2.OpenTunnel(r.Context(), id, actorUser(r.Context()))
 	if err != nil {
 		writeError(w, h.log, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// c2ListTunnels returns the engagement's active tunnels for reconcile/audit.
+func (h *handlers) c2ListTunnels(w http.ResponseWriter, r *http.Request) {
+	if h.svc.C2 == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "manual access is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	writeJSON(w, http.StatusOK, map[string]any{"tunnels": h.svc.C2.ListTunnels(r.Context(), id)})
 }
 
 // c2CloseTunnel tears down a previously opened tunnel.
@@ -61,7 +71,7 @@ func (h *handlers) c2CloseTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	tunnelID := chi.URLParam(r, "tunnelId")
-	if err := h.svc.C2.CloseTunnel(r.Context(), id, tunnelID, actorFrom(r.Context())); err != nil {
+	if err := h.svc.C2.CloseTunnel(r.Context(), id, tunnelID, actorUser(r.Context())); err != nil {
 		writeError(w, h.log, err)
 		return
 	}
