@@ -62,6 +62,9 @@ func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
 	case errors.Is(err, service.ErrJobRunning):
 		status = http.StatusConflict
 		code = "job_running"
+	case errors.Is(err, service.ErrInvalidTopology):
+		status = http.StatusUnprocessableEntity
+		code = "invalid_topology"
 	case errors.Is(err, service.ErrInvalidCredentials):
 		status = http.StatusUnauthorized
 		code = "invalid_credentials"
