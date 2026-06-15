@@ -1,259 +1,226 @@
-# RInfra — Full Project Plan (backend · API · DB · UI integration)
+# RInfra — Roadmap & Status
 
-This is the master plan for taking RInfra from the current scaffold to a
-working MVP. It follows the build order in CLAUDE.md and is grounded in what
-already exists. Each phase is a PR-sized, independently shippable chunk with
-acceptance criteria. The UI plan in `docs/UI_IMPLEMENTATION_PLAN.md` is done
-(see `web/`); this plan covers everything behind it.
+This document is the **current roadmap and delivery status** for RInfra. It
+replaces the original build plan (a scaffold-to-MVP plan written when only the
+domain types and `/healthz` existed). That historical plan — now substantially
+delivered — is preserved in the **Archive** at the bottom as a changelog.
 
-## 0. Current state (inventory)
+_Last updated: 2026-06-15._
 
-**Done:**
-- `internal/domain` — Engagement/RoE/Authorization with `CanDeploy()`,
-  infrastructure types (Node/Edge/Topology/Rule), emulation types
-  (Technique/Scenario/ScenarioRun/Result).
-- Interface spine: `store` (Engagement/Infra/Scenario stores), `audit.Logger`,
-  `cloud.CloudProvider`, `c2.C2Provider`/`Operator`, `payload.Generator` —
-  all defined, with **stub** per-provider/per-framework adapters registered.
-- `migrations/0001_init.sql` — engagements, nodes, edges, scenario_runs,
-  technique_results, audit_events.
-- `cmd/rinfra-server` — boot wiring + `/healthz` only. stdlib-only; no
-  external Go deps yet.
-- `web/` — complete 5-screen console (Next.js static export) running on a
-  typed mock store behind the `RInfraClient` interface (`web/lib/client.ts`).
+> How to read this: **Completed** = implemented and covered by CI against
+> fakes/memstore. **Partially completed** = implemented but only exercised
+> against fakes / not yet validated live. **Production-blocking** = must be
+> resolved before running a real customer engagement. **Next milestones** = the
+> ordered near-term work.
 
-**Missing (this plan):** Postgres implementations, the HTTP API, real cloud
-provisioning (Pulumi), real C2 adapters, the emulation engine end-to-end,
-credentials handling, CI, and wiring the UI to the API.
+---
 
-## 1. Architecture target
+## 1. Completed
+
+**Foundations & security model**
+- `internal/domain`: Engagement / RoE / Authorization with `CanDeploy()`;
+  infrastructure (Node/Edge/Topology/Rule) and emulation (Technique / Scenario /
+  ScenarioRun / Result) types.
+- **Scope enforcement**: robust `TargetInScope` (CIDR containment incl.
+  CIDR-in-CIDR, IPv4/IPv6, bare IP, domain exact + subdomain, `*.` wildcard,
+  exclusion precedence) + `EnforceTargetInScope`; enforced at emulation
+  execution time (in-scope agent selection), not just at deploy.
+
+**Persistence & audit**
+- Postgres stores via `pgx/v5` (`internal/store/postgres`) + in-memory fakes
+  (`internal/store/memstore`) for tests and `--dev` mode.
+- Migrations `000001`–`000006` (init, engagement fields, credentials/jobs,
+  users/projects, user scenarios, user techniques).
+- Append-only audit (`internal/audit`, Postgres + memstore); immutability
+  enforced.
+- `internal/secrets`: AES-256-GCM envelope encryption; redacting types.
+
+**HTTP API (chi) — `internal/api`**
+- AuthN: bearer-token sessions, seeded admin, roles (admin/lead/operator);
+  query-param token accepted for browser streaming (SSE/WebSocket).
+- AuthZ: **project-membership/role guard on every engagement-scoped route**
+  (admin → all; lead → led projects; operator → member projects).
+- Engagements (CRUD + status/authorization), topology get/put/validate,
+  deploy/teardown (async jobs + boot reconciliation), credentials (write-only,
+  encrypted), SSE events, audit feed.
+- C2: frameworks registry, manual-access descriptor, **teamservers list**,
+  **SSH tunnel with bounded lifecycle** (ownership + idle/absolute TTL +
+  shutdown), **in-browser web shell over WebSocket**.
+- Emulation: scenarios **full CRUD** + runs; **TTPs full CRUD**; coverage
+  rollup; ATT&CK **Navigator JSON export**.
+- Users & projects (+ membership) administration.
+
+**Orchestration & cloud**
+- `internal/orchestration`: Pulumi automation-API engine; one stack per
+  engagement; resources tagged `rinfra:<engagement-id>`; teardown sweep
+  (`cloud/sweeper.go`).
+- `internal/cloud`: `CloudProvider` impls for **DigitalOcean, AWS, GCP, Azure**
+  + `fake`; per-provider ingress divergence covered by tests.
+
+**C2 & payload**
+- `internal/c2`: registry + adapters — Sliver / Mythic / Metasploit / custom
+  (Orchestrated), Havoc / PoshC2 (Scripted), Cobalt Strike / Brute Ratel
+  (Fronted). Manual access, SSH tunnel, and browser web shell.
+- `internal/payload`: msfvenom generator.
+
+**Emulation**
+- Orchestrator + YAML catalog (`internal/emulation/catalog`); capability-aware
+  routing to a supporting, in-scope agent; coverage + Navigator export.
+
+**Frontend (`web/`)**
+- Next.js console wired to `RestClient` (live REST + SSE) with the mock client
+  as the offline fallback; screens: Engagements, Projects, Infrastructure
+  builder, C2 frameworks, **Alive C2s** (multi-terminal), **TTPs** (CRUD +
+  C2-capability tags), Emulation (scenario builder/CRUD, auto-route to agent),
+  Coverage & Reports, Users, Settings.
+
+**Tooling & CI**
+- `.github/workflows/ci.yml` (Go build/vet/test/gofmt + web lint/tsc/build);
+  `pages.yml` (static demo deploy).
+- `docker-compose.yml` (Postgres), `Makefile`, integration tests behind
+  `//go:build integration`.
+
+---
+
+## 2. Partially completed (implemented; needs live validation)
+
+- **Real cloud provisioning** is implemented for all four providers, but CI
+  runs only the `fake` provider. Live verification is the manual
+  `docs/RUNBOOK_DO.md` checklist; only DigitalOcean has a documented live path —
+  AWS/GCP/Azure are unverified against real accounts.
+- **C2 live operation**: Sliver and Mythic have live transports/operator paths;
+  the shared deploy mechanics (SSH upload + systemd) and live `Operator` calls
+  are opt-in and under-verified against real teamservers. Redirector nginx
+  profiles are templated but not end-to-end verified.
+- **Web shell** streams a *bounded, read-only operator command surface*, not a
+  raw remote PTY into the teamserver (deliberate, per the authorization/audit
+  invariants). A raw passthrough would require an `Operator` shell primitive +
+  a reachable host with credentials.
+- **Authored scenarios/TTPs** persist via the backend in REST mode; the static
+  GitHub Pages demo keeps them session-local (demo constraint, not a product
+  gap).
+
+---
+
+## 3. Production-blocking (before real engagements)
+
+1. **Live-cloud E2E validation** per provider: `deploy → live → teardown →
+   reconcile` on throwaway accounts, confirming the tagged-resource sweep
+   destroys anything that escaped Pulumi state. Required before trusting
+   teardown (orphaned infra = cost/exposure/ToS risk).
+2. **C2 deploy/operate validated live** for each supported framework (real
+   teamserver install, listener, session, execute) + redirector fronting
+   verified end-to-end.
+3. **Key management**: the master key is env-provided (`RINFRA_MASTER_KEY`).
+   Move to a KMS/HSM-backed data-key flow with documented rotation before
+   holding customer cloud credentials and C2 license keys at scale.
+4. **AuthN hardening**: bearer-token sessions today — add OIDC/SSO, review
+   session expiry/rotation, and replace the query-param streaming token
+   (SSE/WS) with a short-lived token or a WebSocket subprotocol.
+5. **Teardown durability under failure**: job-runner re-adoption on boot is
+   tested with fakes; needs a live soak across induced crashes. C2 tunnels are
+   process-bound (no cross-restart reconcile) — operational runbooks must cover
+   restart.
+
+---
+
+## 4. Next milestones (ordered)
+
+1. **DigitalOcean live pass** via `RUNBOOK_DO.md` → mark DO production-ready;
+   then repeat the checklist for AWS, GCP, Azure.
+2. **Sliver + Mythic live integration** (opt-in container test targets) green,
+   plus one real-teamserver soak; promote the Havoc scripted path.
+3. **KMS-backed secrets** + key rotation; secret-scanning in CI.
+4. **OIDC auth** + multi-operator session hardening; audit-log viewer filters.
+5. **Detection-validation phase** (still deferred, design-seams only):
+   SIEM/EDR reconciliation, coverage heatmaps, detection-as-code export, QRadar
+   and other connectors.
+
+---
+
+## 5. Reference (implemented design)
+
+The architecture, decisions, security invariants, schema, and API contract
+below were the plan and are now **implemented**. Kept here as living reference.
+
+### Architecture
 
 ```
-web/ (Next.js static export, RInfraClient seam)
-   |  REST/JSON + SSE
+web/ (Next.js, RInfraClient seam: RestClient | MockClient)
+   |  REST/JSON + SSE + WebSocket (web shell)
 cmd/rinfra-server (chi router)
-   ├─ internal/api          HTTP handlers (thin) + SSE hub          [new]
-   ├─ internal/service      engagement / infra / emulation services [new]
+   ├─ internal/api          HTTP handlers (thin) + SSE hub + WS shell
+   ├─ internal/service      engagement / infra / emulation / c2 / auth / project
    │     └─ every privileged path: Engagement.CanDeploy() + audit.Record()
-   ├─ internal/orchestration Pulumi automation-API engine           [new]
-   ├─ internal/cloud        CloudProvider impls (DO → AWS → GCP → Azure)
-   ├─ internal/c2           C2Provider impls (Sliver, Mythic → Havoc → CS)
-   ├─ internal/emulation    scenario orchestrator (exists, needs sources)
-   ├─ internal/secrets      envelope encryption for creds/licenses  [new]
-   ├─ internal/audit        Postgres append-only logger             [impl]
-   └─ internal/store        pgx implementations                     [impl]
+   ├─ internal/orchestration Pulumi automation-API engine
+   ├─ internal/cloud        CloudProvider impls (DO, AWS, GCP, Azure, fake)
+   ├─ internal/c2           C2Provider/Operator impls (8 frameworks)
+   ├─ internal/emulation    scenario orchestrator + YAML catalog
+   ├─ internal/payload      Generator (msfvenom)
+   ├─ internal/secrets      envelope encryption
+   ├─ internal/audit        append-only logger (Postgres + memstore)
+   └─ internal/store        pgx implementations + memstore fakes
             └─ Postgres (migrations/, golang-migrate)
 ```
 
-**Decisions** (per CLAUDE.md options):
-- **DB access: plain `pgx/v5`** (no sqlc codegen — fewer moving parts; the
-  store surface is small). Queries live in `internal/store/postgres/`.
-- **Router: `chi`**, stdlib handlers, JSON codecs in one place.
-- **Live updates: SSE** (one event stream per engagement) — simpler than
-  websockets, fits one-way status pushes (node status, run progress).
-- **IDs:** Postgres UUIDs, surfaced as strings in domain structs (already
-  string-typed).
-- **Background work:** in-process job runner (goroutine + persistent job row
-  per deploy/teardown/run). No external queue for MVP.
-- **Simulated cloud first:** a `cloud.Fake` provider (registry id `fake`,
-  dev-only, behind a config flag) simulates provisioning with realistic
-  delays/state transitions so the full deploy→live→teardown loop works
-  end-to-end before any Pulumi code exists. CI and the UI develop against it.
+### Decisions (delivered)
+- DB access: plain `pgx/v5` (no sqlc). Router: `chi`. Live updates: **SSE** per
+  engagement; **WebSocket** for the operator web shell. IDs: Postgres UUIDs as
+  strings. Background work: in-process job runner with durable `jobs` rows and
+  boot reconciliation. The `cloud/fake` provider drives CI and the demo
+  end-to-end.
 
-## 2. Security invariants → enforcement points
+### Security invariants → enforcement points
 
-| Invariant (CLAUDE.md) | Enforced at |
+| Invariant | Enforced at |
 |---|---|
-| Authorization gates every deploy | `service.Infra.Deploy/Teardown`, `service.Emulation.Start`, `payload` generation — all call `eng.CanDeploy(now)` first; API returns 403 with the sentinel reason |
-| Bring-your-own cloud credentials | `cloud.Credentials` only ever loaded from `engagement_credentials` (encrypted at rest); no global/default provider config exists; server refuses to start a deploy without engagement creds |
-| Everything audited | `service.*` emits `audit.Event` for deploy, teardown, scenario start/step/finish, credential create/use, scope/status change; the Postgres logger has INSERT-only statements; migration adds a DB rule/trigger blocking UPDATE/DELETE on `audit_events` |
-| Teardown reliability | deploy writes `provider_ref` per resource as it's created (not after); teardown reconciles by listing actual cloud resources tagged `rinfra:<engagement_id>` and destroying anything found, then marks DB rows; `Destroy` is idempotent |
-| Secrets never logged | `secrets` package types implement `slog.LogValuer` + `fmt.Stringer` returning `[redacted]`; audit `Detail` builders take allow-listed fields only |
+| Authorization gates every deploy | `service.Infra.Deploy/Teardown`, `service.Emulation.Start`, C2 manual-access/tunnel/shell, payload generation — all call `eng.CanDeploy(now)`; API maps sentinels to 403 |
+| Project-membership boundaries | `requireEngagementAccess` middleware on every `/engagements/{id}` route + `ProjectService.CanAccessProject` |
+| Scope enforced on action | `Engagement.TargetInScope` / `EnforceTargetInScope`; emulation runs only against in-scope agents |
+| Bring-your-own cloud credentials | `engagement_credentials` (envelope-encrypted); no global provider config; deploy refuses without engagement creds |
+| Everything audited | `service.*` emits `audit.Event` for deploy/teardown/scenario/credential/scope/status/tunnel/shell; Postgres logger is INSERT-only + immutability trigger |
+| Teardown reliability | per-resource `provider_ref` + tagged-resource sweep reconciliation; idempotent destroy |
+| Bounded C2 tunnels | engagement/opener binding, idle+absolute TTL reaper, shutdown hook |
+| Secrets never logged | `secrets` types redact via `LogValuer`/`Stringer`; audit details are allow-listed |
 
-## 3. Database schema (delta on `0001_init.sql`)
+### Schema & API
+Schema is migrations `000001`–`000006` (engagements, nodes, edges,
+scenario_runs, technique_results, audit_events + immutability, credentials,
+jobs, users, projects + membership, sessions, user_scenarios, user_techniques).
+The API surface is enumerated in §1 and mirrored by `web/lib/types.ts` and
+`web/lib/client.ts`. Errors map the `CanDeploy` sentinels to
+`403 authorization_required|auth_expired|outside_window|empty_scope`.
 
-New migration `0002_engagement_fields.sql`:
-- `engagements`: add `codename TEXT`, `lead_operator TEXT`,
-  `scope_exclusions JSONB DEFAULT '[]'`, `engagement_type TEXT`.
-- `nodes`: add `name TEXT`, `subtype TEXT` (HTTPS/HTTP/DNS redirector kinds),
-  `listener TEXT`, `front_domain TEXT`, `cost_estimate NUMERIC(8,2) DEFAULT 0`,
-  `x INT DEFAULT 0`, `y INT DEFAULT 0` (canvas position — UI state worth
-  persisting with the topology).
+---
 
-New migration `0003_credentials_jobs.sql`:
-- `engagement_credentials(id, engagement_id FK, provider TEXT,
-  ciphertext BYTEA, nonce BYTEA, key_id TEXT, created_at, last_used_at)` —
-  envelope-encrypted (AES-256-GCM, data key wrapped by master key from
-  `RINFRA_MASTER_KEY`; KMS later). One row per provider per engagement.
-  C2 license keys reuse this table with `provider = 'c2:<framework>'`.
-- `teamservers(id, node_id FK, framework TEXT, host, port, status,
-  connection_info_ciphertext BYTEA, created_at)`.
-- `jobs(id, engagement_id FK, kind TEXT  -- deploy|teardown|scenario_run,
-  status TEXT, detail JSONB, created_at, started_at, finished_at, err TEXT)`
-  — durable record of background work; survives restarts (reconcile on boot).
-- `audit_events`: add trigger `audit_events_immutable` raising on
-  UPDATE/DELETE.
+## Archive — original build plan (historical, delivered)
 
-`scenario_runs.results` stay normalized in `technique_results` (already
-modeled).
+> The notes below are the **original scaffold-to-MVP plan**, describing the work
+> when `cmd/rinfra-server` had `/healthz` only and Postgres, the API, Pulumi,
+> real C2, emulation E2E, credentials, and CI were all missing. Every phase has
+> since landed (see §1). Retained as a changelog of intent.
 
-Scenario *catalog* (APT29 etc.) ships as code/data files
-(`internal/emulation/catalog/*.yaml`), not DB — it's versioned content, with
-each technique referencing an Atomic Red Team GUID / Caldera ability id.
+**Original "current state" (now obsolete):** domain types + interface spine +
+stub adapters + `0001_init.sql` + `/healthz`-only server + mock-only web.
+Declared missing: Postgres impls, HTTP API, Pulumi, real C2, emulation E2E,
+credentials, CI, UI↔API wiring — **all now delivered.**
 
-## 4. HTTP API (v1)
+**Original phases (all delivered):**
+- **Phase 0 — CI**: Go + web workflows. ✅ `.github/workflows/ci.yml`.
+- **Phase 1 — Persistence + audit**: pgx stores, memstore fakes, migrations,
+  audit immutability, secrets, compose + Makefile. ✅
+- **Phase 2 — Services + HTTP API + fake provider**: chi router, services with
+  gate→audit→store→events, async job runner, fake cloud. ✅
+- **Phase 3 — UI ↔ API integration**: `RestClient` + SSE, store wired to the
+  API behind `NEXT_PUBLIC_RINFRA_API`. ✅
+- **Phase 4 — Real clouds via Pulumi**: orchestration engine + DO/AWS/GCP/Azure
+  providers + tagged-resource teardown sweep. ✅ (implemented; live validation
+  pending — see §2/§3).
+- **Phase 5 — C2 layer**: 8 framework adapters across the support tiers, manual
+  access + tunnel + web shell. ✅ (live operation under-verified — §2).
+- **Phase 6 — Emulation E2E**: catalog YAMLs, run persistence + SSE progress,
+  coverage rollup + Navigator export. ✅
 
-Base `/api/v1`, JSON. Errors: `{ "error": { "code", "message" } }`; the
-CanDeploy sentinels map to `403 authorization_required|auth_expired|
-outside_window|empty_scope`. Contracts mirror `web/lib/types.ts` (that file is
-the reference shape; adjust field names there only if the Go side has a
-stronger claim).
-
-| Method & path | Purpose |
-|---|---|
-| `GET  /engagements` · `POST /engagements` | list / create (create records scope, RoE, named authorization; emits `engagement.create`) |
-| `GET  /engagements/{id}` · `PATCH /engagements/{id}` | fetch / update status & metadata (audited) |
-| `GET/PUT /engagements/{id}/topology` | read / save the canvas graph (nodes+edges, draft-state only fields editable while pending) |
-| `POST /engagements/{id}/validate` | server-side topology checks (same rules as the UI popover + CanDeploy) |
-| `POST /engagements/{id}/deploy` | gate → create `jobs` row → async provision; `409` if a job is running |
-| `POST /engagements/{id}/teardown` | gate-free (teardown must always work) → drain → destroy → reconcile |
-| `PUT  /engagements/{id}/credentials/{provider}` | store encrypted creds (write-only; GET returns metadata, never material) |
-| `GET  /engagements/{id}/events` | **SSE**: node status, job progress, run progress |
-| `GET  /engagements/{id}/audit` | read-only audit page (paginated) |
-| `GET  /c2/frameworks` | registry contents: name, tier, gated, listeners |
-| `GET  /scenarios` | catalog |
-| `POST /engagements/{id}/runs` · `GET /runs/{id}` | start scenario run / fetch results |
-| `GET  /healthz` | liveness (exists) |
-
-Middleware: request ID, structured request log, recoverer, CORS (dev:
-`localhost:3000`), and an **operator identity seam** — `X-RInfra-Operator`
-header for MVP (single-tenant consultancy tool), mapped to `audit.Event.Actor`;
-real authn (OIDC) is a later phase, the middleware is the slot.
-
-## 5. Phases
-
-### Phase 1 — Persistence + audit (Postgres)  ▸ first to implement
-- `go.mod`: add `pgx/v5`, `chi`, `golang-migrate` (CLI usage documented, not
-  vendored), `google/uuid`.
-- Migrations `0002`, `0003` (see §3) + fix `0001` to golang-migrate file
-  naming (`.up.sql`/`.down.sql` split — current file uses sql-migrate
-  comment style, wrong for the documented tool).
-- `internal/store/postgres`: implementations of the three store interfaces
-  (+ new `CredentialStore`, `JobStore` interfaces in `internal/store`).
-- `internal/audit/postgres`: INSERT-only logger.
-- `internal/secrets`: AES-256-GCM envelope encryption, master key from env,
-  redacting types.
-- In-memory fakes for every store interface (`internal/store/memstore`) used
-  by service tests and by the server's `--dev` mode (run without Postgres).
-- `docker-compose.yml` (postgres:16) + Makefile `db-up`, `migrate-up`.
-- **Accept:** `go test ./...` green (fakes); store integration tests behind
-  `//go:build integration` pass against compose Postgres; audit UPDATE/DELETE
-  rejected by trigger.
-
-### Phase 2 — Services + HTTP API + fake provider (end-to-end loop)
-- `internal/service`: `Engagement`, `Infra`, `Emulation` services holding the
-  business logic (gate → audit → store → events). Handlers stay thin.
-- `internal/api`: chi router, all §4 endpoints, SSE hub.
-- `internal/cloud/fake`: simulated provider (provisioning delays,
-  deterministic IPs, in-memory "actual state" so teardown reconciliation is
-  exercisable in tests).
-- Job runner: deploy/teardown execute async, update node statuses, publish
-  SSE, finish job row; boot-time reconciliation re-adopts orphaned running
-  jobs.
-- `cmd/rinfra-server`: full wiring (config from env: `DATABASE_URL`,
-  `RINFRA_MASTER_KEY`, `RINFRA_DEV`).
-- **Accept:** table-driven handler tests (httptest + memstore) cover the gate
-  (draft engagement → 403 on deploy), happy deploy→live→teardown→destroyed
-  via fake provider, audit rows emitted for every privileged action.
-
-### Phase 3 — UI ↔ API integration
-- `web/lib/client.ts`: `RestClient implements RInfraClient` (fetch + SSE via
-  `EventSource`), selected by `NEXT_PUBLIC_RINFRA_API`; mock remains the
-  default for static demo builds.
-- Replace local deploy/teardown/emulation simulation in the store with API
-  calls + SSE-driven state when the REST client is active; New Engagement
-  posts to the API; credentials + license-key fields wire to the
-  credentials endpoint.
-- CORS verified; `make dev` target runs server (+compose) and web together.
-- **Accept:** with `RINFRA_DEV=1` + fake provider, the full user journey
-  (create engagement → authorize → build topology → deploy → watch nodes go
-  live → run scenario → teardown) works in the browser against the Go server.
-
-### Phase 4 — Real clouds via Pulumi (DigitalOcean first)
-- `internal/orchestration`: topology → Pulumi program (automation API), one
-  stack per engagement (`rinfra-<engagement-id>`), state in a local/workspace
-  backend configured per deployment; every resource tagged
-  `rinfra:<engagement-id>`.
-- `internal/cloud/digitalocean`: droplets, cloud firewalls
-  (`ConfigureIngress`), reserved IPs, DNS records — real implementation.
-- Teardown = `stack destroy` + provider-level sweep of tagged resources that
-  escaped state (the reconciliation promise).
-- Then AWS (EC2/SG/EIP/Route53), GCP (GCE/VPC firewall/Cloud DNS), Azure
-  (VM/NSG/Public IP/DNS) as separate PRs — `ConfigureIngress`/DNS written
-  per provider, deliberately.
-- **Accept:** CI still runs only fakes; a manual `docs/RUNBOOK_DO.md`
-  checklist documents live verification on a throwaway DO account.
-
-### Phase 5 — C2 layer (real adapters)
-- Deploy mechanics shared helper: upload + systemd unit via SSH (key
-  generated per engagement, stored encrypted), composing official release
-  artifacts only.
-- **Sliver** (Orchestrated): teamserver install script, multiplayer config;
-  `Operator` over Sliver's gRPC API (listeners, sessions, execute).
-- **Mythic** (Orchestrated): docker-compose install; `Operator` over Mythic's
-  REST/GraphQL.
-- **Havoc** (Scripted): deploy + partial operator (scripted API subset).
-- **Cobalt Strike** (Fronted): deploy path only — requires customer license
-  key from the credentials store; `Control()` returns `ok=false`.
-- `RedirectorConfig`: nginx reverse-proxy templates per framework profile,
-  installed on redirector nodes.
-- **Accept:** unit tests against recorded/fake framework APIs; Sliver adapter
-  integration-tested against a local sliver-server container in an opt-in
-  test target.
-
-### Phase 6 — Emulation end-to-end
-- Technique catalog YAMLs (APT29 / FIN7 / ransomware-affiliate scenarios,
-  each technique = Atomic Red Team GUID reference + params; no payload
-  content in-repo).
-- `service.Emulation`: pick session, stream per-technique progress over SSE,
-  persist `scenario_runs` + `technique_results` (orchestrator already
-  exists — wire sources + persistence + events).
-- Reporting endpoints: coverage rollup per engagement (feeds the existing
-  Coverage screen); ATT&CK Navigator JSON export.
-- **Accept:** run against fake Operator in CI; UI timeline driven by real SSE.
-
-### Phase 0 (parallel, immediate) — CI
-- `.github/workflows/ci.yml`: Go job (`build`, `vet`, `test`, gofmt check) +
-  Postgres service container for integration-tagged tests; web job
-  (`npm ci`, lint, `tsc`, build). Required for the PR.
-
-### Deferred (unchanged from CLAUDE.md — seams only)
-SIEM/EDR reconciliation, coverage heatmap exports, detection-as-code, QRadar
-connectors; OIDC auth; multi-tenancy; `go:embed` of the web export.
-
-## 6. Testing strategy
-
-- Table-driven unit tests everywhere; **no live cloud/C2 in CI** — services
-  tested against `memstore` + `cloud/fake` + fake `Operator`.
-- Store layer: integration tests (`go:build integration`) against compose/CI
-  Postgres, including the audit-immutability trigger.
-- API: `httptest` round-trips asserting status codes, gate errors, audit
-  emission.
-- Web: existing lint/tsc/build; Playwright smoke (journey of Phase 3) as a
-  follow-up, not a gate.
-
-## 7. Sequencing & sizing
-
-| Order | Phase | Size | Depends on |
-|---|---|---|---|
-| 1 | 0 CI | S | — |
-| 2 | 1 Persistence + audit | M | — |
-| 3 | 2 Services + API + fake provider | L | 1 |
-| 4 | 3 UI integration | M | 2 |
-| 5 | 4 Pulumi + DO (then AWS/GCP/Azure) | L (+M×3) | 2 |
-| 6 | 5 C2 adapters (Sliver, Mythic first) | L | 4 |
-| 7 | 6 Emulation E2E | M | 5 |
-
-Phases 0–3 need no cloud accounts and deliver a fully demonstrable product on
-the fake provider. 4–6 turn it real, provider by provider, framework by
-framework.
+**Still deferred (unchanged):** SIEM/EDR reconciliation, coverage heatmap
+exports, detection-as-code, QRadar connectors; OIDC auth; multi-tenancy;
+`go:embed` of the web export.
