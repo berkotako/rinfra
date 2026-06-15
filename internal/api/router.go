@@ -106,6 +106,12 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		r.Put("/scenarios/{id}", h.updateScenario)
 		r.Delete("/scenarios/{id}", h.deleteScenario)
 
+		// TTP library — operator-authored techniques (full CRUD).
+		r.Get("/ttps", h.listTechniques)
+		r.Post("/ttps", h.createTechnique)
+		r.Put("/ttps/{attackId}", h.updateTechnique)
+		r.Delete("/ttps/{attackId}", h.deleteTechnique)
+
 		// Runs — fetch by ID (cross-engagement).
 		r.Get("/runs/{id}", h.getRun)
 	})

@@ -460,6 +460,59 @@ func (h *handlers) deleteScenario(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---------- TTP library (operator-authored techniques) ----------
+
+func (h *handlers) listTechniques(w http.ResponseWriter, r *http.Request) {
+	techniques, err := h.svc.Emulation.ListTechniques(r.Context())
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(techniques))
+	for _, t := range techniques {
+		out = append(out, techniqueToJSON(t))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"techniques": out})
+}
+
+func (h *handlers) createTechnique(w http.ResponseWriter, r *http.Request) {
+	var req techniqueRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	created, err := h.svc.Emulation.CreateTechnique(r.Context(), req.toDomain(), actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"technique": techniqueToJSON(created)})
+}
+
+func (h *handlers) updateTechnique(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "attackId")
+	var req techniqueRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	t := req.toDomain()
+	t.AttackID = id
+	updated, err := h.svc.Emulation.UpdateTechnique(r.Context(), t, actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"technique": techniqueToJSON(updated)})
+}
+
+func (h *handlers) deleteTechnique(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "attackId")
+	if err := h.svc.Emulation.DeleteTechnique(r.Context(), id, actorFrom(r.Context())); err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---------- C2 web shell (WebSocket) ----------
 
 // c2Shell upgrades to a WebSocket and bridges the in-browser operator terminal

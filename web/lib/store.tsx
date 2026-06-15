@@ -19,8 +19,9 @@ import type {
   NodeStyle,
   NodeStatus,
   Scenario,
+  Technique,
 } from "./types";
-import { ENGAGEMENTS, INITIAL_NODES, INITIAL_EDGES, SCENARIOS } from "./data";
+import { ENGAGEMENTS, INITIAL_NODES, INITIAL_EDGES, SCENARIOS, TECHNIQUE_LIBRARY } from "./data";
 import {
   getClient,
   isRestMode,
@@ -67,6 +68,12 @@ interface StoreState {
   updateScenario: (s: Scenario) => Promise<Scenario>;
   deleteScenario: (id: string) => Promise<void>;
 
+  // TTP library — built-in techniques plus operator-authored ones (CRUD).
+  techniques: Technique[];
+  addTechnique: (t: Technique) => Promise<Technique>;
+  updateTechnique: (t: Technique) => Promise<Technique>;
+  deleteTechnique: (id: string) => Promise<void>;
+
   // API-connected actions (no-ops / local simulation in mock mode)
   apiCreateEngagement: (params: CreateEngagementParams) => Promise<Engagement>;
   apiDeploy: (engagementId: string) => Promise<void>;
@@ -100,6 +107,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [preferences, setPreferences] = useState<Preferences>(DEFAULT_PREFS);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [customScenarios, setCustomScenarios] = useState<Scenario[]>([]);
+  const [customTechniques, setCustomTechniques] = useState<Technique[]>([]);
   const toastCounter = useRef(0);
 
   // Keep a ref to activeEngagementId so effects can read it without stale closures.
@@ -391,6 +399,50 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       .catch(() => undefined);
   }, [rest, client]);
 
+  // TTP library: built-in techniques plus operator-authored ones.
+  const techniques = useMemo(
+    () => [...TECHNIQUE_LIBRARY, ...customTechniques],
+    [customTechniques]
+  );
+
+  const addTechnique = useCallback(
+    async (t: Technique): Promise<Technique> => {
+      const saved = rest ? await client.createTechnique(t) : t;
+      setCustomTechniques((list) => [...list, saved]);
+      pushToast(`TTP added — ${saved.id}`, "ok");
+      return saved;
+    },
+    [rest, client, pushToast]
+  );
+
+  const updateTechnique = useCallback(
+    async (t: Technique): Promise<Technique> => {
+      const saved = rest ? await client.updateTechnique(t) : t;
+      setCustomTechniques((list) => list.map((x) => (x.id === saved.id ? saved : x)));
+      pushToast(`TTP updated — ${saved.id}`, "ok");
+      return saved;
+    },
+    [rest, client, pushToast]
+  );
+
+  const deleteTechnique = useCallback(
+    async (id: string): Promise<void> => {
+      if (rest) await client.deleteTechnique(id);
+      setCustomTechniques((list) => list.filter((x) => x.id !== id));
+      pushToast("TTP deleted", "ok");
+    },
+    [rest, client, pushToast]
+  );
+
+  // REST mode: load operator-authored techniques.
+  useEffect(() => {
+    if (!rest) return;
+    client
+      .listTechniques()
+      .then((all) => setCustomTechniques(all))
+      .catch(() => undefined);
+  }, [rest, client]);
+
   const activeEngagement =
     engagements.find((e) => e.id === activeEngagementId) ?? engagements[0] ?? ENGAGEMENTS[0];
 
@@ -416,6 +468,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         addScenario,
         updateScenario,
         deleteScenario,
+        techniques,
+        addTechnique,
+        updateTechnique,
+        deleteTechnique,
         apiCreateEngagement,
         apiDeploy,
         apiTeardown,

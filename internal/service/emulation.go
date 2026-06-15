@@ -15,13 +15,14 @@ import (
 
 // EmulationService runs adversary-emulation scenarios and tracks their results.
 type EmulationService struct {
-	engagements   store.EngagementStore
-	scenarios     store.ScenarioStore
-	userScenarios store.UserScenarioStore // operator-authored scenarios; may be nil
-	audit         audit.Logger
-	orch          *emulation.Orchestrator
-	hub           *Hub
-	resolver      OperatorResolver
+	engagements    store.EngagementStore
+	scenarios      store.ScenarioStore
+	userScenarios  store.UserScenarioStore  // operator-authored scenarios; may be nil
+	userTechniques store.UserTechniqueStore // operator-authored TTPs; may be nil
+	audit          audit.Logger
+	orch           *emulation.Orchestrator
+	hub            *Hub
+	resolver       OperatorResolver
 }
 
 // NewEmulationService constructs an EmulationService with a FakeResolver
@@ -52,6 +53,95 @@ func (s *EmulationService) WithResolver(r OperatorResolver) {
 // unset, CreateScenario is unavailable and only the built-in catalog is listed.
 func (s *EmulationService) WithUserScenarios(store store.UserScenarioStore) {
 	s.userScenarios = store
+}
+
+// WithUserTechniques injects the store for operator-authored TTPs.
+func (s *EmulationService) WithUserTechniques(store store.UserTechniqueStore) {
+	s.userTechniques = store
+}
+
+// ListTechniques returns operator-authored TTPs (the built-in library ships with
+// the web client). Returns an empty slice when authoring is not enabled.
+func (s *EmulationService) ListTechniques(ctx context.Context) ([]domain.Technique, error) {
+	if s.userTechniques == nil {
+		return nil, nil
+	}
+	return s.userTechniques.List(ctx)
+}
+
+func validTechnique(t domain.Technique) error {
+	if t.AttackID == "" {
+		return fmt.Errorf("technique attackID is required")
+	}
+	if t.Name == "" {
+		return fmt.Errorf("technique name is required")
+	}
+	if t.Tactic == "" {
+		return fmt.Errorf("technique tactic is required")
+	}
+	return nil
+}
+
+// CreateTechnique persists an operator-authored TTP.
+func (s *EmulationService) CreateTechnique(ctx context.Context, t domain.Technique, actor string) (domain.Technique, error) {
+	if s.userTechniques == nil {
+		return domain.Technique{}, fmt.Errorf("technique authoring not enabled")
+	}
+	if err := validTechnique(t); err != nil {
+		return domain.Technique{}, err
+	}
+	if t.Source == "" {
+		t.Source = domain.SourceAtomicRedTeam
+	}
+	if err := s.userTechniques.Create(ctx, t); err != nil {
+		return domain.Technique{}, err
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "ttp.create",
+		Target: t.AttackID,
+		Detail: fmt.Sprintf("name=%q tactic=%s", t.Name, t.Tactic),
+		At:     time.Now().UTC(),
+	})
+	return t, nil
+}
+
+// UpdateTechnique replaces an operator-authored TTP.
+func (s *EmulationService) UpdateTechnique(ctx context.Context, t domain.Technique, actor string) (domain.Technique, error) {
+	if s.userTechniques == nil {
+		return domain.Technique{}, fmt.Errorf("technique authoring not enabled")
+	}
+	if err := validTechnique(t); err != nil {
+		return domain.Technique{}, err
+	}
+	if err := s.userTechniques.Update(ctx, t); err != nil {
+		return domain.Technique{}, err
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "ttp.update",
+		Target: t.AttackID,
+		Detail: fmt.Sprintf("name=%q tactic=%s", t.Name, t.Tactic),
+		At:     time.Now().UTC(),
+	})
+	return t, nil
+}
+
+// DeleteTechnique removes an operator-authored TTP.
+func (s *EmulationService) DeleteTechnique(ctx context.Context, attackID, actor string) error {
+	if s.userTechniques == nil {
+		return fmt.Errorf("technique authoring not enabled")
+	}
+	if err := s.userTechniques.Delete(ctx, attackID); err != nil {
+		return err
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "ttp.delete",
+		Target: attackID,
+		At:     time.Now().UTC(),
+	})
+	return nil
 }
 
 // ListScenarios returns the built-in catalog plus any operator-authored

@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rinfra/rinfra/internal/audit"
@@ -183,6 +184,34 @@ func (r createScenarioRequest) toDomain() domain.Scenario {
 		AdversaryProfile: r.Actor,
 		Description:      r.Desc,
 		Techniques:       techniques,
+	}
+}
+
+type techniqueRequest struct {
+	ID          string   `json:"id"` // ATT&CK id, e.g. T1059.001
+	Name        string   `json:"name"`
+	Tactic      string   `json:"tactic"`
+	Description string   `json:"description"`
+	Commands    []string `json:"commands"`
+}
+
+func (r techniqueRequest) toDomain() domain.Technique {
+	return domain.Technique{
+		AttackID:    strings.TrimSpace(r.ID),
+		Name:        strings.TrimSpace(r.Name),
+		Tactic:      strings.TrimSpace(r.Tactic),
+		Description: r.Description,
+		Commands:    r.Commands,
+	}
+}
+
+func techniqueToJSON(t domain.Technique) map[string]any {
+	return map[string]any{
+		"id":          t.AttackID,
+		"name":        t.Name,
+		"tactic":      t.Tactic,
+		"description": t.Description,
+		"commands":    t.Commands,
 	}
 }
 

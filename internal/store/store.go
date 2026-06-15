@@ -60,6 +60,15 @@ type UserScenarioStore interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// UserTechniqueStore persists operator-authored TTPs (techniques) for the TTP
+// library, keyed by their ATT&CK id. Commands are stored as a JSON document.
+type UserTechniqueStore interface {
+	Create(ctx context.Context, t domain.Technique) error
+	List(ctx context.Context) ([]domain.Technique, error)
+	Update(ctx context.Context, t domain.Technique) error
+	Delete(ctx context.Context, attackID string) error
+}
+
 // CredentialStore persists envelope-encrypted credentials keyed by engagement
 // and provider. The raw ciphertext is write-only from the caller's perspective;
 // reads return only metadata. The Postgres implementation holds the actual bytes.
