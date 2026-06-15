@@ -160,28 +160,9 @@ export default function TTPsScreen() {
                             </span>
                           )}
                         </span>
-                        {/* framework chips */}
-                        <span style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                          {framework === "all" ? (
-                            C2_FRAMEWORKS.filter((f) => fwIds.includes(f.id))
-                              .slice(0, 4)
-                              .map((f) => (
-                                <span
-                                  key={f.id}
-                                  className="mono"
-                                  style={{
-                                    fontSize: 10,
-                                    color: "var(--text-3)",
-                                    background: "var(--surface-3)",
-                                    border: "1px solid var(--border)",
-                                    borderRadius: 4,
-                                    padding: "1px 6px",
-                                  }}
-                                >
-                                  {f.name}
-                                </span>
-                              ))
-                          ) : (
+                        {/* C2 capability tags — which C2s can run this TTP */}
+                        <span style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }}>
+                          {framework !== "all" && (
                             <span className={"pill " + (auto ? "ok" : "")} style={{ height: 19, fontSize: 10.5 }}>
                               {auto ? (
                                 <>
@@ -194,13 +175,33 @@ export default function TTPsScreen() {
                               )}
                             </span>
                           )}
-                          {framework === "all" && fwIds.length > 4 && (
-                            <span style={{ fontSize: 10, color: "var(--text-4)" }}>+{fwIds.length - 4}</span>
-                          )}
-                          {framework === "all" && fwIds.length === 0 && (
+                          {fwIds.length === 0 ? (
                             <span className="pill" style={{ height: 19, fontSize: 10.5 }}>
-                              <Icons.Power size={10} /> manual
+                              <Icons.Power size={10} /> manual only
                             </span>
+                          ) : (
+                            C2_FRAMEWORKS.filter((f) => fwIds.includes(f.id))
+                              .slice(0, 3)
+                              .map((f) => (
+                                <span
+                                  key={f.id}
+                                  className="mono"
+                                  title={`Runs on ${f.name}`}
+                                  style={{
+                                    fontSize: 10,
+                                    color: framework === f.id ? "var(--accent)" : "var(--text-3)",
+                                    background: framework === f.id ? "var(--accent-soft)" : "var(--surface-3)",
+                                    border: `1px solid ${framework === f.id ? "var(--accent-soft-border)" : "var(--border)"}`,
+                                    borderRadius: 4,
+                                    padding: "1px 6px",
+                                  }}
+                                >
+                                  {f.name}
+                                </span>
+                              ))
+                          )}
+                          {fwIds.length > 3 && (
+                            <span style={{ fontSize: 10, color: "var(--text-4)" }}>+{fwIds.length - 3}</span>
                           )}
                         </span>
                         {custom && (

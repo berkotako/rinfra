@@ -298,6 +298,14 @@ func (s *EmulationService) runScenario(ctx context.Context, eng domain.Engagemen
 	// Resolve the operator: may be nil for Fronted-tier (all techniques → Skipped).
 	op, sessionID, _ := s.resolver.Resolve(ctx, eng)
 
+	// Find the right agent to execute against: enumerate the operator's active
+	// sessions and target the first one, rather than a placeholder session id.
+	if op != nil {
+		if sessions, err := op.Sessions(ctx); err == nil && len(sessions) > 0 {
+			sessionID = sessions[0].ID
+		}
+	}
+
 	// Publish per-technique SSE events as each technique completes by using a
 	// wrapping orchestrator approach. We drive the orchestrator but also hook
 	// into each technique result to publish SSE + persist incrementally.

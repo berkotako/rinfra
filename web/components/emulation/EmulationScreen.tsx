@@ -8,9 +8,18 @@ import { getClient, isRestMode } from "../../lib/client";
 import { deployedC2FromNode, c2SupportsTactic, SCENARIOS } from "../../lib/data";
 import TechniqueDetail from "./TechniqueDetail";
 import ScenarioBuilder from "./ScenarioBuilder";
-import type { NodeStatus, Technique, DeployedC2, Scenario } from "../../lib/types";
+import type { NodeStatus, Technique, DeployedC2, Scenario, OperatorSession } from "../../lib/types";
 
 type StepStatus = "pending" | "running" | "done" | "detected" | "manual";
+
+// Sentinel target id: route each technique to the best live agent automatically.
+const AUTO = "auto";
+const TIER_RANK: Record<string, number> = { orchestrated: 0, scripted: 1, fronted: 2 };
+
+interface TechniqueRoute {
+  c2: DeployedC2;
+  agent?: OperatorSession;
+}
 
 const ST_META: Record<StepStatus, { c: string; icon: string; label: string }> = {
   pending: { c: "var(--text-4)", icon: "Dot", label: "Queued" },
@@ -45,7 +54,7 @@ export default function EmulationScreen() {
     deleteScenario,
   } = useStore();
   const [scenarioId, setScenarioId] = useState(scenarios[0].id);
-  const [c2Id, setC2Id] = useState<string>("");
+  const [c2Id, setC2Id] = useState<string>(AUTO);
   const [running, setRunning] = useState(false);
   const [stepState, setStepState] = useState<Record<number, StepStatus>>({});
   const [detailIdx, setDetailIdx] = useState<number | null>(null);
@@ -85,23 +94,30 @@ export default function EmulationScreen() {
     [nodes]
   );
   const liveC2s = useMemo(() => c2Targets.filter((c) => c.status === "live"), [c2Targets]);
-  const selectedC2 = c2Targets.find((c) => c.nodeId === c2Id);
+  const selectedC2 = c2Id === AUTO ? undefined : c2Targets.find((c) => c.nodeId === c2Id);
 
-  // Whether the selected C2 can automate a given technique (by its tactic).
-  const supports = useCallback(
-    (t: Technique) => !!selectedC2 && c2SupportsTactic(selectedC2.framework, t.tactic),
-    [selectedC2]
+  // routeFor finds the right agent to execute a technique: a live C2 whose
+  // framework can automate the technique's tactic (preferring Orchestrated over
+  // Scripted), plus an active session on it. In auto mode every live C2 is a
+  // candidate; otherwise only the chosen one.
+  const routeFor = useCallback(
+    (t: Technique): TechniqueRoute | null => {
+      const pool = c2Id === AUTO ? liveC2s : liveC2s.filter((c) => c.nodeId === c2Id);
+      const candidates = pool.filter((c) => c2SupportsTactic(c.framework, t.tactic));
+      if (candidates.length === 0) return null;
+      const best = [...candidates].sort((a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier])[0];
+      return { c2: best, agent: best.sessions[0] };
+    },
+    [c2Id, liveC2s]
   );
 
-  // Default the C2 target to the first live, automatable teamserver.
+  // Whether some live C2 can automate this technique under the current target.
+  const supports = useCallback((t: Technique) => routeFor(t) !== null, [routeFor]);
+
+  // Reset to auto-route if the chosen specific C2 is no longer live.
   useEffect(() => {
-    if (liveC2s.length === 0) {
-      if (c2Id) setC2Id("");
-      return;
-    }
-    if (!liveC2s.some((c) => c.nodeId === c2Id)) {
-      const pref = liveC2s.find((c) => c.operatorMode !== "manual") ?? liveC2s[0];
-      setC2Id(pref.nodeId);
+    if (c2Id !== AUTO && !liveC2s.some((c) => c.nodeId === c2Id)) {
+      setC2Id(AUTO);
     }
   }, [liveC2s, c2Id]);
 
@@ -199,12 +215,13 @@ export default function EmulationScreen() {
   );
 
   const run = () => {
-    if (!selectedC2 || runnableCount === 0) return;
+    if (runnableCount === 0) return;
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setStepState(baseStepState());
     setRunning(true);
-    pushToast(`Emulation started — ${scenario.name} via ${selectedC2.frameworkName}`, "info");
+    const via = selectedC2 ? selectedC2.frameworkName : "auto-routed agents";
+    pushToast(`Emulation started — ${scenario.name} via ${via}`, "info");
 
     if (restMode) {
       apiStartRun(activeEngagementId, scenarioId).then((runId) => {
@@ -256,7 +273,7 @@ export default function EmulationScreen() {
   ).length;
   const detected = scenario.techniques.filter((_, i) => stepState[i] === "detected").length;
   const pct = runnableCount ? Math.round((done / runnableCount) * 100) : 0;
-  const canRun = !!selectedC2 && runnableCount > 0;
+  const canRun = runnableCount > 0;
 
   // Live infrastructure from actual topology state
   const liveNodes = nodes.filter((n) => n.status === "live");
@@ -402,7 +419,7 @@ export default function EmulationScreen() {
                   const m = ST_META[st];
                   const hue = TACTIC_TONE[t.tactic] || 240;
                   const Ico = Icons[m.icon] || Icons.Dot;
-                  const auto = supports(t);
+                  const route = routeFor(t);
                   return (
                     <div
                       key={t.id}
@@ -498,20 +515,18 @@ export default function EmulationScreen() {
                           >
                             {t.id}
                           </span>
-                          {selectedC2 && (
+                          {route ? (
                             <span
-                              className={"pill " + (auto ? "ok" : "")}
+                              className="pill ok"
                               style={{ height: 19, fontSize: 10.5 }}
+                              title={`Routed to ${route.c2.frameworkName} (${route.c2.name})${route.agent ? " · agent " + route.agent.host : ""}`}
                             >
-                              {auto ? (
-                                <>
-                                  <Icons.Bolt size={10} /> auto
-                                </>
-                              ) : (
-                                <>
-                                  <Icons.Power size={10} /> manual
-                                </>
-                              )}
+                              <Icons.Bolt size={10} /> {route.c2.frameworkName}
+                              {route.agent ? ` · ${route.agent.host}` : ""}
+                            </span>
+                          ) : (
+                            <span className="pill" style={{ height: 19, fontSize: 10.5 }}>
+                              <Icons.Power size={10} /> manual
                             </span>
                           )}
                         </div>
@@ -571,6 +586,39 @@ export default function EmulationScreen() {
               </div>
               {liveC2s.length > 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  {/* Auto-route option: find the right agent per technique. */}
+                  <button
+                    onClick={() => !running && setC2Id(AUTO)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 9,
+                      padding: "9px 11px",
+                      borderRadius: "var(--r-sm)",
+                      textAlign: "left",
+                      border: `1px solid ${c2Id === AUTO ? "var(--accent)" : "var(--border-2)"}`,
+                      background: c2Id === AUTO ? "var(--accent-soft)" : "var(--surface-inset)",
+                      boxShadow: c2Id === AUTO ? "0 0 0 2px var(--accent-soft)" : "none",
+                      cursor: running ? "default" : "pointer",
+                    }}
+                  >
+                    <span style={{ color: c2Id === AUTO ? "var(--accent)" : "var(--text-3)" }}>
+                      <Icons.Zap size={15} />
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 600, display: "block" }}>
+                        Auto-route
+                      </span>
+                      <span style={{ fontSize: 10.5, color: "var(--text-3)" }}>
+                        best agent per technique
+                      </span>
+                    </span>
+                    {c2Id === AUTO && (
+                      <span style={{ color: "var(--accent)" }}>
+                        <Icons.Check size={15} />
+                      </span>
+                    )}
+                  </button>
                   {liveC2s.map((c) => {
                     const active = c.nodeId === c2Id;
                     return (
@@ -616,12 +664,23 @@ export default function EmulationScreen() {
                 </div>
               )}
 
-              {selectedC2 && (
+              {(selectedC2 ? [selectedC2] : liveC2s.filter((c) => c.operatorMode !== "manual")).length > 0 && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
                   <div className="eyebrow" style={{ marginBottom: 10 }}>
-                    Agents
+                    {selectedC2 ? "Agents" : "Available agents"}
                   </div>
-                  <OperatorStatus d={selectedC2} />
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {(selectedC2 ? [selectedC2] : liveC2s.filter((c) => c.operatorMode !== "manual")).map((c) => (
+                      <div key={c.nodeId}>
+                        {!selectedC2 && (
+                          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-2)", marginBottom: 6 }}>
+                            {c.frameworkName} · <span className="mono" style={{ color: "var(--text-3)" }}>{c.name}</span>
+                          </div>
+                        )}
+                        <OperatorStatus d={c} />
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -708,13 +767,19 @@ export default function EmulationScreen() {
                   lineHeight: 1.5,
                 }}
               >
-                {!selectedC2
-                  ? "Select a live C2 server to run automated emulation."
-                  : selectedC2.operatorMode === "manual"
-                  ? `${selectedC2.frameworkName} is operated manually — drive these techniques from your native client.`
-                  : `Executes via ${selectedC2.frameworkName} against ${activeEngagement.codename}. ${
+                {liveC2s.length === 0
+                  ? "No live C2 server — deploy a teamserver to run automated emulation."
+                  : c2Id === AUTO
+                  ? `Auto-routing each technique to a capable live agent. ${
                       scenario.techniques.length - runnableCount
-                    } technique(s) run by hand.`}
+                    } technique(s) have no capable C2 — run by hand.`
+                  : selectedC2 && selectedC2.operatorMode === "manual"
+                  ? `${selectedC2.frameworkName} is operated manually — drive these techniques from your native client.`
+                  : selectedC2
+                  ? `Executes via ${selectedC2.frameworkName} against ${activeEngagement.codename}. ${
+                      scenario.techniques.length - runnableCount
+                    } technique(s) run by hand.`
+                  : ""}
               </div>
             </div>
 
@@ -755,7 +820,7 @@ export default function EmulationScreen() {
       {detailIdx !== null && scenario.techniques[detailIdx] && (
         <TechniqueDetail
           technique={scenario.techniques[detailIdx]}
-          c2={selectedC2}
+          c2={selectedC2 ?? routeFor(scenario.techniques[detailIdx])?.c2 ?? null}
           onClose={() => setDetailIdx(null)}
         />
       )}
