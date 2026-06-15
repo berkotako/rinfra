@@ -719,6 +719,107 @@ func (s *UserScenarioStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// --- UserTechniqueStore ---
+
+// UserTechniqueStore is the Postgres implementation of store.UserTechniqueStore.
+type UserTechniqueStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewUserTechniqueStore returns a new UserTechniqueStore backed by pool.
+func NewUserTechniqueStore(pool *pgxpool.Pool) *UserTechniqueStore {
+	return &UserTechniqueStore{pool: pool}
+}
+
+var _ store.UserTechniqueStore = (*UserTechniqueStore)(nil)
+
+// Create inserts a technique, storing commands as JSONB.
+func (s *UserTechniqueStore) Create(ctx context.Context, t domain.Technique) error {
+	commands, err := json.Marshal(t.Commands)
+	if err != nil {
+		return fmt.Errorf("marshal commands: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO user_techniques (attack_id, name, tactic, description, commands)
+		VALUES ($1,$2,$3,$4,$5)`,
+		t.AttackID, t.Name, t.Tactic, t.Description, commands,
+	)
+	if err != nil {
+		return fmt.Errorf("insert user_technique: %w", err)
+	}
+	return nil
+}
+
+func (s *UserTechniqueStore) scanTechnique(row pgx.Row) (domain.Technique, error) {
+	var t domain.Technique
+	var commands []byte
+	if err := row.Scan(&t.AttackID, &t.Name, &t.Tactic, &t.Description, &commands); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Technique{}, fmt.Errorf("user_technique: %w", store.ErrNotFound)
+		}
+		return domain.Technique{}, fmt.Errorf("scan user_technique: %w", err)
+	}
+	if len(commands) > 0 {
+		if err := json.Unmarshal(commands, &t.Commands); err != nil {
+			return domain.Technique{}, fmt.Errorf("unmarshal commands: %w", err)
+		}
+	}
+	return t, nil
+}
+
+// List returns all stored techniques ordered by AttackID.
+func (s *UserTechniqueStore) List(ctx context.Context) ([]domain.Technique, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT attack_id, name, tactic, description, commands
+		FROM user_techniques ORDER BY attack_id`)
+	if err != nil {
+		return nil, fmt.Errorf("query user_techniques: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Technique
+	for rows.Next() {
+		t, err := s.scanTechnique(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// Update replaces an existing technique's mutable fields.
+func (s *UserTechniqueStore) Update(ctx context.Context, t domain.Technique) error {
+	commands, err := json.Marshal(t.Commands)
+	if err != nil {
+		return fmt.Errorf("marshal commands: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE user_techniques
+		SET name=$2, tactic=$3, description=$4, commands=$5
+		WHERE attack_id=$1`,
+		t.AttackID, t.Name, t.Tactic, t.Description, commands,
+	)
+	if err != nil {
+		return fmt.Errorf("update user_technique: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("user_technique %s: %w", t.AttackID, store.ErrNotFound)
+	}
+	return nil
+}
+
+// Delete removes a technique by AttackID.
+func (s *UserTechniqueStore) Delete(ctx context.Context, attackID string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM user_techniques WHERE attack_id=$1`, attackID)
+	if err != nil {
+		return fmt.Errorf("delete user_technique: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("user_technique %s: %w", attackID, store.ErrNotFound)
+	}
+	return nil
+}
+
 // --- CredentialStore ---
 
 // CredentialStore is the Postgres implementation of store.CredentialStore.

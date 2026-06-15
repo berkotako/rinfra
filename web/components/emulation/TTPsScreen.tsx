@@ -1,8 +1,10 @@
 "use client";
 import React, { useMemo, useState } from "react";
 import { Icons } from "../icons";
-import { PageHead } from "../ui";
+import { PageHead, Modal } from "../ui";
+import { useStore } from "../../lib/store";
 import TechniqueDetail from "./TechniqueDetail";
+import TechniqueEditor from "./TechniqueEditor";
 import {
   TECHNIQUE_LIBRARY,
   TACTIC_ORDER,
@@ -15,24 +17,39 @@ import type { Technique } from "../../lib/types";
 
 // Frameworks that automate at least one tactic (exclude fronted), for the filter.
 const AUTOMATING = C2_FRAMEWORKS.filter((f) => C2_TACTIC_SUPPORT[f.id]);
+const BUILTIN_IDS = new Set(TECHNIQUE_LIBRARY.map((t) => t.id));
 
 export default function TTPsScreen() {
+  const { techniques, addTechnique, updateTechnique, deleteTechnique } = useStore();
   const [framework, setFramework] = useState<string>("all");
   const [detail, setDetail] = useState<Technique | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editing, setEditing] = useState<Technique | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Technique | null>(null);
+
+  const isCustom = (t: Technique) => !BUILTIN_IDS.has(t.id);
+  const existingIds = useMemo(() => new Set(techniques.map((t) => t.id)), [techniques]);
 
   const groups = useMemo(
     () =>
       TACTIC_ORDER.map((tactic) => ({
         tactic,
-        items: TECHNIQUE_LIBRARY.filter((t) => t.tactic === tactic),
+        items: techniques.filter((t) => t.tactic === tactic),
       })).filter((g) => g.items.length > 0),
-    []
+    [techniques]
   );
 
   const totalAutomatable =
     framework === "all"
-      ? TECHNIQUE_LIBRARY.filter((t) => frameworksSupportingTactic(t.tactic).length > 0).length
-      : TECHNIQUE_LIBRARY.filter((t) => c2SupportsTactic(framework, t.tactic)).length;
+      ? techniques.filter((t) => frameworksSupportingTactic(t.tactic).length > 0).length
+      : techniques.filter((t) => c2SupportsTactic(framework, t.tactic)).length;
+
+  const submitTechnique = (t: Technique) => {
+    const op = editing ? updateTechnique(t) : addTechnique(t);
+    op.catch(() => undefined);
+    setEditorOpen(false);
+    setEditing(null);
+  };
 
   return (
     <div className="scroll" style={{ height: "100%", padding: "26px 32px 40px" }}>
@@ -54,13 +71,22 @@ export default function TTPsScreen() {
               </option>
             ))}
           </select>
+          <button
+            className="btn primary"
+            onClick={() => {
+              setEditing(null);
+              setEditorOpen(true);
+            }}
+          >
+            <Icons.Plus size={15} /> New TTP
+          </button>
         </PageHead>
 
         {/* summary */}
         <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
           {(
             [
-              ["Techniques", String(TECHNIQUE_LIBRARY.length), "var(--text)"],
+              ["Techniques", String(techniques.length), "var(--text)"],
               ["Tactics", String(groups.length), "var(--accent)"],
               [
                 framework === "all" ? "Automatable (any C2)" : "Automatable by selection",
@@ -104,8 +130,9 @@ export default function TTPsScreen() {
                   {g.items.map((t) => {
                     const fwIds = frameworksSupportingTactic(t.tactic);
                     const auto = framework === "all" ? fwIds.length > 0 : c2SupportsTactic(framework, t.tactic);
+                    const custom = isCustom(t);
                     return (
-                      <button
+                      <div
                         key={t.id}
                         onClick={() => setDetail(t)}
                         className="tech-row"
@@ -127,6 +154,11 @@ export default function TTPsScreen() {
                           <span className="mono" style={{ fontSize: 10.5, color: "var(--text-3)" }}>
                             {t.id}
                           </span>
+                          {custom && (
+                            <span className="pill accent" style={{ height: 17, fontSize: 9.5, marginLeft: 6 }}>
+                              custom
+                            </span>
+                          )}
                         </span>
                         {/* framework chips */}
                         <span style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -171,10 +203,37 @@ export default function TTPsScreen() {
                             </span>
                           )}
                         </span>
+                        {custom && (
+                          <span style={{ display: "flex", gap: 2, flex: "none" }}>
+                            <button
+                              className="btn ghost sm"
+                              style={{ padding: 5 }}
+                              title="Edit TTP"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditing(t);
+                                setEditorOpen(true);
+                              }}
+                            >
+                              <Icons.Sliders size={13} />
+                            </button>
+                            <button
+                              className="btn ghost sm"
+                              style={{ padding: 5 }}
+                              title="Delete TTP"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmDelete(t);
+                              }}
+                            >
+                              <Icons.Trash size={13} />
+                            </button>
+                          </span>
+                        )}
                         <span style={{ color: "var(--text-4)", flex: "none" }}>
                           <Icons.ChevronRight size={15} />
                         </span>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -185,6 +244,42 @@ export default function TTPsScreen() {
       </div>
 
       {detail && <TechniqueDetail technique={detail} onClose={() => setDetail(null)} />}
+      {editorOpen && (
+        <TechniqueEditor
+          initial={editing ?? undefined}
+          existingIds={existingIds}
+          onClose={() => {
+            setEditorOpen(false);
+            setEditing(null);
+          }}
+          onSubmit={submitTechnique}
+        />
+      )}
+      {confirmDelete && (
+        <Modal open onClose={() => setConfirmDelete(null)} width={420} label="Delete TTP">
+          <div style={{ padding: 22 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Delete TTP?</div>
+            <div style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.5 }}>
+              <b>{confirmDelete.name}</b> (<span className="mono">{confirmDelete.id}</span>) will be
+              removed from the library.
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setConfirmDelete(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                onClick={() => {
+                  deleteTechnique(confirmDelete.id).catch(() => undefined);
+                  setConfirmDelete(null);
+                }}
+              >
+                <Icons.Trash size={15} /> Delete
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

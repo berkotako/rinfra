@@ -12,12 +12,14 @@ import "time"
 // NOT carry payloads, shellcode, or exploit code. The procedure content is
 // sourced from those public libraries at execution time, not authored here.
 type Technique struct {
-	AttackID string            // e.g. "T1059.001"
-	Name     string            // human-readable
-	Tactic   string            // e.g. "execution", "persistence"
-	Source   TechniqueSource   // where the concrete procedure comes from
-	SourceID string            // ability id / atomic test GUID in that source
-	Inputs   map[string]string // parameter bindings for the procedure
+	AttackID    string            // e.g. "T1059.001"
+	Name        string            // human-readable
+	Tactic      string            // e.g. "execution", "persistence"
+	Source      TechniqueSource   // where the concrete procedure comes from
+	SourceID    string            // ability id / atomic test GUID in that source
+	Inputs      map[string]string // parameter bindings for the procedure
+	Description string            // plain-language summary (operator-authored TTPs)
+	Commands    []string          // portable procedure commands (operator-authored TTPs)
 }
 
 // TechniqueSource identifies the public library a technique's procedure is

@@ -586,3 +586,57 @@ func TestUpdateDeleteScenario(t *testing.T) {
 		}
 	}
 }
+
+// TestTechniqueCRUD covers operator-authored TTP create/list/update/delete.
+func TestTechniqueCRUD(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, service.NewHub())
+	svcEmu.WithUserTechniques(memstore.NewUserTechniqueStore())
+
+	created, err := svcEmu.CreateTechnique(ctx, domain.Technique{
+		AttackID: "T1136.001", Name: "Create Local Account", Tactic: "Persistence",
+		Description: "adds a local account", Commands: []string{"net user x y /add"},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateTechnique: %v", err)
+	}
+	if created.AttackID != "T1136.001" {
+		t.Errorf("unexpected created: %+v", created)
+	}
+
+	// Duplicate attack id rejected.
+	if _, err := svcEmu.CreateTechnique(ctx, domain.Technique{AttackID: "T1136.001", Name: "dup", Tactic: "Persistence"}, "op"); err == nil {
+		t.Error("expected duplicate attack id to be rejected")
+	}
+
+	// Validation.
+	if _, err := svcEmu.CreateTechnique(ctx, domain.Technique{Name: "no id", Tactic: "Execution"}, "op"); err == nil {
+		t.Error("expected error for missing attack id")
+	}
+
+	// Update.
+	updated, err := svcEmu.UpdateTechnique(ctx, domain.Technique{
+		AttackID: "T1136.001", Name: "Create Local Account (edited)", Tactic: "Persistence",
+	}, "op")
+	if err != nil {
+		t.Fatalf("UpdateTechnique: %v", err)
+	}
+	if updated.Name != "Create Local Account (edited)" {
+		t.Errorf("update not applied: %+v", updated)
+	}
+
+	// List.
+	list, err := svcEmu.ListTechniques(ctx)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListTechniques: %v len=%d", err, len(list))
+	}
+
+	// Delete.
+	if err := svcEmu.DeleteTechnique(ctx, "T1136.001", "op"); err != nil {
+		t.Fatalf("DeleteTechnique: %v", err)
+	}
+	if list, _ := svcEmu.ListTechniques(ctx); len(list) != 0 {
+		t.Errorf("expected empty list after delete, got %d", len(list))
+	}
+}

@@ -164,6 +164,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	infraStore := memstore.NewInfraStore()
 	scenarioStore := memstore.NewScenarioStore()
 	userScenarioStore := memstore.NewUserScenarioStore()
+	userTechniqueStore := memstore.NewUserTechniqueStore()
 	credStore := memstore.NewCredentialStore()
 	jobStore := memstore.NewJobStore()
 	userStore := memstore.NewUserStore()
@@ -175,6 +176,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcInfra.WithEngine(buildEngine(log))
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 	svcEmu.WithUserScenarios(userScenarioStore)
+	svcEmu.WithUserTechniques(userTechniqueStore)
 	// Dev mode: keep the fake resolver so no live teamserver is needed.
 	svcEmu.WithResolver(service.NewFakeResolver())
 	svcC2 := service.NewC2Service(engStore, infraStore, auditLog, log)
@@ -217,6 +219,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	infraStore := storepostgres.NewInfraStore(pool)
 	scenarioStore := storepostgres.NewScenarioStore(pool)
 	userScenarioStore := storepostgres.NewUserScenarioStore(pool)
+	userTechniqueStore := storepostgres.NewUserTechniqueStore(pool)
 	credStore := storepostgres.NewCredentialStore(pool)
 	jobStore := storepostgres.NewJobStore(pool)
 	userStore := storepostgres.NewUserStore(pool)
@@ -228,6 +231,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcInfra.WithEngine(buildEngine(log))
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 	svcEmu.WithUserScenarios(userScenarioStore)
+	svcEmu.WithUserTechniques(userTechniqueStore)
 	// Production mode: use registry-backed resolver that finds the engagement's
 	// deployed C2 topology and calls C2Provider.Control(teamserver).
 	svcEmu.WithResolver(service.NewRegistryResolver(infraStore))

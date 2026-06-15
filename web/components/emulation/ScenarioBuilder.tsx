@@ -2,8 +2,8 @@
 import React, { useState } from "react";
 import { Icons } from "../icons";
 import { Modal } from "../ui";
+import { useStore } from "../../lib/store";
 import {
-  TECHNIQUE_LIBRARY,
   TACTIC_ORDER,
   frameworksSupportingTactic,
   c2SupportsTactic,
@@ -24,6 +24,7 @@ export default function ScenarioBuilder({
   onClose: () => void;
   onSubmit: (s: Scenario) => void;
 }) {
+  const { techniques: library } = useStore();
   const editing = !!initial;
   const [name, setName] = useState(initial?.name ?? "");
   const [actor, setActor] = useState(initial?.actor ?? "");
@@ -43,10 +44,10 @@ export default function ScenarioBuilder({
   // Library grouped by tactic, in ATT&CK order.
   const groups = TACTIC_ORDER.map((tactic) => ({
     tactic,
-    items: TECHNIQUE_LIBRARY.filter((t) => t.tactic === tactic),
+    items: library.filter((t) => t.tactic === tactic),
   })).filter((g) => g.items.length > 0);
 
-  const selectedTechniques: Technique[] = TECHNIQUE_LIBRARY.filter((t) => selected.has(t.id));
+  const selectedTechniques: Technique[] = library.filter((t) => selected.has(t.id));
 
   // Per-framework automated coverage of the selected techniques.
   const coverage = AUTOMATING_FRAMEWORKS.map((f) => {

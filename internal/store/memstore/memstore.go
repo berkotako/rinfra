@@ -362,6 +362,66 @@ func (s *UserScenarioStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+// --- UserTechniqueStore ---
+
+// UserTechniqueStore is the in-memory implementation of store.UserTechniqueStore.
+type UserTechniqueStore struct {
+	mu         sync.RWMutex
+	techniques map[string]domain.Technique // keyed by AttackID
+}
+
+// NewUserTechniqueStore returns an empty UserTechniqueStore.
+func NewUserTechniqueStore() *UserTechniqueStore {
+	return &UserTechniqueStore{techniques: make(map[string]domain.Technique)}
+}
+
+var _ store.UserTechniqueStore = (*UserTechniqueStore)(nil)
+
+// Create stores a new technique; errors if the AttackID already exists.
+func (s *UserTechniqueStore) Create(_ context.Context, t domain.Technique) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.techniques[t.AttackID]; ok {
+		return fmt.Errorf("technique %s already exists", t.AttackID)
+	}
+	s.techniques[t.AttackID] = t
+	return nil
+}
+
+// List returns all stored techniques ordered by AttackID.
+func (s *UserTechniqueStore) List(_ context.Context) ([]domain.Technique, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Technique, 0, len(s.techniques))
+	for _, t := range s.techniques {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AttackID < out[j].AttackID })
+	return out, nil
+}
+
+// Update replaces an existing technique.
+func (s *UserTechniqueStore) Update(_ context.Context, t domain.Technique) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.techniques[t.AttackID]; !ok {
+		return fmt.Errorf("technique %s: %w", t.AttackID, store.ErrNotFound)
+	}
+	s.techniques[t.AttackID] = t
+	return nil
+}
+
+// Delete removes a technique by AttackID.
+func (s *UserTechniqueStore) Delete(_ context.Context, attackID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.techniques[attackID]; !ok {
+		return fmt.Errorf("technique %s: %w", attackID, store.ErrNotFound)
+	}
+	delete(s.techniques, attackID)
+	return nil
+}
+
 // --- CredentialStore ---
 
 type credKey struct{ engagementID, provider string }

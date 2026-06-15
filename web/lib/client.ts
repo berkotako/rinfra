@@ -7,6 +7,7 @@ import type {
   CanvasEdge,
   C2Framework,
   Scenario,
+  Technique,
   NodeStatus,
   EngagementStatus,
   User,
@@ -252,6 +253,12 @@ export interface RInfraClient {
   deleteScenario(id: string): Promise<void>;
   startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }>;
   getRun(runId: string): Promise<ScenarioRun>;
+
+  // TTP library — operator-authored techniques
+  listTechniques(): Promise<Technique[]>;
+  createTechnique(t: Technique): Promise<Technique>;
+  updateTechnique(t: Technique): Promise<Technique>;
+  deleteTechnique(id: string): Promise<void>;
 }
 
 export interface CreateUserParams {
@@ -596,6 +603,20 @@ export class MockClient implements RInfraClient {
       finishedAt: null,
     };
   }
+
+  // Mock mode: authored TTPs are kept session-local by the store.
+  async listTechniques(): Promise<Technique[]> {
+    return [];
+  }
+  async createTechnique(t: Technique): Promise<Technique> {
+    return t;
+  }
+  async updateTechnique(t: Technique): Promise<Technique> {
+    return t;
+  }
+  async deleteTechnique(id: string): Promise<void> {
+    void id;
+  }
 }
 
 // ---------- RestClient ----------
@@ -723,6 +744,16 @@ function mapManualAccessFromApi(b: Record<string, unknown>): DeployedC2 | null {
       instructions: String(b["instructions"] ?? ""),
     },
     sessions: [],
+  };
+}
+
+function mapTechniqueFromApi(t: Record<string, unknown>): Technique {
+  return {
+    id: String(t["id"] ?? ""),
+    name: String(t["name"] ?? ""),
+    tactic: String(t["tactic"] ?? ""),
+    description: t["description"] ? String(t["description"]) : undefined,
+    commands: Array.isArray(t["commands"]) ? (t["commands"] as unknown[]).map(String) : undefined,
   };
 }
 
@@ -1232,6 +1263,45 @@ export class RestClient implements RInfraClient {
       startedAt: run["startedAt"] ? String(run["startedAt"]) : null,
       finishedAt: run["finishedAt"] ? String(run["finishedAt"]) : null,
     };
+  }
+
+  async listTechniques(): Promise<Technique[]> {
+    const body = await this.fetch<{ techniques: Record<string, unknown>[] }>("/ttps");
+    return (body.techniques ?? []).map(mapTechniqueFromApi);
+  }
+
+  async createTechnique(t: Technique): Promise<Technique> {
+    const body = await this.fetch<{ technique: Record<string, unknown> }>("/ttps", {
+      method: "POST",
+      body: JSON.stringify({
+        id: t.id,
+        name: t.name,
+        tactic: t.tactic,
+        description: t.description ?? "",
+        commands: t.commands ?? [],
+      }),
+    });
+    return mapTechniqueFromApi(body.technique ?? {});
+  }
+
+  async updateTechnique(t: Technique): Promise<Technique> {
+    const body = await this.fetch<{ technique: Record<string, unknown> }>(
+      `/ttps/${encodeURIComponent(t.id)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          name: t.name,
+          tactic: t.tactic,
+          description: t.description ?? "",
+          commands: t.commands ?? [],
+        }),
+      }
+    );
+    return mapTechniqueFromApi(body.technique ?? {});
+  }
+
+  async deleteTechnique(id: string): Promise<void> {
+    await this.fetch<undefined>(`/ttps/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 }
 
