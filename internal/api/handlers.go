@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -108,6 +109,44 @@ func (h *handlers) createEngagement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"engagement": engagementToJSON(created)})
+}
+
+// canAccessEngagement enforces project-membership authorization for an
+// engagement: admins see everything; everyone else only engagements within a
+// project they lead or belong to. When the project subsystem is not wired
+// (dev/legacy/test), access is allowed — matching the synthetic-admin actor.
+func (h *handlers) canAccessEngagement(ctx context.Context, user domain.User, eng domain.Engagement) bool {
+	if user.Role == domain.RoleAdmin {
+		return true
+	}
+	if h.svc.Projects == nil {
+		return true
+	}
+	if eng.ProjectID == "" {
+		// Project-less engagement: only admins (handled above).
+		return false
+	}
+	ok, err := h.svc.Projects.CanAccessProject(ctx, user, eng.ProjectID)
+	return err == nil && ok
+}
+
+// requireEngagementAccess is middleware for every /engagements/{id} route. It
+// loads the engagement, authorizes the actor against project membership, and
+// rejects with 403 before any handler (read, deploy, teardown, credentials,
+// run, C2, shell) runs.
+func (h *handlers) requireEngagementAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		eng, err := h.svc.Engagement.Get(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			writeError(w, h.log, err)
+			return
+		}
+		if !h.canAccessEngagement(r.Context(), actorUser(r.Context()), eng) {
+			writeErrorCode(w, http.StatusForbidden, "forbidden", "you do not have access to this engagement")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *handlers) getEngagement(w http.ResponseWriter, r *http.Request) {
@@ -583,6 +622,14 @@ func (h *handlers) getRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, h.log, err)
 		return
+	}
+	// Runs are fetched cross-engagement by id; authorize against the owning
+	// engagement's project membership.
+	if eng, err := h.svc.Engagement.Get(r.Context(), run.EngagementID); err == nil {
+		if !h.canAccessEngagement(r.Context(), actorUser(r.Context()), eng) {
+			writeErrorCode(w, http.StatusForbidden, "forbidden", "you do not have access to this run")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": runToJSON(run)})
 }
