@@ -127,8 +127,9 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		r.Put("/ttps/{attackId}", h.updateTechnique)
 		r.Delete("/ttps/{attackId}", h.deleteTechnique)
 
-		// Runs — fetch by ID (cross-engagement).
+		// Runs — fetch by ID (cross-engagement) + purple-team detection scoring.
 		r.Get("/runs/{id}", h.getRun)
+		r.Post("/runs/{id}/detection", h.recordDetection)
 	})
 
 	return r

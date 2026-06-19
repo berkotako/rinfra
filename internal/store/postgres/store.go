@@ -500,9 +500,9 @@ func (s *ScenarioStore) SaveRun(ctx context.Context, run domain.ScenarioRun) (st
 	for _, r := range run.Results {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO technique_results
-			  (run_id, attack_id, status, output, started_at, finished_at, err)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-			id, r.TechniqueAttackID, string(r.Status), r.Output,
+			  (run_id, attack_id, status, output, detection, started_at, finished_at, err)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+			id, r.TechniqueAttackID, string(r.Status), r.Output, string(detectionOr(r.Detection)),
 			nullTime(r.StartedAt), nullTime(r.FinishedAt), r.Err,
 		)
 		if err != nil {
@@ -537,7 +537,7 @@ func (s *ScenarioStore) GetRun(ctx context.Context, id string) (domain.ScenarioR
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT attack_id, status, output, started_at, finished_at, err
+		SELECT attack_id, status, output, detection, started_at, finished_at, err
 		FROM technique_results WHERE run_id=$1 ORDER BY started_at NULLS FIRST`, id)
 	if err != nil {
 		return domain.ScenarioRun{}, fmt.Errorf("query technique_results: %w", err)
@@ -545,12 +545,13 @@ func (s *ScenarioStore) GetRun(ctx context.Context, id string) (domain.ScenarioR
 	defer rows.Close()
 	for rows.Next() {
 		var r domain.Result
-		var rStatus string
+		var rStatus, rDetection string
 		var rStart, rEnd *time.Time
-		if err = rows.Scan(&r.TechniqueAttackID, &rStatus, &r.Output, &rStart, &rEnd, &r.Err); err != nil {
+		if err = rows.Scan(&r.TechniqueAttackID, &rStatus, &r.Output, &rDetection, &rStart, &rEnd, &r.Err); err != nil {
 			return domain.ScenarioRun{}, fmt.Errorf("scan result: %w", err)
 		}
 		r.Status = domain.ExecutionStatus(rStatus)
+		r.Detection = domain.DetectionOutcome(rDetection)
 		if rStart != nil {
 			r.StartedAt = *rStart
 		}
@@ -566,13 +567,36 @@ func (s *ScenarioStore) GetRun(ctx context.Context, id string) (domain.ScenarioR
 func (s *ScenarioStore) SaveResult(ctx context.Context, runID string, result domain.Result) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO technique_results
-		  (run_id, attack_id, status, output, started_at, finished_at, err)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		runID, result.TechniqueAttackID, string(result.Status), result.Output,
+		  (run_id, attack_id, status, output, detection, started_at, finished_at, err)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		runID, result.TechniqueAttackID, string(result.Status), result.Output, string(detectionOr(result.Detection)),
 		nullTime(result.StartedAt), nullTime(result.FinishedAt), result.Err,
 	)
 	if err != nil {
 		return fmt.Errorf("insert technique_result for run %s: %w", runID, err)
+	}
+	return nil
+}
+
+// detectionOr returns the outcome, defaulting empty to DetectNone.
+func detectionOr(d domain.DetectionOutcome) domain.DetectionOutcome {
+	if d == "" {
+		return domain.DetectNone
+	}
+	return d
+}
+
+// SetResultDetection records the defender outcome for a technique in a run.
+func (s *ScenarioStore) SetResultDetection(ctx context.Context, runID, attackID string, outcome domain.DetectionOutcome) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE technique_results SET detection=$3 WHERE run_id=$1 AND attack_id=$2`,
+		runID, attackID, string(detectionOr(outcome)),
+	)
+	if err != nil {
+		return fmt.Errorf("set detection for run %s: %w", runID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("technique %s in run %s: %w", attackID, runID, store.ErrNotFound)
 	}
 	return nil
 }

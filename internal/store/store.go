@@ -48,6 +48,9 @@ type ScenarioStore interface {
 	// incremental persistence as each technique completes rather than requiring
 	// a full SaveRun after the run finishes.
 	SaveResult(ctx context.Context, runID string, result domain.Result) error
+	// SetResultDetection records the defender outcome (block/detect/alert/none)
+	// for a technique within a run — the purple-team scoring step.
+	SetResultDetection(ctx context.Context, runID, attackID string, outcome domain.DetectionOutcome) error
 }
 
 // UserScenarioStore persists operator-authored emulation scenarios (distinct
