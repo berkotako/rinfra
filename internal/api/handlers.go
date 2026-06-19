@@ -601,6 +601,44 @@ func (h *handlers) deleteAdvisoryFeed(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---------- IaC backend configuration ----------
+
+// getIaCConfig reports the active IaC backend and the available choices.
+func (h *handlers) getIaCConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backend":   h.svc.Infra.IaCBackend(r.Context()),
+		"available": h.svc.Infra.AvailableBackends(),
+	})
+}
+
+type setIaCRequest struct {
+	Backend string `json:"backend"`
+}
+
+// setIaCConfig selects the IaC backend (admin only).
+func (h *handlers) setIaCConfig(w http.ResponseWriter, r *http.Request) {
+	if u, ok := userFrom(r.Context()); ok && u.Role != domain.RoleAdmin {
+		writeErrorCode(w, http.StatusForbidden, "forbidden", "only admins can change the IaC backend")
+		return
+	}
+	var req setIaCRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := h.svc.Infra.SetIaCBackend(r.Context(), actorFrom(r.Context()), req.Backend); err != nil {
+		if errors.Is(err, service.ErrInvalidTopology) {
+			writeErrorCode(w, http.StatusUnprocessableEntity, "invalid_backend", err.Error())
+			return
+		}
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backend":   h.svc.Infra.IaCBackend(r.Context()),
+		"available": h.svc.Infra.AvailableBackends(),
+	})
+}
+
 // writeFeedError maps threatfeed feed errors to HTTP statuses.
 func writeFeedError(w http.ResponseWriter, log *slog.Logger, err error) {
 	switch {

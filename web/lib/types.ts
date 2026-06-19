@@ -189,6 +189,12 @@ export interface NewAdvisoryFeed {
   inline?: string;
 }
 
+// IaCConfig reports the active IaC backend and the available choices.
+export interface IaCConfig {
+  backend: string; // "pulumi" | "terraform"
+  available: string[];
+}
+
 // ---------- Coverage (ATT&CK rollup) — mirrors service.Coverage ----------
 export interface CoverageTechnique {
   attackID: string;

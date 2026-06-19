@@ -904,6 +904,44 @@ func (s *AdvisoryFeedStore) DeleteFeed(ctx context.Context, id string) error {
 	return nil
 }
 
+// --- SettingStore ---
+
+// SettingStore is the Postgres implementation of store.SettingStore.
+type SettingStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewSettingStore returns a new SettingStore backed by pool.
+func NewSettingStore(pool *pgxpool.Pool) *SettingStore {
+	return &SettingStore{pool: pool}
+}
+
+var _ store.SettingStore = (*SettingStore)(nil)
+
+func (s *SettingStore) Get(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := s.pool.QueryRow(ctx, `SELECT value FROM server_settings WHERE key=$1`, key).Scan(&value)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get setting %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+func (s *SettingStore) Set(ctx context.Context, key, value string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO server_settings (key, value, updated_at) VALUES ($1,$2,now())
+		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()`,
+		key, value,
+	)
+	if err != nil {
+		return fmt.Errorf("set setting %q: %w", key, err)
+	}
+	return nil
+}
+
 // --- CredentialStore ---
 
 // CredentialStore is the Postgres implementation of store.CredentialStore.

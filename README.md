@@ -217,6 +217,17 @@ The install script generates `RINFRA_MASTER_KEY` into a local `.env` (see
 `.env.example`). Live cloud provisioning additionally needs the Pulumi CLI;
 see `cmd/rinfra-server` docs and `docs/RUNBOOK_DO.md`.
 
+### IaC backend (Pulumi or Terraform)
+
+Infrastructure can be provisioned by either **Pulumi** (default; embedded Go
+Automation API) or **Terraform** (generates Terraform JSON and drives the
+`terraform` CLI). Both implement the same `service.Provisioner` seam and every
+cloud provider supplies builders for both, so the same canvas topology deploys
+under either. Pick the initial backend with **`RINFRA_IAC=pulumi|terraform`**;
+an admin can switch it at runtime under **Settings → Infrastructure** (persisted
+in Postgres, applies to subsequent deploys). The Terraform backend needs the
+`terraform` binary on the server's PATH.
+
 ## Authentication, roles & projects
 
 The control plane authenticates operators with bearer-token sessions and three

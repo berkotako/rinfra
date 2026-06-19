@@ -101,8 +101,12 @@ references an Atomic Red Team / Caldera ability; it is not a payload.
 ## Tech stack & conventions
 
 - **Go 1.24+**. Standard project layout (`cmd/`, `internal/`).
-- **IaC:** Pulumi **Go SDK** (automation API) — programmatic, no HCL context
-  switch. Each `CloudProvider` impl drives Pulumi.
+- **IaC:** Pulumi **Go SDK** (automation API) is the default backend —
+  programmatic, no HCL context switch. A **Terraform** backend
+  (`internal/orchestration/terraform`) is also selectable (set `RINFRA_IAC` or
+  choose it in Settings → Infrastructure; persisted in `server_settings`). Both
+  satisfy `service.Provisioner`; each `CloudProvider` impl supplies both an
+  `orchestration.ProgramBuilder` (Pulumi) and a `terraform.Builder` (Terraform JSON).
 - **DB:** Postgres. Use `pgx` + `sqlc` (or plain `pgx`); migrations in
   `migrations/` (golang-migrate format).
 - **HTTP:** stdlib `net/http` + `chi` router is fine. Keep handlers thin;

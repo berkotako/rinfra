@@ -10,6 +10,14 @@
 //   - RINFRA_DEV          set to "1" for in-memory stores and fake cloud;
 //     no Postgres or master key required in this mode.
 //
+// IaC backend (which engine provisions infrastructure):
+//   - RINFRA_IAC          "pulumi" (default) or "terraform". Initial default only;
+//     the live selection is persisted (server_settings) and changeable by an
+//     admin in Settings → Infrastructure.
+//   - TERRAFORM_STATE_DIR optional: root dir for Terraform working dirs/state
+//     (default: $HOME/.rinfra/terraform-state). The terraform CLI must be on PATH
+//     when the Terraform backend is selected.
+//
 // Pulumi (required for real cloud provisioning; not needed with RINFRA_DEV=1):
 //   - PULUMI_CONFIG_PASSPHRASE   passphrase used to encrypt secrets in the local
 //     Pulumi state backend. Set to any non-empty value for local dev. Required
@@ -72,9 +80,11 @@ import (
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
+	tfengine "github.com/rinfra/rinfra/internal/orchestration/terraform"
 	"github.com/rinfra/rinfra/internal/payload"
 	"github.com/rinfra/rinfra/internal/secrets"
 	"github.com/rinfra/rinfra/internal/service"
+	"github.com/rinfra/rinfra/internal/store"
 	"github.com/rinfra/rinfra/internal/store/memstore"
 	storepostgres "github.com/rinfra/rinfra/internal/store/postgres"
 	"github.com/rinfra/rinfra/internal/threatfeed"
@@ -233,6 +243,51 @@ func buildEngine(log *slog.Logger) *orchestration.Engine {
 	return eng
 }
 
+// buildTerraformEngine constructs the Terraform IaC backend and registers the
+// terraform.Builder for every real cloud provider. stateDir is read from
+// TERRAFORM_STATE_DIR (default: $HOME/.rinfra/terraform-state).
+func buildTerraformEngine(log *slog.Logger) *tfengine.Engine {
+	eng := tfengine.New(envOr("TERRAFORM_STATE_DIR", ""), log)
+	for _, pt := range []domain.CloudProviderType{
+		domain.CloudDigitalOcean,
+		domain.CloudAWS,
+		domain.CloudGCP,
+		domain.CloudAzure,
+	} {
+		p, err := cloud.Get(pt)
+		if err != nil {
+			log.Warn("buildTerraformEngine: cloud provider not registered", "provider", pt)
+			continue
+		}
+		if builder, ok := p.(tfengine.Builder); ok {
+			eng.RegisterBuilder(pt, builder)
+			log.Info("terraform: registered Builder", "provider", pt)
+		}
+	}
+	return eng
+}
+
+// defaultIaCBackend reads RINFRA_IAC (pulumi|terraform); defaults to pulumi.
+func defaultIaCBackend(log *slog.Logger) string {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("RINFRA_IAC"))); v {
+	case "", service.BackendPulumi:
+		return service.BackendPulumi
+	case service.BackendTerraform:
+		return service.BackendTerraform
+	default:
+		log.Warn("unknown RINFRA_IAC value, defaulting to pulumi", "value", v)
+		return service.BackendPulumi
+	}
+}
+
+// wireProvisioners registers both IaC backends on the infra service and sets the
+// persisted-selection store with the env default.
+func wireProvisioners(svcInfra *service.InfraService, settings store.SettingStore, log *slog.Logger) {
+	svcInfra.WithEngine(buildEngine(log))
+	svcInfra.RegisterProvisioner(service.BackendTerraform, buildTerraformEngine(log))
+	svcInfra.WithSettings(settings, defaultIaCBackend(log))
+}
+
 func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hub) {
 	auditLog := memstore.NewAuditLogger()
 	engStore := memstore.NewEngagementStore()
@@ -241,6 +296,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	userScenarioStore := memstore.NewUserScenarioStore()
 	userTechniqueStore := memstore.NewUserTechniqueStore()
 	feedStore := memstore.NewAdvisoryFeedStore()
+	settingStore := memstore.NewSettingStore()
 	credStore := memstore.NewCredentialStore()
 	jobStore := memstore.NewJobStore()
 	userStore := memstore.NewUserStore()
@@ -249,7 +305,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 
 	svcEng := service.NewEngagementService(engStore, auditLog)
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
-	svcInfra.WithEngine(buildEngine(log))
+	wireProvisioners(svcInfra, settingStore, log)
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 	svcEmu.WithUserScenarios(userScenarioStore)
 	svcEmu.WithUserTechniques(userTechniqueStore)
@@ -299,6 +355,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	userScenarioStore := storepostgres.NewUserScenarioStore(pool)
 	userTechniqueStore := storepostgres.NewUserTechniqueStore(pool)
 	feedStore := storepostgres.NewAdvisoryFeedStore(pool)
+	settingStore := storepostgres.NewSettingStore(pool)
 	credStore := storepostgres.NewCredentialStore(pool)
 	jobStore := storepostgres.NewJobStore(pool)
 	userStore := storepostgres.NewUserStore(pool)
@@ -307,7 +364,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 
 	svcEng := service.NewEngagementService(engStore, auditLog)
 	svcInfra := service.NewInfraService(engStore, infraStore, credStore, jobStore, auditLog, enc, hub, log)
-	svcInfra.WithEngine(buildEngine(log))
+	wireProvisioners(svcInfra, settingStore, log)
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 	svcEmu.WithUserScenarios(userScenarioStore)
 	svcEmu.WithUserTechniques(userTechniqueStore)

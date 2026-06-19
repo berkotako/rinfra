@@ -12,6 +12,7 @@ import type {
   Advisory,
   AdvisoryFeed,
   NewAdvisoryFeed,
+  IaCConfig,
   NodeStatus,
   EngagementStatus,
   User,
@@ -42,6 +43,7 @@ import {
 // localStorage. This mirrors the server's advisory_feeds table closely enough
 // that the Settings UI behaves identically against mock and REST.
 const MOCK_FEEDS_KEY = "rinfra-advisory-feeds";
+const MOCK_IAC_KEY = "rinfra-iac-backend";
 
 function mockLoadFeeds(): AdvisoryFeed[] {
   if (typeof window === "undefined") return [];
@@ -370,6 +372,9 @@ export interface RInfraClient {
   listAdvisoryFeeds(): Promise<AdvisoryFeed[]>;
   addAdvisoryFeed(input: NewAdvisoryFeed): Promise<AdvisoryFeed>;
   deleteAdvisoryFeed(id: string): Promise<void>;
+  // IaC backend (Pulumi/Terraform) selection.
+  getIaCConfig(): Promise<IaCConfig>;
+  setIaCConfig(backend: string): Promise<IaCConfig>;
 }
 
 export interface CreateUserParams {
@@ -799,6 +804,24 @@ export class MockClient implements RInfraClient {
 
   async deleteAdvisoryFeed(id: string): Promise<void> {
     mockSaveFeeds(mockLoadFeeds().filter((f) => f.id !== id));
+  }
+
+  async getIaCConfig(): Promise<IaCConfig> {
+    let backend = "pulumi";
+    if (typeof window !== "undefined") {
+      backend = window.localStorage.getItem(MOCK_IAC_KEY) || "pulumi";
+    }
+    return { backend, available: ["pulumi", "terraform"] };
+  }
+
+  async setIaCConfig(backend: string): Promise<IaCConfig> {
+    if (backend !== "pulumi" && backend !== "terraform") {
+      throw new Error("backend must be pulumi or terraform");
+    }
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(MOCK_IAC_KEY, backend);
+    }
+    return { backend, available: ["pulumi", "terraform"] };
   }
 }
 
@@ -1540,6 +1563,17 @@ export class RestClient implements RInfraClient {
 
   async deleteAdvisoryFeed(id: string): Promise<void> {
     await this.fetch<undefined>(`/advisories/feeds/${id}`, { method: "DELETE" });
+  }
+
+  async getIaCConfig(): Promise<IaCConfig> {
+    return this.fetch<IaCConfig>("/config/iac");
+  }
+
+  async setIaCConfig(backend: string): Promise<IaCConfig> {
+    return this.fetch<IaCConfig>("/config/iac", {
+      method: "PUT",
+      body: JSON.stringify({ backend }),
+    });
   }
 }
 
