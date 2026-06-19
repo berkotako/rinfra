@@ -69,7 +69,18 @@ import (
 	"github.com/rinfra/rinfra/internal/service"
 	"github.com/rinfra/rinfra/internal/store/memstore"
 	storepostgres "github.com/rinfra/rinfra/internal/store/postgres"
+	"github.com/rinfra/rinfra/internal/threatfeed"
 )
+
+// buildThreatFeed selects the advisory source. Default is the bundled snapshot
+// (no egress); set RINFRA_THREATFEED=cisa-kev to fetch the live CISA KEV catalog.
+func buildThreatFeed(log *slog.Logger) *threatfeed.Service {
+	if os.Getenv("RINFRA_THREATFEED") == "cisa-kev" {
+		log.Info("threat feed: live CISA KEV source")
+		return threatfeed.New(threatfeed.NewCISAKEVSource())
+	}
+	return threatfeed.New(threatfeed.BundledSource{})
+}
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -197,6 +208,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Auth:           svcAuth,
 		Projects:       svcProject,
 		AllowedOrigins: corsOriginsFromEnv(),
+		ThreatFeed:     buildThreatFeed(log),
 	}, log)
 
 	runServer(log, router, svcC2)
@@ -260,6 +272,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Auth:           svcAuth,
 		Projects:       svcProject,
 		AllowedOrigins: corsOriginsFromEnv(),
+		ThreatFeed:     buildThreatFeed(log),
 	}, log)
 
 	runServer(log, router, svcC2)

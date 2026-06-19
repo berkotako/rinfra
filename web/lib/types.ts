@@ -147,6 +147,27 @@ export interface Scenario {
   techniques: Technique[];
 }
 
+// ---------- Threat advisories (threat feed) ----------
+export interface SuggestedTTP {
+  attackId: string;
+  name: string;
+  tactic: string;
+  confidence: string; // high | medium | low
+}
+
+export interface Advisory {
+  id: string;
+  source: string;
+  title: string;
+  vendor: string;
+  product: string;
+  published: string;
+  summary: string;
+  url: string;
+  ransomware: boolean;
+  suggestedTtps: SuggestedTTP[];
+}
+
 // ---------- Coverage (ATT&CK rollup) — mirrors service.Coverage ----------
 export interface CoverageTechnique {
   attackID: string;
