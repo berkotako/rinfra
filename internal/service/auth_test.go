@@ -114,3 +114,48 @@ func TestAuth_ListUsersScoping(t *testing.T) {
 		t.Fatalf("operator should see only self, got %+v", opList)
 	}
 }
+
+// TestAuth_ChangePassword_SelfVerifiesCurrent verifies that a self-service
+// password change must present the correct current password, that an admin
+// reset does not, and that the new password is hashed (login works after).
+func TestAuth_ChangePassword_SelfVerifiesCurrent(t *testing.T) {
+	ctx := context.Background()
+	auth, _ := newAuth()
+
+	admin, err := auth.SeedAdmin(ctx, "admin")
+	if err != nil || admin == nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+
+	// Create an operator managed by the admin.
+	op, err := auth.CreateUser(ctx, *admin, domain.User{
+		Username: "op1", Role: domain.RoleOperator, ManagerID: admin.ID,
+	}, "op1pass")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// Self-change with the WRONG current password is rejected.
+	if err := auth.ChangePassword(ctx, op, op.ID, "wrong", "newpass1"); !errors.Is(err, service.ErrUnauthorized) {
+		t.Errorf("wrong current password: want ErrUnauthorized, got %v", err)
+	}
+	// Self-change with NO current password is rejected.
+	if err := auth.ChangePassword(ctx, op, op.ID, "", "newpass1"); !errors.Is(err, service.ErrValidation) {
+		t.Errorf("missing current password: want ErrValidation, got %v", err)
+	}
+	// Self-change with the correct current password succeeds and is hashed.
+	if err := auth.ChangePassword(ctx, op, op.ID, "op1pass", "newpass1"); err != nil {
+		t.Fatalf("self change: %v", err)
+	}
+	if _, _, err := auth.Login(ctx, "op1", "newpass1"); err != nil {
+		t.Errorf("login with new password: %v", err)
+	}
+
+	// An admin may reset another user's password without the current one.
+	if err := auth.ChangePassword(ctx, *admin, op.ID, "", "adminset1"); err != nil {
+		t.Fatalf("admin reset: %v", err)
+	}
+	if _, _, err := auth.Login(ctx, "op1", "adminset1"); err != nil {
+		t.Errorf("login after admin reset: %v", err)
+	}
+}
