@@ -8,6 +8,7 @@ import { getClient, isRestMode } from "../../lib/client";
 import { deployedC2FromNode, c2SupportsTactic, SCENARIOS } from "../../lib/data";
 import TechniqueDetail from "./TechniqueDetail";
 import ScenarioBuilder from "./ScenarioBuilder";
+import RunGantt from "./RunGantt";
 import type { NodeStatus, Technique, DeployedC2, Scenario, OperatorSession } from "../../lib/types";
 
 type StepStatus = "pending" | "running" | "done" | "detected" | "manual";
@@ -61,6 +62,10 @@ export default function EmulationScreen() {
   const [builderOpen, setBuilderOpen] = useState(false);
   const [editing, setEditing] = useState<Scenario | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Scenario | null>(null);
+  const [view, setView] = useState<"steps" | "timeline">("steps");
+  const [timeline, setTimeline] = useState<Record<number, { start: number; end?: number }>>({});
+  const [nowTick, setNowTick] = useState(0);
+  const runStartRef = useRef<number>(0);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const runIdRef = useRef<string | null>(null);
   const restMode = isRestMode();
@@ -135,8 +140,26 @@ export default function EmulationScreen() {
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setStepState(baseStepState());
+    setTimeline({});
     setRunning(false);
   };
+
+  // markStep updates a technique's status and records its run-timeline window
+  // (start on first "running", end on completion) for the Gantt view.
+  const markStep = useCallback((i: number, st: StepStatus) => {
+    setStepState((s) => ({ ...s, [i]: st }));
+    const elapsed = runStartRef.current ? Date.now() - runStartRef.current : 0;
+    setTimeline((tl) => {
+      const cur = tl[i];
+      if (st === "running") {
+        return cur?.start !== undefined ? tl : { ...tl, [i]: { start: elapsed } };
+      }
+      if (st === "done" || st === "detected") {
+        return { ...tl, [i]: { start: cur?.start ?? elapsed, end: elapsed } };
+      }
+      return tl;
+    });
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -145,12 +168,20 @@ export default function EmulationScreen() {
     };
   }, []);
 
+  // While running, tick so the Gantt bars grow live.
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setNowTick((t) => t + 1), 250);
+    return () => clearInterval(id);
+  }, [running]);
+
   // Re-derive the resting view whenever the scenario or C2 target changes.
   useEffect(() => {
     if (running) return;
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setStepState(baseStepState());
+    setTimeline({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenarioId, c2Id]);
 
@@ -170,7 +201,7 @@ export default function EmulationScreen() {
               status === "detected" ? "detected" :
               status === "running" ? "running" :
               "done";
-            setStepState((s) => ({ ...s, [idx]: st }));
+            markStep(idx, st);
           }
         } else if (status === "success" || status === "done" || status === "failed") {
           setRunning(false);
@@ -180,7 +211,7 @@ export default function EmulationScreen() {
       });
       return unsubscribe;
     },
-    [client, pushToast]
+    [client, pushToast, markStep]
   );
 
   // Polling fallback for REST mode: poll GET /runs/{id} every 2 s until done.
@@ -197,7 +228,7 @@ export default function EmulationScreen() {
                 r.status === "detected" ? "detected" :
                 r.status === "running" ? "running" :
                 "done";
-              setStepState((s) => ({ ...s, [idx]: st }));
+              markStep(idx, st);
             }
           }
           if (run.status !== "running") {
@@ -211,7 +242,7 @@ export default function EmulationScreen() {
       }, 2000);
       timers.current.push(interval as unknown as ReturnType<typeof setTimeout>);
     },
-    [client, pushToast]
+    [client, pushToast, markStep]
   );
 
   const run = () => {
@@ -219,6 +250,8 @@ export default function EmulationScreen() {
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setStepState(baseStepState());
+    setTimeline({});
+    runStartRef.current = Date.now();
     setRunning(true);
     const via = selectedC2 ? selectedC2.frameworkName : "auto-routed agents";
     pushToast(`Emulation started — ${scenario.name} via ${via}`, "info");
@@ -246,15 +279,11 @@ export default function EmulationScreen() {
       .filter(({ t }) => supports(t));
     runnable.forEach(({ i }, order) => {
       timers.current.push(
-        setTimeout(() => setStepState((s) => ({ ...s, [i]: "running" })), order * 1500 + 200)
+        setTimeout(() => markStep(i, "running"), order * 1500 + 200)
       );
       timers.current.push(
         setTimeout(
-          () =>
-            setStepState((s) => ({
-              ...s,
-              [i]: Math.random() < 0.28 ? "detected" : "done",
-            })),
+          () => markStep(i, Math.random() < 0.28 ? "detected" : "done"),
           order * 1500 + 1300
         )
       );
@@ -274,6 +303,12 @@ export default function EmulationScreen() {
   const detected = scenario.techniques.filter((_, i) => stepState[i] === "detected").length;
   const pct = runnableCount ? Math.round((done / runnableCount) * 100) : 0;
   const canRun = runnableCount > 0;
+
+  // Gantt time axis: the longest observed window, extended to "now" while a run
+  // is in flight (nowTick forces this to recompute on the live ticker).
+  void nowTick;
+  const maxEnd = Object.values(timeline).reduce((m, w) => Math.max(m, w.end ?? w.start), 0);
+  const ganttNowMs = running ? Math.max(maxEnd, Date.now() - runStartRef.current) : Math.max(maxEnd, 1);
 
   // Live infrastructure from actual topology state
   const liveNodes = nodes.filter((n) => n.status === "live");
@@ -390,30 +425,55 @@ export default function EmulationScreen() {
                     {scenario.desc}
                   </div>
                 </div>
-                {isCustom(scenario) && (
-                  <div style={{ display: "flex", gap: 6, flex: "none" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "none" }}>
+                  <div className="seg">
                     <button
-                      className="btn ghost sm"
-                      onClick={() => {
-                        setEditing(scenario);
-                        setBuilderOpen(true);
-                      }}
-                      disabled={running}
+                      className={view === "steps" ? "active" : ""}
+                      onClick={() => setView("steps")}
                     >
-                      <Icons.Sliders size={14} /> Edit
+                      Steps
                     </button>
                     <button
-                      className="btn ghost sm"
-                      onClick={() => setConfirmDelete(scenario)}
-                      disabled={running}
-                      title="Delete scenario"
+                      className={view === "timeline" ? "active" : ""}
+                      onClick={() => setView("timeline")}
                     >
-                      <Icons.Trash size={14} />
+                      Timeline
                     </button>
                   </div>
-                )}
+                  {isCustom(scenario) && (
+                    <>
+                      <button
+                        className="btn ghost sm"
+                        onClick={() => {
+                          setEditing(scenario);
+                          setBuilderOpen(true);
+                        }}
+                        disabled={running}
+                      >
+                        <Icons.Sliders size={14} /> Edit
+                      </button>
+                      <button
+                        className="btn ghost sm"
+                        onClick={() => setConfirmDelete(scenario)}
+                        disabled={running}
+                        title="Delete scenario"
+                      >
+                        <Icons.Trash size={14} />
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
-              <div style={{ padding: "8px 0" }}>
+              {view === "timeline" && (
+                <RunGantt
+                  techniques={scenario.techniques}
+                  stepState={stepState}
+                  timeline={timeline}
+                  nowMs={ganttNowMs}
+                  routeFor={routeFor}
+                />
+              )}
+              <div style={{ padding: "8px 0", display: view === "timeline" ? "none" : undefined }}>
                 {scenario.techniques.map((t, i) => {
                   const st: StepStatus = stepState[i] || "pending";
                   const m = ST_META[st];
