@@ -20,12 +20,12 @@ func TestAuth_SeedLoginAuthenticate(t *testing.T) {
 	ctx := context.Background()
 	auth, _ := newAuth()
 
-	u, err := auth.SeedAdmin(ctx)
+	u, err := auth.SeedAdmin(ctx, "admin")
 	if err != nil || u == nil {
 		t.Fatalf("seed admin: %v %v", err, u)
 	}
 	// Idempotent: second seed is a no-op.
-	if u2, err := auth.SeedAdmin(ctx); err != nil || u2 != nil {
+	if u2, err := auth.SeedAdmin(ctx, "admin"); err != nil || u2 != nil {
 		t.Fatalf("second seed should be no-op: %v %v", err, u2)
 	}
 

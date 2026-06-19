@@ -57,6 +57,10 @@ services:
       DATABASE_URL: postgres://rinfra:rinfra@postgres:5432/rinfra?sslmode=disable
       RINFRA_MASTER_KEY: ${RINFRA_MASTER_KEY}
       PULUMI_CONFIG_PASSPHRASE: ${PULUMI_CONFIG_PASSPHRASE:-rinfra-local}
+      # Bootstrap admin password for the local stack (change after first login).
+      # The server binary never defaults to admin/admin in production: without
+      # this variable no admin is seeded. Override it for a real deployment.
+      RINFRA_ADMIN_PASSWORD: ${RINFRA_ADMIN_PASSWORD:-admin}
     ports:
       - "8080:8080"
     restart: unless-stopped

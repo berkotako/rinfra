@@ -19,19 +19,28 @@ type Services struct {
 	AuditLog   audit.Reader
 	// Auth and Projects are optional: when Auth is nil the Authenticate
 	// middleware is a no-op and the user/project routes act on a synthetic
-	// admin (legacy / dev / test behavior).
+	// admin (legacy / dev / test behavior). Production wiring MUST set Auth.
 	Auth     *service.AuthService
 	Projects *service.ProjectService
+	// AllowedOrigins configures CORS. Empty defaults to the dev frontend
+	// (http://localhost:3000); "*" reflects any request Origin.
+	AllowedOrigins []string
 }
 
 // NewRouter builds and returns the chi router with all API v1 routes mounted.
 func NewRouter(svc Services, log *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
+	if svc.Auth == nil {
+		// Loud warning: in this mode every request is treated as an admin. It is
+		// intended only for hermetic tests and local dev — never production.
+		log.Warn("authentication is DISABLED (Services.Auth == nil); every request acts as admin — dev/test only")
+	}
+
 	// Global middleware.
 	r.Use(RequestID)
 	r.Use(OperatorIdentity)
-	r.Use(CORS)
+	r.Use(corsMiddleware(svc.AllowedOrigins))
 	r.Use(Authenticate(svc))
 	r.Use(Recoverer(log))
 	r.Use(RequestLogger(log))

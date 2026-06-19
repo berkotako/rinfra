@@ -216,17 +216,46 @@ func Recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// CORS adds permissive CORS headers for the dev frontend at localhost:3000.
-func CORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-RInfra-Operator, X-Request-ID, Authorization")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
+// corsMiddleware adds CORS headers for the configured allowed origins. Because
+// the API uses credentialed requests (Access-Control-Allow-Credentials: true),
+// the wildcard "*" cannot be echoed verbatim — instead the request's Origin is
+// reflected when it is allowed. A configured "*" reflects any Origin; otherwise
+// only listed origins are reflected (falling back to the first for non-browser
+// callers). Origins come from config (RINFRA_CORS_ORIGINS); default is the dev
+// frontend at http://localhost:3000.
+func corsMiddleware(allowed []string) func(http.Handler) http.Handler {
+	if len(allowed) == 0 {
+		allowed = []string{"http://localhost:3000"}
+	}
+	allowAny := false
+	set := make(map[string]bool, len(allowed))
+	for _, o := range allowed {
+		if o == "*" {
+			allowAny = true
 		}
-		next.ServeHTTP(w, r)
-	})
+		set[o] = true
+	}
+	fallback := allowed[0]
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			switch {
+			case allowAny && origin != "":
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			case set[origin]:
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			default:
+				w.Header().Set("Access-Control-Allow-Origin", fallback)
+			}
+			w.Header().Add("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-RInfra-Operator, X-Request-ID, Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
