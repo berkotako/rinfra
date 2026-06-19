@@ -60,6 +60,19 @@ func New(src Source) *Service {
 	return &Service{src: src, ttl: time.Hour}
 }
 
+// SourceNames lists the configured advisory sources, expanding a MultiSource
+// into its members so the UI can show exactly which resources are collected.
+func (s *Service) SourceNames() []string {
+	if ms, ok := s.src.(MultiSource); ok {
+		names := make([]string, 0, len(ms.Sources))
+		for _, m := range ms.Sources {
+			names = append(names, m.Name())
+		}
+		return names
+	}
+	return []string{s.src.Name()}
+}
+
 // List returns cached advisories, refreshing if the cache is empty or stale.
 func (s *Service) List(ctx context.Context) ([]Advisory, error) {
 	s.mu.Lock()

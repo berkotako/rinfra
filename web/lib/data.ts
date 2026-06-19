@@ -14,6 +14,7 @@ import type {
   DeployedC2,
   Coverage,
   Advisory,
+  SuggestedTTP,
 } from "./types";
 
 export const PROVIDERS: Record<CloudProvider, ProviderMeta> = {
@@ -989,6 +990,75 @@ export const BUNDLED_ADVISORIES: Advisory[] = [
     ],
   },
 ];
+
+// Active collection sources shown in the demo (the static Pages build runs the
+// mock, which serves the bundled snapshot). A real backend reports its own via
+// GET /advisories/sources.
+export const MOCK_ADVISORY_SOURCES = ["CISA KEV (bundled snapshot)"];
+
+// suggestTtps is a client-side port of the Go threatfeed.SuggestTTPs heuristic,
+// so a custom feed added in the demo maps to ATT&CK the same way the backend
+// would. It is a suggestion, not an authoritative mapping.
+type Rule = { kw: string[]; ttp: SuggestedTTP };
+const SUGGEST_RULES: Rule[] = [
+  { kw: ["remote code execution", "rce", "arbitrary code", "code execution"], ttp: { attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "high" } },
+  { kw: ["command injection", "os command"], ttp: { attackId: "T1059", name: "Command and Scripting Interpreter", tactic: "Execution", confidence: "high" } },
+  { kw: ["privilege escalation", "elevation of privilege", "escalate privileges"], ttp: { attackId: "T1068", name: "Exploitation for Privilege Escalation", tactic: "Privilege Escalation", confidence: "high" } },
+  { kw: ["authentication bypass", "auth bypass", "improper authentication"], ttp: { attackId: "T1078", name: "Valid Accounts", tactic: "Initial Access", confidence: "medium" } },
+  { kw: ["sql injection", "sqli"], ttp: { attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "high" } },
+  { kw: ["deserialization"], ttp: { attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "medium" } },
+  { kw: ["path traversal", "directory traversal", "arbitrary file"], ttp: { attackId: "T1083", name: "File and Directory Discovery", tactic: "Discovery", confidence: "low" } },
+  { kw: ["web shell", "webshell"], ttp: { attackId: "T1505.003", name: "Web Shell", tactic: "Persistence", confidence: "high" } },
+  { kw: ["ransomware", "encrypt"], ttp: { attackId: "T1486", name: "Data Encrypted for Impact", tactic: "Impact", confidence: "medium" } },
+  { kw: ["credential", "password disclosure", "information disclosure"], ttp: { attackId: "T1003", name: "OS Credential Dumping", tactic: "Credential Access", confidence: "low" } },
+];
+
+export function suggestTtps(text: string): SuggestedTTP[] {
+  const lower = text.toLowerCase();
+  const seen = new Set<string>();
+  const out: SuggestedTTP[] = [];
+  for (const r of SUGGEST_RULES) {
+    if (r.kw.some((k) => lower.includes(k)) && !seen.has(r.ttp.attackId)) {
+      seen.add(r.ttp.attackId);
+      out.push(r.ttp);
+    }
+  }
+  if (out.length === 0) {
+    out.push({ attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "low" });
+  }
+  return out;
+}
+
+// parseAdvisoryFeed parses advisories in RInfra's native Advisory JSON schema
+// ("our data style") — a top-level array or { "advisories": [...] } — mirroring
+// the Go threatfeed.ParseAdvisories parser. Missing suggestedTtps are derived
+// from the title+summary heuristic. Throws on malformed input.
+export function parseAdvisoryFeed(jsonText: string, sourceLabel: string): Advisory[] {
+  const parsed = JSON.parse(jsonText);
+  const rows: unknown[] = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray((parsed as { advisories?: unknown[] })?.advisories)
+      ? (parsed as { advisories: unknown[] }).advisories
+      : (() => { throw new Error("expected an array or { advisories: [...] }"); })();
+  return rows.map((raw, i) => {
+    const a = raw as Record<string, unknown>;
+    const title = String(a["title"] ?? "");
+    const summary = String(a["summary"] ?? "");
+    const given = Array.isArray(a["suggestedTtps"]) ? (a["suggestedTtps"] as SuggestedTTP[]) : [];
+    return {
+      id: String(a["id"] ?? `${sourceLabel}-${i + 1}`),
+      source: String(a["source"] ?? sourceLabel),
+      title,
+      vendor: String(a["vendor"] ?? ""),
+      product: String(a["product"] ?? ""),
+      published: String(a["published"] ?? ""),
+      summary,
+      url: String(a["url"] ?? ""),
+      ransomware: Boolean(a["ransomware"]),
+      suggestedTtps: given.length > 0 ? given : suggestTtps(`${title} ${summary}`),
+    } as Advisory;
+  });
+}
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {
   live: { label: "Live", cls: "ok" },

@@ -531,6 +531,16 @@ func (h *handlers) listAdvisories(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"advisories": adv})
 }
 
+// listAdvisorySources reports which advisory resources are configured, so the
+// UI can show exactly what is being collected.
+func (h *handlers) listAdvisorySources(w http.ResponseWriter, r *http.Request) {
+	if h.svc.ThreatFeed == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "threat feed is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": h.svc.ThreatFeed.SourceNames()})
+}
+
 // ---------- TTP library (operator-authored techniques) ----------
 
 func (h *handlers) listTechniques(w http.ResponseWriter, r *http.Request) {

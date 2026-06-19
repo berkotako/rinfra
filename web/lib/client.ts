@@ -31,6 +31,7 @@ import {
   buildImportedIndex,
   trmFromCounts,
   BUNDLED_ADVISORIES,
+  MOCK_ADVISORY_SOURCES,
 } from "./data";
 
 function mapAdvisoryFromApi(a: Record<string, unknown>): Advisory {
@@ -320,6 +321,8 @@ export interface RInfraClient {
 
   // Threat advisories (CISA KEV etc.) with suggested TTPs.
   listAdvisories(): Promise<Advisory[]>;
+  // Which advisory resources are configured/collected (display only).
+  listAdvisorySources(): Promise<string[]>;
 }
 
 export interface CreateUserParams {
@@ -702,6 +705,10 @@ export class MockClient implements RInfraClient {
 
   async listAdvisories(): Promise<Advisory[]> {
     return BUNDLED_ADVISORIES;
+  }
+
+  async listAdvisorySources(): Promise<string[]> {
+    return MOCK_ADVISORY_SOURCES;
   }
 }
 
@@ -1421,6 +1428,11 @@ export class RestClient implements RInfraClient {
   async listAdvisories(): Promise<Advisory[]> {
     const body = await this.fetch<{ advisories: Record<string, unknown>[] }>("/advisories");
     return (body.advisories ?? []).map(mapAdvisoryFromApi);
+  }
+
+  async listAdvisorySources(): Promise<string[]> {
+    const body = await this.fetch<{ sources: string[] }>("/advisories/sources");
+    return body.sources ?? [];
   }
 }
 
