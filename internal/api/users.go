@@ -27,7 +27,8 @@ type patchUserRequest struct {
 }
 
 type changePasswordRequest struct {
-	NewPassword string `json:"newPassword"`
+	NewPassword     string `json:"newPassword"`
+	CurrentPassword string `json:"currentPassword"`
 }
 
 // ---------- Handlers ----------
@@ -120,7 +121,7 @@ func (h *handlers) changePassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := h.svc.Auth.ChangePassword(r.Context(), actorUser(r.Context()), id, req.NewPassword); err != nil {
+	if err := h.svc.Auth.ChangePassword(r.Context(), actorUser(r.Context()), id, req.CurrentPassword, req.NewPassword); err != nil {
 		writeError(w, h.log, err)
 		return
 	}

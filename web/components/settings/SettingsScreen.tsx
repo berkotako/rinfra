@@ -381,7 +381,7 @@ function AccountSettings({
   onToast,
 }: {
   username: string;
-  updateAccount: (a: { currentPassword: string; newUsername?: string; newPassword?: string }) => string | null;
+  updateAccount: (a: { currentPassword: string; newUsername?: string; newPassword?: string }) => Promise<string | null>;
   logout: () => void;
   onToast: (m: string, k?: "ok" | "warn" | "info" | "danger") => void;
 }) {
@@ -392,7 +392,7 @@ function AccountSettings({
 
   useEffect(() => setNewUsername(username), [username]);
 
-  function onSave() {
+  async function onSave() {
     if (!currentPassword) {
       onToast("Enter your current password.", "warn");
       return;
@@ -401,7 +401,7 @@ function AccountSettings({
       onToast("New password and confirmation do not match.", "warn");
       return;
     }
-    const err = updateAccount({
+    const err = await updateAccount({
       currentPassword,
       newUsername: newUsername !== username ? newUsername : undefined,
       newPassword: newPassword || undefined,

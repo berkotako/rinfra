@@ -65,15 +65,17 @@ interface AuthState {
   /** End the current session. */
   logout: () => void;
   /**
-   * Mock-mode only: change the local admin username/password (Settings →
-   * Account). In REST mode account management lives in the Users screen, so
-   * this is a no-op that reports as much.
+   * Change the signed-in operator's account (Settings → Account). In REST mode
+   * a password change is sent to the backend (POST /users/{id}/password, which
+   * verifies the current password and bcrypt-hashes the new one); username
+   * changes are managed from the Users screen. In mock mode it updates the
+   * local demo account. Returns an error string or null on success.
    */
   updateAccount: (args: {
     currentPassword: string;
     newUsername?: string;
     newPassword?: string;
-  }) => string | null;
+  }) => Promise<string | null>;
 }
 
 const enc = (s: string): string => {
@@ -210,7 +212,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [rest]);
 
   const updateAccount = useCallback(
-    ({
+    async ({
       currentPassword,
       newUsername,
       newPassword,
@@ -218,9 +220,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       currentPassword: string;
       newUsername?: string;
       newPassword?: string;
-    }): string | null => {
+    }): Promise<string | null> => {
       if (rest) {
-        return "Account changes are managed from the Users screen.";
+        if (newUsername && newUsername !== user?.username) {
+          return "Username changes are managed from the Users screen.";
+        }
+        if (!newPassword) {
+          return "Enter a new password.";
+        }
+        if (!user?.id) {
+          return "Not signed in.";
+        }
+        try {
+          // The backend verifies currentPassword and bcrypt-hashes newPassword.
+          await getClient().changePassword(user.id, newPassword, currentPassword);
+          return null;
+        } catch (e) {
+          return e instanceof ApiError ? e.toastMessage() : "Could not change password.";
+        }
       }
       const acct = loadAccount();
       if (enc(currentPassword) !== acct.secret) {
@@ -242,7 +259,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser((prev) => (prev ? { ...prev, username: nextUsername, displayName: nextUsername } : prev));
       return null;
     },
-    [rest]
+    [rest, user]
   );
 
   return (

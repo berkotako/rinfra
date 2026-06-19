@@ -225,7 +225,7 @@ export interface RInfraClient {
   listUsers(): Promise<User[]>;
   createUser(params: CreateUserParams): Promise<User>;
   updateUser(id: string, patch: UpdateUserParams): Promise<User>;
-  changePassword(id: string, newPassword: string): Promise<void>;
+  changePassword(id: string, newPassword: string, currentPassword?: string): Promise<void>;
 
   // Projects & membership
   listProjects(): Promise<Project[]>;
@@ -955,10 +955,10 @@ export class RestClient implements RInfraClient {
     return mapUserFromApi(body.user ?? {});
   }
 
-  async changePassword(id: string, newPassword: string): Promise<void> {
+  async changePassword(id: string, newPassword: string, currentPassword?: string): Promise<void> {
     await this.fetch<undefined>(`/users/${id}/password`, {
       method: "POST",
-      body: JSON.stringify({ newPassword }),
+      body: JSON.stringify({ newPassword, currentPassword: currentPassword ?? "" }),
     });
   }
 

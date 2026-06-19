@@ -312,8 +312,11 @@ func (s *AuthService) UpdateUser(ctx context.Context, actor domain.User, id stri
 
 // ChangePassword sets a new password for targetID. A user may always change
 // their own password; an admin may change anyone's; a lead may change the
-// password of operators they manage.
-func (s *AuthService) ChangePassword(ctx context.Context, actor domain.User, targetID, newPassword string) error {
+// password of operators they manage. When a user changes their OWN password,
+// currentPassword must be supplied and verified against the stored hash
+// (privileged resets by an admin/lead do not require it). The new password is
+// hashed with bcrypt before storage.
+func (s *AuthService) ChangePassword(ctx context.Context, actor domain.User, targetID, currentPassword, newPassword string) error {
 	if newPassword == "" {
 		return fmt.Errorf("%w: password is required", ErrValidation)
 	}
@@ -322,11 +325,22 @@ func (s *AuthService) ChangePassword(ctx context.Context, actor domain.User, tar
 		return err
 	}
 
-	allowed := actor.ID == targetID ||
+	isSelf := actor.ID == targetID
+	allowed := isSelf ||
 		actor.Role == domain.RoleAdmin ||
 		(actor.Role == domain.RoleLead && target.ManagerID == actor.ID)
 	if !allowed {
 		return fmt.Errorf("%w: cannot change password for user %s", ErrUnauthorized, targetID)
+	}
+
+	// Self-service change requires confirming the current password.
+	if isSelf {
+		if currentPassword == "" {
+			return fmt.Errorf("%w: current password is required", ErrValidation)
+		}
+		if bcrypt.CompareHashAndPassword([]byte(target.PasswordHash), []byte(currentPassword)) != nil {
+			return fmt.Errorf("%w: current password is incorrect", ErrUnauthorized)
+		}
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
