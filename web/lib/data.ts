@@ -941,49 +941,52 @@ export function buildImportedIndex(): { scenario: Scenario; techniques: Techniqu
   };
 }
 
-// Bundled threat advisories for the demo (mirrors the Go bundled source). The
-// real backend serves the live CISA KEV catalog when RINFRA_THREATFEED=cisa-kev.
+// Bundled threat advisories for the demo (mirrors the Go bundled source). These
+// are real entries from the CISA Known Exploited Vulnerabilities catalog
+// (snapshot 2026-06-18); the backend serves the live catalog when
+// RINFRA_THREATFEED=cisa-kev. The suggestedTtps mirror the server's heuristic
+// keyword mapping so the static demo matches the real /advisories response.
 export const BUNDLED_ADVISORIES: Advisory[] = [
   {
-    id: "CVE-2026-1041", source: "CISA KEV", title: "Acme Edge Gateway Remote Code Execution",
-    vendor: "Acme", product: "Edge Gateway", published: "2026-06-10",
-    summary: "Unauthenticated remote code execution in the management API allows arbitrary command execution.",
-    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-1041", ransomware: false,
+    id: "CVE-2026-20253", source: "CISA KEV", title: "Splunk Enterprise Missing Authentication for Critical Function Vulnerability",
+    vendor: "Splunk", product: "Enterprise", published: "2026-06-18",
+    summary: "Splunk Enterprise contains a missing authentication for critical function vulnerability which could allow an unauthenticated user to create or truncate arbitrary files through a PostgreSQL sidecar service endpoint.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-20253", ransomware: false,
+    suggestedTtps: [{ attackId: "T1083", name: "File and Directory Discovery", tactic: "Discovery", confidence: "low" }],
+  },
+  {
+    id: "CVE-2026-54420", source: "CISA KEV", title: "LiteSpeed cPanel Plugin UNIX Symbolic Link (Symlink) Following Vulnerability",
+    vendor: "LiteSpeed", product: "cPanel Plugin", published: "2026-06-15",
+    summary: "LiteSpeed cPanel plugin contains a UNIX symbolic link (Symlink) following vulnerability that could allow a user with FTP or web shell access on a shared hosting server running CloudLinux/CageFS.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-54420", ransomware: false,
+    suggestedTtps: [{ attackId: "T1505.003", name: "Web Shell", tactic: "Persistence", confidence: "high" }],
+  },
+  {
+    id: "CVE-2026-10520", source: "CISA KEV", title: "Ivanti Sentry OS Command Injection Vulnerability",
+    vendor: "Ivanti", product: "Sentry", published: "2026-06-11",
+    summary: "Ivanti Sentry (formerly known as MobileIron Sentry) contains an OS command injection vulnerability which could allow a remote unauthenticated user to achieve root-level remote code execution.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-10520", ransomware: false,
+    suggestedTtps: [
+      { attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "high" },
+      { attackId: "T1059", name: "Command and Scripting Interpreter", tactic: "Execution", confidence: "high" },
+    ],
+  },
+  {
+    id: "CVE-2026-11645", source: "CISA KEV", title: "Google Chromium V8 Out-of-Bounds Read and Write Vulnerability",
+    vendor: "Google", product: "Chromium V8", published: "2026-06-09",
+    summary: "Google Chromium V8 out-of-bounds read and write vulnerability that could allow a remote attacker to execute arbitrary code inside a sandbox via a crafted HTML page, affecting Chromium-based browsers (Chrome, Edge, Opera).",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-11645", ransomware: false,
     suggestedTtps: [{ attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "high" }],
   },
   {
-    id: "CVE-2026-0907", source: "CISA KEV", title: "Globex VPN Authentication Bypass",
-    vendor: "Globex", product: "SecureConnect VPN", published: "2026-06-08",
-    summary: "Authentication bypass permits access with valid accounts without credentials.",
-    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0907", ransomware: false,
-    suggestedTtps: [{ attackId: "T1078", name: "Valid Accounts", tactic: "Initial Access", confidence: "medium" }],
-  },
-  {
-    id: "CVE-2026-0455", source: "CISA KEV", title: "Initech Mail Server Web Shell Upload",
-    vendor: "Initech", product: "Mail Server", published: "2026-06-03",
-    summary: "Arbitrary file upload leads to web shell deployment and persistence.",
-    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0455", ransomware: true,
+    id: "CVE-2026-50751", source: "CISA KEV", title: "Check Point Security Gateway Improper Authentication Vulnerability",
+    vendor: "Check Point", product: "Security Gateway", published: "2026-06-08",
+    summary: "Check Point Security Gateway contains an improper authentication vulnerability in IKEv1 key exchange that could allow an unauthenticated remote attacker to bypass user authentication and establish a remote access VPN connection without a valid user password.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-50751", ransomware: true,
     suggestedTtps: [
-      { attackId: "T1505.003", name: "Web Shell", tactic: "Persistence", confidence: "high" },
+      { attackId: "T1078", name: "Valid Accounts", tactic: "Initial Access", confidence: "medium" },
       { attackId: "T1486", name: "Data Encrypted for Impact", tactic: "Impact", confidence: "medium" },
     ],
-  },
-  {
-    id: "CVE-2026-0188", source: "CISA KEV", title: "Umbrella ERP SQL Injection",
-    vendor: "Umbrella", product: "ERP", published: "2026-05-29",
-    summary: "SQL injection in the reporting module exposes credentials and enables data theft.",
-    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0188", ransomware: false,
-    suggestedTtps: [
-      { attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "high" },
-      { attackId: "T1003", name: "OS Credential Dumping", tactic: "Credential Access", confidence: "low" },
-    ],
-  },
-  {
-    id: "CVE-2026-0042", source: "CISA KEV", title: "Hooli Kernel Privilege Escalation",
-    vendor: "Hooli", product: "OS Kernel", published: "2026-05-21",
-    summary: "Local privilege escalation via improper handling allows elevation of privilege to SYSTEM.",
-    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0042", ransomware: false,
-    suggestedTtps: [{ attackId: "T1068", name: "Exploitation for Privilege Escalation", tactic: "Privilege Escalation", confidence: "high" }],
   },
 ];
 

@@ -3,7 +3,9 @@ package threatfeed
 import "context"
 
 // BundledSource serves a small, static set of advisories so the demo and CI are
-// hermetic (no network). It mirrors the shape of real CISA KEV entries.
+// hermetic (no network). These are real entries drawn from the CISA Known
+// Exploited Vulnerabilities catalog (snapshot 2026-06-18); set
+// RINFRA_THREATFEED=cisa-kev to pull the live catalog instead.
 type BundledSource struct{}
 
 func (BundledSource) Name() string { return "CISA KEV (bundled snapshot)" }
@@ -15,34 +17,34 @@ func (BundledSource) Fetch(_ context.Context) ([]Advisory, error) {
 func bundledAdvisories() []Advisory {
 	raw := []Advisory{
 		{
-			ID: "CVE-2026-1041", Source: "CISA KEV", Title: "Acme Edge Gateway Remote Code Execution",
-			Vendor: "Acme", Product: "Edge Gateway", Published: "2026-06-10",
-			Summary: "Unauthenticated remote code execution in the management API allows arbitrary command execution.",
-			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-1041",
+			ID: "CVE-2026-20253", Source: "CISA KEV", Title: "Splunk Enterprise Missing Authentication for Critical Function Vulnerability",
+			Vendor: "Splunk", Product: "Enterprise", Published: "2026-06-18",
+			Summary: "Splunk Enterprise contains a missing authentication for critical function vulnerability which could allow an unauthenticated user to create or truncate arbitrary files through a PostgreSQL sidecar service endpoint.",
+			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-20253",
 		},
 		{
-			ID: "CVE-2026-0907", Source: "CISA KEV", Title: "Globex VPN Authentication Bypass",
-			Vendor: "Globex", Product: "SecureConnect VPN", Published: "2026-06-08",
-			Summary: "Authentication bypass permits access with valid accounts without credentials.",
-			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-0907",
+			ID: "CVE-2026-54420", Source: "CISA KEV", Title: "LiteSpeed cPanel Plugin UNIX Symbolic Link (Symlink) Following Vulnerability",
+			Vendor: "LiteSpeed", Product: "cPanel Plugin", Published: "2026-06-15",
+			Summary: "LiteSpeed cPanel plugin contains a UNIX symbolic link (Symlink) following vulnerability that could allow a user with FTP or web shell access on a shared hosting server running CloudLinux/CageFS.",
+			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-54420",
 		},
 		{
-			ID: "CVE-2026-0455", Source: "CISA KEV", Title: "Initech Mail Server Web Shell Upload",
-			Vendor: "Initech", Product: "Mail Server", Published: "2026-06-03",
-			Summary: "Arbitrary file upload leads to web shell deployment and persistence.",
-			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-0455", Ransomware: true,
+			ID: "CVE-2026-10520", Source: "CISA KEV", Title: "Ivanti Sentry OS Command Injection Vulnerability",
+			Vendor: "Ivanti", Product: "Sentry", Published: "2026-06-11",
+			Summary: "Ivanti Sentry (formerly known as MobileIron Sentry) contains an OS command injection vulnerability which could allow a remote unauthenticated user to achieve root-level remote code execution.",
+			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-10520",
 		},
 		{
-			ID: "CVE-2026-0188", Source: "CISA KEV", Title: "Umbrella ERP SQL Injection",
-			Vendor: "Umbrella", Product: "ERP", Published: "2026-05-29",
-			Summary: "SQL injection in the reporting module exposes credentials and enables data theft.",
-			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-0188",
+			ID: "CVE-2026-11645", Source: "CISA KEV", Title: "Google Chromium V8 Out-of-Bounds Read and Write Vulnerability",
+			Vendor: "Google", Product: "Chromium V8", Published: "2026-06-09",
+			Summary: "Google Chromium V8 out-of-bounds read and write vulnerability that could allow a remote attacker to execute arbitrary code inside a sandbox via a crafted HTML page, affecting Chromium-based browsers (Chrome, Edge, Opera).",
+			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-11645",
 		},
 		{
-			ID: "CVE-2026-0042", Source: "CISA KEV", Title: "Hooli Kernel Privilege Escalation",
-			Vendor: "Hooli", Product: "OS Kernel", Published: "2026-05-21",
-			Summary: "Local privilege escalation via improper handling allows elevation of privilege to SYSTEM.",
-			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-0042",
+			ID: "CVE-2026-50751", Source: "CISA KEV", Title: "Check Point Security Gateway Improper Authentication Vulnerability",
+			Vendor: "Check Point", Product: "Security Gateway", Published: "2026-06-08",
+			Summary: "Check Point Security Gateway contains an improper authentication vulnerability in IKEv1 key exchange that could allow an unauthenticated remote attacker to bypass user authentication and establish a remote access VPN connection without a valid user password.",
+			URL:     "https://nvd.nist.gov/vuln/detail/CVE-2026-50751", Ransomware: true,
 		},
 	}
 	for i := range raw {
