@@ -167,6 +167,11 @@ export interface Coverage {
   exercisedCount: number;
   executedCount: number;
   validatedCount: number;
+  // Threat Resilience Metric: % of exercised techniques that "passed" (were
+  // detected/blocked by the defenders). SRA-style benchmarked ATT&CK alignment.
+  trm: number;
+  // Historical TRM trend (e.g. quarterly purple-team runs), oldest → newest.
+  trmTrend: { label: string; trm: number }[];
 }
 
 // ---------- Users, roles & projects ----------
