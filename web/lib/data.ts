@@ -627,7 +627,7 @@ export const C2_OPERATOR_ACCESS: Record<string, C2AccessSpec> = {
     protocol: "grpc-mtls",
     port: 31337,
     mode: "live",
-    liveClient: "gRPC operator API (mTLS)",
+    liveClient: "gRPC · mTLS",
     instructions:
       "Fetch the operator .cfg from the teamserver, open the tunnel, then `sliver-client import <cfg>` — it reaches the multiplayer listener at 127.0.0.1:31337 through the tunnel.",
   },
@@ -636,7 +636,7 @@ export const C2_OPERATOR_ACCESS: Record<string, C2AccessSpec> = {
     protocol: "web-ui",
     port: 7443,
     mode: "live",
-    liveClient: "GraphQL scripting API",
+    liveClient: "GraphQL API",
     instructions:
       "Open the tunnel, then browse https://127.0.0.1:7443 and log in with the operator credentials set at install. Drive tasks from the UI.",
   },
@@ -654,7 +654,7 @@ export const C2_OPERATOR_ACCESS: Record<string, C2AccessSpec> = {
     protocol: "tcp",
     port: 8443,
     mode: "live",
-    liveClient: "your operator surface",
+    liveClient: "custom API",
     instructions:
       "Open the tunnel and connect your client to the operator port you defined for this framework.",
   },
@@ -663,7 +663,7 @@ export const C2_OPERATOR_ACCESS: Record<string, C2AccessSpec> = {
     protocol: "tcp",
     port: 40056,
     mode: "scripted",
-    liveClient: "scripted operator API",
+    liveClient: "scripted API",
     instructions:
       "Open the tunnel, then connect the Havoc client to 127.0.0.1:40056. Some emulation steps are scripted; the rest are driven by hand.",
   },
@@ -853,6 +853,91 @@ export function buildMockCoverage(engagementId: string): Coverage {
 // that passed / were validated) from a coverage rollup's counts.
 export function trmFromCounts(exercised: number, validated: number): number {
   return exercised > 0 ? Math.round((validated / exercised) * 100) : 0;
+}
+
+// SAMPLE_INDEX_YAML is a small, real SRA-format index document (the
+// SecurityRiskAdvisors/indexes "merged YAML" shape) used to pre-fill the import
+// modal. The Go backend parses this for real; the mock client shortcuts to the
+// equivalent result below.
+export const SAMPLE_INDEX_YAML = `metadata:
+  prefix: SRA
+  bundle:
+    name: ATT&CK Index 2026 (imported)
+    version: 1.0.0
+Defense Evasion:
+  - name: Disable Windows Firewall
+    description: Disable the Windows Firewall using netsh.exe to ease C2 egress.
+    platforms: [windows]
+    guidance:
+      - "CMD> netsh advfirewall set allprofiles state off"
+    detect: ["Firewall state change via netsh"]
+    metadata: { id: fa619a73, tid: T1562.004, tactic: TA0005 }
+Credential Access:
+  - name: OS Credential Dumping: LSASS Memory
+    description: Read LSASS memory to extract credentials and tickets.
+    guidance:
+      - "PS> rundll32 comsvcs.dll, MiniDump <lsass_pid> C:\\\\Windows\\\\Temp\\\\l.dmp full"
+    metadata: { id: 2b7d461e, tid: T1003.001, tactic: TA0006 }
+Execution:
+  - name: PowerShell
+    description: Execute commands and download cradles via powershell.exe.
+    guidance:
+      - "PS> powershell -nop -w hidden -enc <base64>"
+    metadata: { id: a21bb3e0, tid: T1059.001, tactic: TA0002 }
+Discovery:
+  - name: Virtualization/Sandbox Evasion
+    description: Check for analysis/sandbox artifacts before detonating.
+    guidance:
+      - "CMD> wmic computersystem get model,manufacturer"
+    metadata: { id: 9c1f55aa, tid: T1497, tactic: TA0007 }
+Impact:
+  - name: Inhibit System Recovery
+    description: Delete shadow copies so encrypted data cannot be restored.
+    guidance:
+      - "CMD> vssadmin delete shadows /all /quiet"
+    metadata: { id: f6a7b8c9, tid: T1490, tactic: TA0040 }
+`;
+
+// buildImportedIndex returns the parsed equivalent of SAMPLE_INDEX_YAML for the
+// mock client (so the static demo shows a working import without a YAML parser).
+export function buildImportedIndex(): { scenario: Scenario; techniques: Technique[] } {
+  const techniques: Technique[] = [
+    {
+      id: "T1562.004", name: "Disable Windows Firewall", tactic: "Defense Evasion",
+      description: "Disable the Windows Firewall using netsh.exe to ease C2 egress.",
+      commands: ["netsh advfirewall set allprofiles state off"],
+    },
+    {
+      id: "T1003.001", name: "OS Credential Dumping: LSASS Memory", tactic: "Credential Access",
+      description: "Read LSASS memory to extract credentials and tickets.",
+      commands: ["rundll32 comsvcs.dll, MiniDump <lsass_pid> C:\\Windows\\Temp\\l.dmp full"],
+    },
+    {
+      id: "T1059.001", name: "PowerShell", tactic: "Execution",
+      description: "Execute commands and download cradles via powershell.exe.",
+      commands: ["powershell -nop -w hidden -enc <base64>"],
+    },
+    {
+      id: "T1497", name: "Virtualization/Sandbox Evasion", tactic: "Discovery",
+      description: "Check for analysis/sandbox artifacts before detonating.",
+      commands: ["wmic computersystem get model,manufacturer"],
+    },
+    {
+      id: "T1490", name: "Inhibit System Recovery", tactic: "Impact",
+      description: "Delete shadow copies so encrypted data cannot be restored.",
+      commands: ["vssadmin delete shadows /all /quiet"],
+    },
+  ];
+  return {
+    scenario: {
+      id: "custom-index-" + Date.now().toString(36),
+      name: "ATT&CK Index 2026 (imported)",
+      actor: "Benchmark · imported index",
+      desc: `Imported benchmark index — ${techniques.length} techniques across the year's top threat actors.`,
+      techniques,
+    },
+    techniques,
+  };
 }
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {

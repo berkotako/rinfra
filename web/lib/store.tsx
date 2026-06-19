@@ -67,6 +67,7 @@ interface StoreState {
   addScenario: (s: Scenario) => Promise<Scenario>;
   updateScenario: (s: Scenario) => Promise<Scenario>;
   deleteScenario: (id: string) => Promise<void>;
+  importIndex: (yaml: string) => Promise<Scenario>;
 
   // TTP library — built-in techniques plus operator-authored ones (CRUD).
   techniques: Technique[];
@@ -387,6 +388,26 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [rest, client, pushToast]
   );
 
+  const importIndex = useCallback(
+    async (yaml: string): Promise<Scenario> => {
+      const sc = await client.importIndex(yaml);
+      setCustomScenarios((list) => [...list, sc]);
+      if (rest) {
+        // Backend created the TTP-library entries; refresh them.
+        client.listTechniques().then(setCustomTechniques).catch(() => undefined);
+      } else {
+        // Mock: merge the index's techniques into the library (dedupe by id).
+        setCustomTechniques((list) => {
+          const have = new Set([...TECHNIQUE_LIBRARY.map((t) => t.id), ...list.map((t) => t.id)]);
+          return [...list, ...sc.techniques.filter((t) => !have.has(t.id))];
+        });
+      }
+      pushToast(`Imported ${sc.name}`, "ok");
+      return sc;
+    },
+    [rest, client, pushToast]
+  );
+
   // REST mode: load operator-authored scenarios (those not in the built-in set).
   useEffect(() => {
     if (!rest) return;
@@ -468,6 +489,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         addScenario,
         updateScenario,
         deleteScenario,
+        importIndex,
         techniques,
         addTechnique,
         updateTechnique,

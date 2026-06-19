@@ -27,6 +27,7 @@ import {
   C2_OPERATOR_ACCESS,
   deployedC2FromNode,
   buildMockCoverage,
+  buildImportedIndex,
   trmFromCounts,
 } from "./data";
 
@@ -274,6 +275,7 @@ export interface RInfraClient {
   // Scenarios & runs
   listScenarios(): Promise<Scenario[]>;
   createScenario(scenario: Scenario): Promise<Scenario>;
+  importIndex(yaml: string): Promise<Scenario>;
   updateScenario(scenario: Scenario): Promise<Scenario>;
   deleteScenario(id: string): Promise<void>;
   startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }>;
@@ -605,6 +607,13 @@ export class MockClient implements RInfraClient {
   async createScenario(scenario: Scenario): Promise<Scenario> {
     // Mock mode: echo back; the store keeps it session-local.
     return scenario;
+  }
+
+  async importIndex(yaml: string): Promise<Scenario> {
+    // Mock mode: the static demo can't run the Go YAML parser, so return the
+    // bundled sample index's parsed equivalent (the real backend parses uploads).
+    void yaml;
+    return buildImportedIndex().scenario;
   }
 
   async updateScenario(scenario: Scenario): Promise<Scenario> {
@@ -1247,6 +1256,15 @@ export class RestClient implements RInfraClient {
           tactic: t.tactic,
         })),
       }),
+    });
+    return mapScenarioFromApi(body.scenario ?? {});
+  }
+
+  async importIndex(yaml: string): Promise<Scenario> {
+    const body = await this.fetch<{ scenario: Record<string, unknown> }>("/scenarios/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-yaml" },
+      body: yaml,
     });
     return mapScenarioFromApi(body.scenario ?? {});
   }

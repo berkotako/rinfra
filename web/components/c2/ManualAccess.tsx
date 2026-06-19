@@ -5,13 +5,10 @@ import { useStore } from "../../lib/store";
 import WebShell from "./WebShell";
 import type { DeployedC2, OperatorMode } from "../../lib/types";
 
-const MODE_PILL: Record<
-  OperatorMode,
-  { cls: string; icon: string; label: (liveClient: string) => string }
-> = {
-  live: { cls: "ok", icon: "Bolt", label: (lc) => `Live operator API · ${lc}` },
-  scripted: { cls: "info", icon: "Terminal", label: (lc) => `Scripted · ${lc}` },
-  manual: { cls: "", icon: "Power", label: () => "Manual only — human operates" },
+const MODE_PILL: Record<OperatorMode, { cls: string; icon: string; label: string }> = {
+  live: { cls: "ok", icon: "Bolt", label: "Live operator API" },
+  scripted: { cls: "info", icon: "Terminal", label: "Scripted automation" },
+  manual: { cls: "", icon: "Power", label: "Manual only" },
 };
 
 export function CopyButton({ text }: { text: string }) {
@@ -45,12 +42,17 @@ export function OperatorStatus({ d }: { d: DeployedC2 }) {
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, flexWrap: "wrap" }}>
         <span className={"pill " + m.cls}>
-          <MIco size={12} /> {m.label(d.liveClient)}
+          <MIco size={12} /> {m.label}
         </span>
-        {automated && (
-          <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>Automated emulation available</span>
+        {automated && d.liveClient && (
+          <span className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>{d.liveClient}</span>
         )}
       </div>
+      {automated && (
+        <div style={{ fontSize: 11.5, color: "var(--text-3)", marginBottom: 8 }}>
+          RInfra can drive emulation through this teamserver. Active agents:
+        </div>
+      )}
       {automated &&
         (d.sessions.length > 0 ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
