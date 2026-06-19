@@ -120,6 +120,10 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		// Threat advisories (CISA KEV etc.) with suggested TTPs.
 		r.Get("/advisories", h.listAdvisories)
 		r.Get("/advisories/sources", h.listAdvisorySources)
+		// Operator-managed advisory feeds (persisted; collected with base sources).
+		r.Get("/advisories/feeds", h.listAdvisoryFeeds)
+		r.Post("/advisories/feeds", h.createAdvisoryFeed)
+		r.Delete("/advisories/feeds/{id}", h.deleteAdvisoryFeed)
 
 		// Scenarios — built-in catalog + operator-authored (full CRUD on authored).
 		r.Get("/scenarios", h.listScenarios)

@@ -242,14 +242,20 @@ is configurable** via **`RINFRA_THREATFEED`** (comma-separated source keys):
 - `cisa-kev` — the live CISA Known Exploited Vulnerabilities catalog (needs outbound egress).
 
 Bring your own feeds in RInfra's native **Advisory JSON schema** ("our data style")
-— internal threat intel, a partner advisory mirror, a curated list — without
-writing code: emit the documented shape and point a source at it with
-**`RINFRA_THREATFEED_URLS`** (http(s) endpoints) or **`RINFRA_THREATFEED_FILES`**
-(local files). All selected sources are merged (de-duplicated by id, newest
-first); a dead feed never blanks the list. See
-[`config/threatfeed.example.json`](config/threatfeed.example.json) for the schema —
-each advisory only needs `id`/`title`/`summary`, and the ATT&CK `suggestedTtps`
-are auto-derived from a keyword heuristic when omitted (or hand-mapped).
+— internal threat intel, a partner advisory mirror, a curated list. Two ways:
+
+- **At startup (static):** **`RINFRA_THREATFEED_URLS`** (http(s) endpoints) or
+  **`RINFRA_THREATFEED_FILES`** (local files).
+- **From the console (persistent):** **Settings → Threat feed** adds feeds (a
+  remote URL or an inline JSON document) that are **stored in Postgres**
+  (`advisory_feeds` table) and collected on every refresh — no restart, no code.
+  Backed by `GET/POST/DELETE /api/v1/advisories/feeds`; `GET /advisories/sources`
+  reports everything currently collected.
+
+All sources are merged (de-duplicated by id, newest first); a dead feed never
+blanks the list. See [`config/threatfeed.example.json`](config/threatfeed.example.json)
+for the schema — each advisory only needs `id`/`title`/`summary`, and the ATT&CK
+`suggestedTtps` are auto-derived from a keyword heuristic when omitted (or hand-mapped).
 
 | Role | Capabilities |
 |------|--------------|

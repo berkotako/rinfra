@@ -168,6 +168,27 @@ export interface Advisory {
   suggestedTtps: SuggestedTTP[];
 }
 
+// AdvisoryFeed is an operator-managed advisory source (persisted server-side),
+// collected alongside the env-configured base sources. Managed from Settings.
+export interface AdvisoryFeed {
+  id: string;
+  name: string;
+  kind: "url" | "inline";
+  url?: string;
+  inline?: string;
+  enabled: boolean;
+  createdAt: string;
+  createdBy?: string;
+}
+
+// NewAdvisoryFeed is the input for creating a feed.
+export interface NewAdvisoryFeed {
+  name: string;
+  kind: "url" | "inline";
+  url?: string;
+  inline?: string;
+}
+
 // ---------- Coverage (ATT&CK rollup) — mirrors service.Coverage ----------
 export interface CoverageTechnique {
   attackID: string;
