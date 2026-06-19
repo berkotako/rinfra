@@ -501,6 +501,35 @@ func (s *AdvisoryFeedStore) DeleteFeed(_ context.Context, id string) error {
 	return nil
 }
 
+// --- SettingStore ---
+
+// SettingStore is the in-memory implementation of store.SettingStore.
+type SettingStore struct {
+	mu sync.RWMutex
+	kv map[string]string
+}
+
+// NewSettingStore returns an empty SettingStore.
+func NewSettingStore() *SettingStore {
+	return &SettingStore{kv: make(map[string]string)}
+}
+
+var _ store.SettingStore = (*SettingStore)(nil)
+
+func (s *SettingStore) Get(_ context.Context, key string) (string, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.kv[key]
+	return v, ok, nil
+}
+
+func (s *SettingStore) Set(_ context.Context, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kv[key] = value
+	return nil
+}
+
 // --- CredentialStore ---
 
 type credKey struct{ engagementID, provider string }

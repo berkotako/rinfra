@@ -63,6 +63,13 @@ type UserScenarioStore interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// SettingStore is a small key/value store for server-wide settings (e.g. the
+// selected IaC backend). Values are opaque strings.
+type SettingStore interface {
+	Get(ctx context.Context, key string) (value string, ok bool, err error)
+	Set(ctx context.Context, key, value string) error
+}
+
 // UserTechniqueStore persists operator-authored TTPs (techniques) for the TTP
 // library, keyed by their ATT&CK id. Commands are stored as a JSON document.
 type UserTechniqueStore interface {

@@ -62,15 +62,22 @@ const CLOUD_FIELDS: Record<CloudProvider, FieldSpec[]> = {
 
 const CLOUD_ORDER: CloudProvider[] = ["aws", "gcp", "azure", "digitalocean"];
 
-type SectionId = "credentials" | "account" | "threatfeed" | "appearance" | "connection";
+type SectionId = "credentials" | "infrastructure" | "account" | "threatfeed" | "appearance" | "connection";
 
 const SECTIONS: { id: SectionId; label: string; icon: string }[] = [
   { id: "credentials", label: "Cloud credentials", icon: "Lock" },
+  { id: "infrastructure", label: "Infrastructure", icon: "Network" },
   { id: "account", label: "Account", icon: "User" },
   { id: "threatfeed", label: "Threat feed", icon: "Activity" },
   { id: "appearance", label: "Appearance", icon: "Sliders" },
   { id: "connection", label: "Connection", icon: "Cloud" },
 ];
+
+// Display metadata for the IaC backends.
+const IAC_META: Record<string, { label: string; desc: string }> = {
+  pulumi: { label: "Pulumi", desc: "Programmatic Go SDK via the embedded Automation API. The default — no external CLI workflow." },
+  terraform: { label: "Terraform", desc: "Generates Terraform JSON and drives the terraform CLI. Requires the terraform binary on the server's PATH." },
+};
 
 // Local marker that a provider has creds configured (the secret itself is never
 // persisted in the browser — only that it was saved, for the status badge).
@@ -88,7 +95,7 @@ function loadConfigured(): Record<string, boolean> {
 export default function SettingsScreen() {
   const { pushToast, activeEngagement, preferences, setTheme, setAccent, setNodeStyle } =
     useStore();
-  const { username, updateAccount, logout } = useAuth();
+  const { username, role, updateAccount, logout } = useAuth();
 
   const [section, setSection] = useState<SectionId>("credentials");
 
@@ -131,6 +138,7 @@ export default function SettingsScreen() {
             {section === "account" && (
               <AccountSettings username={username} updateAccount={updateAccount} logout={logout} onToast={pushToast} />
             )}
+            {section === "infrastructure" && <IaCSettings role={role} onToast={pushToast} />}
             {section === "threatfeed" && <ThreatFeedSettings onToast={pushToast} />}
             {section === "appearance" && (
               <AppearanceSettings
@@ -490,6 +498,113 @@ function AccountSettings({
             autoComplete="new-password"
           />
         </div>
+      </div>
+    </Card>
+  );
+}
+
+// --- Infrastructure (IaC backend) ---
+function IaCSettings({
+  role,
+  onToast,
+}: {
+  role: string | null;
+  onToast: (m: string, k?: "ok" | "warn" | "info" | "danger") => void;
+}) {
+  const isAdmin = role === "admin";
+  const [backend, setBackend] = useState<string>("");
+  const [available, setAvailable] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    getClient()
+      .getIaCConfig()
+      .then((c) => {
+        if (!alive) return;
+        setBackend(c.backend);
+        setAvailable(c.available);
+      })
+      .catch(() => alive && setAvailable(["pulumi"]));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function choose(b: string) {
+    if (b === backend || saving) return;
+    setSaving(true);
+    const prev = backend;
+    setBackend(b);
+    try {
+      const c = await getClient().setIaCConfig(b);
+      setBackend(c.backend);
+      onToast(`IaC backend set to ${IAC_META[c.backend]?.label ?? c.backend}.`, "ok");
+    } catch (e) {
+      setBackend(prev);
+      onToast(e instanceof ApiError ? e.toastMessage() : "Could not change the IaC backend.", "danger");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card
+      title="Infrastructure-as-Code backend"
+      desc="Which engine provisions attack infrastructure into the customer's cloud. Applies to subsequent deploys and teardowns; tear existing infra down under the backend that created it before switching."
+    >
+      {!isAdmin && (
+        <div style={{ fontSize: 12.5, color: "var(--text-3)", marginBottom: 14 }}>
+          Only admins can change the backend. The current selection is shown below.
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, maxWidth: 520 }}>
+        {(available.length ? available : ["pulumi"]).map((b) => {
+          const meta = IAC_META[b] ?? { label: b, desc: "" };
+          const active = backend === b;
+          return (
+            <button
+              key={b}
+              onClick={() => isAdmin && choose(b)}
+              disabled={!isAdmin || saving}
+              style={{
+                textAlign: "left",
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 12,
+                padding: "13px 14px",
+                borderRadius: "var(--r-md)",
+                border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+                background: active ? "var(--accent-soft)" : "var(--surface-2)",
+                cursor: isAdmin && !saving ? "pointer" : "default",
+              }}
+            >
+              <div
+                style={{
+                  width: 16,
+                  height: 16,
+                  borderRadius: 99,
+                  marginTop: 1,
+                  flex: "none",
+                  border: active ? "5px solid var(--accent)" : "2px solid var(--border)",
+                  background: "var(--surface)",
+                }}
+              />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, color: active ? "var(--accent)" : "var(--text)" }}>
+                  {meta.label}
+                  {active && <span style={{ fontSize: 11, fontWeight: 500, color: "var(--text-3)" }}> · active</span>}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 3, lineHeight: 1.5 }}>{meta.desc}</div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--text-4)", marginTop: 14, lineHeight: 1.5 }}>
+        The server default is set via <span className="mono">RINFRA_IAC</span>; this selection persists it server-side
+        (Postgres). Both backends provision the same topology and honour the authorization gate, BYO-credentials, and
+        guaranteed-teardown invariants.
       </div>
     </Card>
   );

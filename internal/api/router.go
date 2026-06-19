@@ -125,6 +125,10 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		r.Post("/advisories/feeds", h.createAdvisoryFeed)
 		r.Delete("/advisories/feeds/{id}", h.deleteAdvisoryFeed)
 
+		// IaC backend selection (Pulumi/Terraform). PUT is admin-only.
+		r.Get("/config/iac", h.getIaCConfig)
+		r.Put("/config/iac", h.setIaCConfig)
+
 		// Scenarios — built-in catalog + operator-authored (full CRUD on authored).
 		r.Get("/scenarios", h.listScenarios)
 		r.Post("/scenarios", h.createScenario)

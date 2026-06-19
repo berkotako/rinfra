@@ -39,10 +39,29 @@ type InfraService struct {
 	enc         *secrets.Encrypter
 	hub         *Hub
 	log         *slog.Logger
-	// engine is the optional Pulumi orchestration engine. When set, providers
-	// that implement orchestration.ProgramBuilder are routed through it instead
-	// of the per-node ProvisionNode path. The fake provider never uses the engine.
-	engine *orchestration.Engine
+	// provisioners holds the registered IaC backends (e.g. "pulumi",
+	// "terraform"), each satisfying Provisioner. Providers that implement
+	// orchestration.ProgramBuilder are routed through the selected backend
+	// instead of the per-node ProvisionNode path; the fake provider never is.
+	provisioners   map[string]Provisioner
+	defaultBackend string
+	settings       store.SettingStore // optional: persists the selected backend
+}
+
+// IaC backend keys.
+const (
+	BackendPulumi    = "pulumi"
+	BackendTerraform = "terraform"
+)
+
+// iacSettingKey is the server_settings key holding the selected IaC backend.
+const iacSettingKey = "iac_backend"
+
+// Provisioner abstracts the IaC backend. Both orchestration.Engine (Pulumi) and
+// orchestration/terraform.Engine satisfy it, so the backend is swappable.
+type Provisioner interface {
+	Deploy(ctx context.Context, engagementID string, nodes []domain.Node, creds map[domain.CloudProviderType]cloud.Credentials) ([]orchestration.NodeResult, error)
+	Teardown(ctx context.Context, engagementID string, nodes []domain.Node, creds map[domain.CloudProviderType]cloud.Credentials) error
 }
 
 // NewInfraService constructs an InfraService with the given dependencies.
@@ -68,13 +87,89 @@ func NewInfraService(
 	}
 }
 
-// WithEngine sets the Pulumi orchestration engine on the service. Providers
-// that implement orchestration.ProgramBuilder will be routed through the engine
-// for Deploy/Teardown instead of the per-node ProvisionNode path. This is a
-// separate setter (not a constructor parameter) so existing call sites and tests
-// that don't need the engine don't need to change.
+// WithEngine registers the Pulumi orchestration engine as the "pulumi" backend
+// (and makes it the default if none is set). Kept for existing call sites/tests.
 func (s *InfraService) WithEngine(e *orchestration.Engine) {
-	s.engine = e
+	s.RegisterProvisioner(BackendPulumi, e)
+}
+
+// RegisterProvisioner registers an IaC backend under a key. The first one
+// registered becomes the default backend until WithSettings overrides it.
+func (s *InfraService) RegisterProvisioner(backend string, p Provisioner) {
+	if s.provisioners == nil {
+		s.provisioners = make(map[string]Provisioner)
+	}
+	s.provisioners[backend] = p
+	if s.defaultBackend == "" {
+		s.defaultBackend = backend
+	}
+}
+
+// WithSettings attaches a SettingStore (for persisting the selected backend) and
+// the default backend used when nothing is stored.
+func (s *InfraService) WithSettings(st store.SettingStore, defaultBackend string) {
+	s.settings = st
+	if defaultBackend != "" {
+		s.defaultBackend = defaultBackend
+	}
+}
+
+// AvailableBackends returns the registered backend keys (sorted: pulumi first).
+func (s *InfraService) AvailableBackends() []string {
+	out := make([]string, 0, len(s.provisioners))
+	for _, b := range []string{BackendPulumi, BackendTerraform} {
+		if _, ok := s.provisioners[b]; ok {
+			out = append(out, b)
+		}
+	}
+	for b := range s.provisioners {
+		if b != BackendPulumi && b != BackendTerraform {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// IaCBackend returns the currently selected backend key: the persisted setting
+// if present and registered, otherwise the default.
+func (s *InfraService) IaCBackend(ctx context.Context) string {
+	if s.settings != nil {
+		if v, ok, err := s.settings.Get(ctx, iacSettingKey); err == nil && ok {
+			if _, registered := s.provisioners[v]; registered {
+				return v
+			}
+		}
+	}
+	return s.defaultBackend
+}
+
+// SetIaCBackend persists the selected IaC backend. The backend must be
+// registered. Audited as a privileged configuration change.
+func (s *InfraService) SetIaCBackend(ctx context.Context, actor, backend string) error {
+	if _, ok := s.provisioners[backend]; !ok {
+		return fmt.Errorf("%w: unknown or unavailable IaC backend %q", ErrInvalidTopology, backend)
+	}
+	if s.settings == nil {
+		return fmt.Errorf("iac backend selection requires a settings store (database)")
+	}
+	if err := s.settings.Set(ctx, iacSettingKey, backend); err != nil {
+		return fmt.Errorf("persist iac backend: %w", err)
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "config.iac_backend",
+		Target: backend,
+		At:     time.Now().UTC(),
+	})
+	return nil
+}
+
+// provisioner resolves the currently selected backend, or nil if none.
+func (s *InfraService) provisioner(ctx context.Context) Provisioner {
+	if len(s.provisioners) == 0 {
+		return nil
+	}
+	return s.provisioners[s.IaCBackend(ctx)]
 }
 
 // GetTopology returns the stored topology for an engagement.
@@ -278,7 +373,7 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 	}
 
 	// Partition pending nodes into engine-routed vs per-node paths.
-	var engineNodes []domain.Node  // for real cloud via orchestration.Engine
+	var engineNodes []domain.Node  // for real cloud via the selected IaC backend
 	var directNodes []*domain.Node // for fake/direct ProvisionNode path
 
 	nodeByID := make(map[string]*domain.Node, len(t.Nodes))
@@ -286,12 +381,15 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 		nodeByID[t.Nodes[i].ID] = &t.Nodes[i]
 	}
 
+	// Resolve the active IaC backend (Pulumi/Terraform) for this deploy.
+	activeProv := s.provisioner(ctx)
+
 	for i := range t.Nodes {
 		n := &t.Nodes[i]
 		if n.Status != domain.NodePending {
 			continue
 		}
-		if s.engine != nil {
+		if activeProv != nil {
 			if prov, err := cloud.Get(n.Spec.Cloud); err == nil {
 				if _, ok := prov.(orchestration.ProgramBuilder); ok {
 					engineNodes = append(engineNodes, *n)
@@ -376,7 +474,7 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 				s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
 			}
 
-			results, err := s.engine.Deploy(ctx, engagementID, engineNodes, credsMap)
+			results, err := activeProv.Deploy(ctx, engagementID, engineNodes, credsMap)
 			if err != nil {
 				// Whole-engine error — mark all remaining engine nodes failed.
 				for _, n := range engineNodes {
@@ -552,15 +650,18 @@ func (s *InfraService) runTeardown(ctx context.Context, engagementID, jobID, act
 	}
 
 	// Partition non-destroyed nodes by routing path.
-	var engineNodes []domain.Node  // real cloud via engine
+	var engineNodes []domain.Node  // real cloud via the selected IaC backend
 	var directNodes []*domain.Node // fake/direct Destroy path
+
+	// Resolve the active IaC backend (Pulumi/Terraform) for this teardown.
+	activeProv := s.provisioner(ctx)
 
 	for i := range t.Nodes {
 		n := &t.Nodes[i]
 		if n.Status == domain.NodeDestroyed {
 			continue
 		}
-		if s.engine != nil {
+		if activeProv != nil {
 			if prov, err := cloud.Get(n.Spec.Cloud); err == nil {
 				if _, ok := prov.(orchestration.ProgramBuilder); ok {
 					engineNodes = append(engineNodes, *n)
@@ -610,7 +711,7 @@ func (s *InfraService) runTeardown(ctx context.Context, engagementID, jobID, act
 			credsMap[pt] = creds
 		}
 
-		if engineErr := s.engine.Teardown(ctx, engagementID, engineNodes, credsMap); engineErr != nil {
+		if engineErr := activeProv.Teardown(ctx, engagementID, engineNodes, credsMap); engineErr != nil {
 			s.log.Error("engine.Teardown error", "engagement", engagementID, "err", engineErr)
 			// Best-effort: continue to mark nodes destroyed anyway.
 			anyFailed = true
