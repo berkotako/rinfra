@@ -36,7 +36,7 @@ func buildAuthRouter(t *testing.T) http.Handler {
 	svcEmu := service.NewEmulationService(engStore, scenarioStore, auditLog, hub)
 	svcAuth := service.NewAuthService(userStore, sessionStore, auditLog, log)
 	svcProject := service.NewProjectService(projectStore, userStore, auditLog)
-	if _, err := svcAuth.SeedAdmin(context.Background()); err != nil {
+	if _, err := svcAuth.SeedAdmin(context.Background(), "admin"); err != nil {
 		t.Fatalf("seed admin: %v", err)
 	}
 

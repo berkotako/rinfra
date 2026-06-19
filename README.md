@@ -67,8 +67,12 @@ Then open:
 | Web console | http://localhost:3000 |
 | Control plane | http://localhost:8080 (`GET /healthz`) |
 
-The console requires sign-in. **Default credentials on a fresh install are
-`admin` / `admin`** — change them under **Settings → Account**. Cloud provider
+The console requires sign-in. The Docker stack seeds **`admin` / `admin`** on a
+fresh install (via `RINFRA_ADMIN_PASSWORD`, default `admin` in
+`docker-compose.yml`) — **change it immediately** under **Settings → Account**,
+or set `RINFRA_ADMIN_PASSWORD` to your own value before first boot. (The server
+binary itself never defaults to `admin/admin` in production; see Authentication
+below.) Cloud provider
 keys (AWS / GCP / Azure / DigitalOcean) are added under **Settings → Cloud
 credentials**; they are stored encrypted and bound to a single engagement
 (bring-your-own cloud, never RInfra's tenancy).
@@ -80,8 +84,19 @@ see `cmd/rinfra-server` docs and `docs/RUNBOOK_DO.md`.
 ## Authentication, roles & projects
 
 The control plane authenticates operators with bearer-token sessions and three
-roles. On first boot, if no users exist, a default **`admin` / `admin`** account
-is seeded (change it immediately).
+roles. On first boot, if no users exist, a bootstrap admin is seeded:
+
+- **Dev mode (`RINFRA_DEV=1`)** seeds **`admin` / `admin`** (change it
+  immediately — for local use only).
+- **Production** seeds `admin` with the password from **`RINFRA_ADMIN_PASSWORD`**.
+  If that variable is unset, **no admin is created** (the server never boots with
+  `admin/admin` in production); set it to bootstrap the first admin, then change
+  it after first login.
+
+The server also refuses to start in production with authentication disabled, and
+allowed CORS origins are configurable via **`RINFRA_CORS_ORIGINS`**
+(comma-separated; defaults to the dev frontend `http://localhost:3000`; `*`
+reflects any Origin).
 
 | Role | Capabilities |
 |------|--------------|
@@ -104,6 +119,9 @@ it disabled (legacy operator-header identity) to stay hermetic.
 ```bash
 go build ./...
 go vet ./...
+make test-unit-light         # fast inner-loop tests (skips heavy Pulumi provider SDKs)
+make test-cloud              # provider tests (compiles Pulumi AWS/Azure/GCP/DO SDKs — slow)
+make test                    # full suite
 go run ./cmd/rinfra-server   # serves :8080, logs registered C2 tiers
 ```
 

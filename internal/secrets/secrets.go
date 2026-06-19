@@ -11,6 +11,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -48,8 +49,9 @@ type Envelope struct {
 	// Nonce is the random GCM nonce used during encryption. Store alongside
 	// the ciphertext; required for decryption.
 	Nonce []byte
-	// KeyID is an opaque identifier for the master-key version used. Currently
-	// the base64 SHA-256 of the master key; a KMS key ARN in a later phase.
+	// KeyID is an opaque identifier for the master-key version used. It is a
+	// truncated base64 SHA-256 fingerprint of the master key (non-reversible, no
+	// raw key bytes); replaced by a KMS key ARN in a later phase.
 	KeyID string
 }
 
@@ -80,8 +82,11 @@ func New(masterKeyB64 string) (*Encrypter, error) {
 	if len(key) != masterKeySize {
 		return nil, fmt.Errorf("%w: got %d bytes, need %d", ErrMasterKeyMissing, len(key), masterKeySize)
 	}
-	// KeyID is the base64 of the key itself for now; replaced by KMS ARN later.
-	keyID := base64.StdEncoding.EncodeToString(key[:8]) // first 8 bytes as fingerprint
+	// KeyID is a truncated base64 SHA-256 fingerprint of the master key — stable
+	// and non-reversible, and crucially never exposes raw key bytes. Replaced by
+	// a KMS key ARN in a later phase.
+	sum := sha256.Sum256(key)
+	keyID := base64.RawStdEncoding.EncodeToString(sum[:])[:16]
 	return &Encrypter{masterKey: key, keyID: keyID}, nil
 }
 

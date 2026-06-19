@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -182,19 +183,20 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcC2 := service.NewC2Service(engStore, infraStore, auditLog, log)
 	svcAuth := service.NewAuthService(userStore, sessionStore, auditLog, log)
 	svcProject := service.NewProjectService(projectStore, userStore, auditLog)
-	seedAdmin(log, svcAuth)
+	seedAdmin(log, svcAuth, true) // dev/memstore mode
 
 	svcInfra.ResumeJobs(context.Background())
 
 	router := api.NewRouter(api.Services{
-		Engagement: svcEng,
-		Infra:      svcInfra,
-		Emulation:  svcEmu,
-		C2:         svcC2,
-		Hub:        hub,
-		AuditLog:   audit.Reader(auditLog),
-		Auth:       svcAuth,
-		Projects:   svcProject,
+		Engagement:     svcEng,
+		Infra:          svcInfra,
+		Emulation:      svcEmu,
+		C2:             svcC2,
+		Hub:            hub,
+		AuditLog:       audit.Reader(auditLog),
+		Auth:           svcAuth,
+		Projects:       svcProject,
+		AllowedOrigins: corsOriginsFromEnv(),
 	}, log)
 
 	runServer(log, router, svcC2)
@@ -238,27 +240,48 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	svcC2 := service.NewC2Service(engStore, infraStore, auditLog, log)
 	svcAuth := service.NewAuthService(userStore, sessionStore, auditLog, log)
 	svcProject := service.NewProjectService(projectStore, userStore, auditLog)
-	seedAdmin(log, svcAuth)
+	seedAdmin(log, svcAuth, false) // production: requires RINFRA_ADMIN_PASSWORD
 
 	svcInfra.ResumeJobs(context.Background())
 
+	// Production must never run with authentication disabled.
+	if svcAuth == nil {
+		log.Error("authentication service is required in production mode")
+		os.Exit(1)
+	}
+
 	router := api.NewRouter(api.Services{
-		Engagement: svcEng,
-		Infra:      svcInfra,
-		Emulation:  svcEmu,
-		C2:         svcC2,
-		Hub:        hub,
-		AuditLog:   audit.Reader(auditLog),
-		Auth:       svcAuth,
-		Projects:   svcProject,
+		Engagement:     svcEng,
+		Infra:          svcInfra,
+		Emulation:      svcEmu,
+		C2:             svcC2,
+		Hub:            hub,
+		AuditLog:       audit.Reader(auditLog),
+		Auth:           svcAuth,
+		Projects:       svcProject,
+		AllowedOrigins: corsOriginsFromEnv(),
 	}, log)
 
 	runServer(log, router, svcC2)
 }
 
-// seedAdmin creates the bootstrap admin/admin account when no users exist.
-func seedAdmin(log *slog.Logger, svcAuth *service.AuthService) {
-	if _, err := svcAuth.SeedAdmin(context.Background()); err != nil {
+// seedAdmin bootstraps the first admin when no users exist. In dev mode it uses
+// the well-known default "admin" (with a loud warning). In production it uses
+// RINFRA_ADMIN_PASSWORD and refuses to seed a default — no admin is created
+// until an explicit password is supplied, so an exposed deployment can never
+// boot with admin/admin.
+func seedAdmin(log *slog.Logger, svcAuth *service.AuthService, devMode bool) {
+	password := "admin"
+	if devMode {
+		log.Warn("RINFRA_DEV=1: seeding default admin/admin — for local use only; never expose this server")
+	} else {
+		password = os.Getenv("RINFRA_ADMIN_PASSWORD")
+		if password == "" {
+			log.Warn("no bootstrap admin seeded: set RINFRA_ADMIN_PASSWORD to create the first admin (default admin/admin is dev-only)")
+			return
+		}
+	}
+	if _, err := svcAuth.SeedAdmin(context.Background(), password); err != nil {
 		log.Error("seed admin user", "err", err)
 	}
 }
@@ -298,4 +321,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// corsOriginsFromEnv parses RINFRA_CORS_ORIGINS (comma-separated) into the
+// allowed CORS origins. Empty leaves the default (the dev frontend); "*"
+// reflects any Origin. Example: "https://console.example.com,https://ops.example.com".
+func corsOriginsFromEnv() []string {
+	raw := os.Getenv("RINFRA_CORS_ORIGINS")
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
 }

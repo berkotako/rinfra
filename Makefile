@@ -1,4 +1,4 @@
-.PHONY: build vet test run fmt tidy web-dev web-build web-lint \
+.PHONY: build vet test test-unit-light test-cloud run fmt tidy web-dev web-build web-lint \
         db-up db-down migrate-up migrate-down test-integration dev
 
 build:
@@ -7,8 +7,22 @@ build:
 vet:
 	go vet ./...
 
+# Full suite (compiles the large Pulumi provider SDKs — slow).
 test:
 	go test ./...
+
+# Fast inner-loop: domain/service/api/store/emulation/secrets/audit/c2/payload —
+# no Pulumi provider SDK compilation. Use this for most local iterations and CI
+# unit stages.
+test-unit-light:
+	go test ./internal/domain/... ./internal/service/... ./internal/api/... \
+	        ./internal/store/memstore/... ./internal/emulation/... \
+	        ./internal/secrets/... ./internal/audit/... ./internal/c2/... \
+	        ./internal/payload/... ./internal/orchestration/...
+
+# Cloud provider packages (pull in the heavy Pulumi AWS/Azure/GCP/DO SDKs).
+test-cloud:
+	go test ./internal/cloud/...
 
 run:
 	go run ./cmd/rinfra-server

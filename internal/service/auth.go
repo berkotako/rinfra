@@ -340,10 +340,15 @@ func (s *AuthService) ChangePassword(ctx context.Context, actor domain.User, tar
 	return nil
 }
 
-// SeedAdmin creates a bootstrap admin (username "admin", password "admin") when
-// no users exist yet. It returns the created user, or (nil, nil) when users
-// already exist. It logs a warning that the default password must be changed.
-func (s *AuthService) SeedAdmin(ctx context.Context) (*domain.User, error) {
+// SeedAdmin creates a bootstrap admin (username "admin") with the given password
+// when no users exist yet. It returns the created user, or (nil, nil) when users
+// already exist. The caller decides the password — production must NOT use a
+// known default (see cmd/rinfra-server: dev seeds "admin", production requires
+// RINFRA_ADMIN_PASSWORD).
+func (s *AuthService) SeedAdmin(ctx context.Context, password string) (*domain.User, error) {
+	if password == "" {
+		return nil, fmt.Errorf("seed admin: password must not be empty")
+	}
 	n, err := s.users.CountAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("seed admin: count users: %w", err)
@@ -351,7 +356,7 @@ func (s *AuthService) SeedAdmin(ctx context.Context) (*domain.User, error) {
 	if n > 0 {
 		return nil, nil
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("seed admin: hash password: %w", err)
 	}
@@ -366,8 +371,8 @@ func (s *AuthService) SeedAdmin(ctx context.Context) (*domain.User, error) {
 		return nil, fmt.Errorf("seed admin: create: %w", err)
 	}
 	u.ID = id
-	s.log.Warn("seeded default admin account; CHANGE THE DEFAULT PASSWORD immediately",
-		"username", "admin", "default_password", "admin")
+	s.log.Warn("seeded bootstrap admin account; change the password before exposing the server",
+		"username", "admin")
 	s.record(ctx, "system", "user.seed_admin", id, "bootstrap admin created")
 	return &u, nil
 }
