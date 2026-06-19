@@ -5,7 +5,7 @@ import { PageHead, Modal } from "../ui";
 import { OperatorStatus } from "../c2/ManualAccess";
 import { useStore } from "../../lib/store";
 import { getClient, isRestMode } from "../../lib/client";
-import { deployedC2FromNode, c2SupportsTactic, SCENARIOS } from "../../lib/data";
+import { deployedC2FromNode, c2SupportsTactic, SCENARIOS, SAMPLE_INDEX_YAML } from "../../lib/data";
 import TechniqueDetail from "./TechniqueDetail";
 import ScenarioBuilder from "./ScenarioBuilder";
 import RunGantt from "./RunGantt";
@@ -53,6 +53,7 @@ export default function EmulationScreen() {
     addScenario,
     updateScenario,
     deleteScenario,
+    importIndex,
   } = useStore();
   const [scenarioId, setScenarioId] = useState(scenarios[0].id);
   const [c2Id, setC2Id] = useState<string>(AUTO);
@@ -63,6 +64,8 @@ export default function EmulationScreen() {
   const [editing, setEditing] = useState<Scenario | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Scenario | null>(null);
   const [view, setView] = useState<"steps" | "timeline">("steps");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState(SAMPLE_INDEX_YAML);
   const [timeline, setTimeline] = useState<Record<number, { start: number; end?: number }>>({});
   const [nowTick, setNowTick] = useState(0);
   const runStartRef = useRef<number>(0);
@@ -82,6 +85,13 @@ export default function EmulationScreen() {
     op.then((saved) => setScenarioId(saved.id)).catch(() => undefined);
     setBuilderOpen(false);
     setEditing(null);
+  };
+
+  const handleImportIndex = () => {
+    importIndex(importText)
+      .then((sc) => setScenarioId(sc.id))
+      .catch(() => undefined);
+    setImportOpen(false);
   };
 
   const handleDeleteScenario = (s: Scenario) => {
@@ -330,6 +340,9 @@ export default function EmulationScreen() {
           title="Adversary emulation"
           sub={`Run ATT&CK-mapped scenarios against ${activeEngagement.codename}'s deployed infrastructure.`}
         >
+          <button className="btn" onClick={() => setImportOpen(true)}>
+            <Icons.Plus size={15} /> Import index
+          </button>
           <button
             className="btn primary"
             onClick={() => {
@@ -883,6 +896,52 @@ export default function EmulationScreen() {
           c2={selectedC2 ?? routeFor(scenario.techniques[detailIdx])?.c2 ?? null}
           onClose={() => setDetailIdx(null)}
         />
+      )}
+      {importOpen && (
+        <Modal open onClose={() => setImportOpen(false)} width={640} label="Import index">
+          <div
+            style={{
+              padding: "16px 20px",
+              borderBottom: "1px solid var(--border)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 600 }}>Import a benchmark index</div>
+              <div style={{ fontSize: 12.5, color: "var(--text-3)", marginTop: 2 }}>
+                Paste an SRA-format index (SecurityRiskAdvisors/indexes YAML). It becomes a
+                scenario and its techniques are added to the TTP library.
+              </div>
+            </div>
+            <button className="btn ghost sm" onClick={() => setImportOpen(false)} style={{ padding: 6 }}>
+              <Icons.X size={16} />
+            </button>
+          </div>
+          <div className="scroll" style={{ padding: 18 }}>
+            <textarea
+              className="input mono"
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              rows={14}
+              spellCheck={false}
+              style={{ width: "100%", resize: "vertical", fontSize: 12 }}
+            />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, gap: 10 }}>
+              <button className="btn ghost sm" onClick={() => setImportText(SAMPLE_INDEX_YAML)}>
+                Reset to example
+              </button>
+              <button
+                className="btn primary"
+                onClick={handleImportIndex}
+                disabled={!importText.trim()}
+              >
+                <Icons.Plus size={15} /> Import
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
       {builderOpen && (
         <ScenarioBuilder

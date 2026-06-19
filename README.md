@@ -34,8 +34,6 @@ instead, see `web/README.md` (`make web-dev`).
 
 RInfra turns a drag-and-drop canvas into real, authorized attack infrastructure
 and runs ATT&CK-mapped emulation through it — every step gated and audited.
-(The diagrams below are [Mermaid](https://mermaid.js.org/); GitHub renders them
-inline.)
 
 ### The operator pipeline
 

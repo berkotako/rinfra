@@ -117,6 +117,7 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		// Scenarios — built-in catalog + operator-authored (full CRUD on authored).
 		r.Get("/scenarios", h.listScenarios)
 		r.Post("/scenarios", h.createScenario)
+		r.Post("/scenarios/import", h.importScenario)
 		r.Put("/scenarios/{id}", h.updateScenario)
 		r.Delete("/scenarios/{id}", h.deleteScenario)
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -488,6 +489,22 @@ func (h *handlers) updateScenario(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"scenario": scenarioToJSON(updated)})
+}
+
+// importScenario ingests an SRA-format benchmark index (YAML request body) and
+// creates a scenario + TTP-library entries from it.
+func (h *handlers) importScenario(w http.ResponseWriter, r *http.Request) {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)) // 4 MiB cap
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "could not read request body")
+		return
+	}
+	created, err := h.svc.Emulation.ImportIndex(r.Context(), data, actorFrom(r.Context()))
+	if err != nil {
+		writeErrorCode(w, http.StatusUnprocessableEntity, "invalid_index", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"scenario": scenarioToJSON(created)})
 }
 
 func (h *handlers) deleteScenario(w http.ResponseWriter, r *http.Request) {

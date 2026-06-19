@@ -11,8 +11,41 @@ import (
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/emulation"
 	"github.com/rinfra/rinfra/internal/emulation/catalog"
+	"github.com/rinfra/rinfra/internal/emulation/index"
 	"github.com/rinfra/rinfra/internal/store"
 )
+
+// ImportIndex parses an SRA-format benchmark index YAML, persists its techniques
+// into the TTP library (duplicates by ATT&CK id are skipped), creates a scenario
+// for the index, and audits the import. Requires authoring stores.
+func (s *EmulationService) ImportIndex(ctx context.Context, data []byte, actor string) (domain.Scenario, error) {
+	if s.userScenarios == nil || s.userTechniques == nil {
+		return domain.Scenario{}, fmt.Errorf("index import not enabled")
+	}
+	sc, techs, err := index.Parse(data)
+	if err != nil {
+		return domain.Scenario{}, err
+	}
+	added := 0
+	for _, t := range techs {
+		if err := s.userTechniques.Create(ctx, t); err == nil {
+			added++ // duplicates (existing ATT&CK id) are skipped, not fatal
+		}
+	}
+	id, err := s.userScenarios.Create(ctx, sc)
+	if err != nil {
+		return domain.Scenario{}, fmt.Errorf("persist imported scenario: %w", err)
+	}
+	sc.ID = id
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "index.import",
+		Target: id,
+		Detail: fmt.Sprintf("name=%q techniques=%d new_ttps=%d", sc.Name, len(techs), added),
+		At:     time.Now().UTC(),
+	})
+	return sc, nil
+}
 
 // selectInScopeSession returns the id of the first active operator session whose
 // host is within the engagement scope (enforcing scope at execution time). It
