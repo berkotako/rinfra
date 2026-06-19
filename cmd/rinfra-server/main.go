@@ -95,7 +95,7 @@ import (
 //
 // All selected sources are merged (de-duplicated by CVE id, newest first). With
 // nothing configured, the bundled snapshot is used.
-func buildThreatFeed(log *slog.Logger) *threatfeed.Service {
+func buildThreatFeed(log *slog.Logger, feedStore threatfeed.FeedStore) *threatfeed.Service {
 	var sources []threatfeed.Source
 	for _, key := range splitList(os.Getenv("RINFRA_THREATFEED")) {
 		switch key {
@@ -124,7 +124,11 @@ func buildThreatFeed(log *slog.Logger) *threatfeed.Service {
 		src = threatfeed.MultiSource{Sources: sources}
 	}
 	log.Info("threat feed source", "source", src.Name())
-	return threatfeed.New(src)
+	svc := threatfeed.New(src)
+	if feedStore != nil {
+		svc = svc.WithStore(feedStore)
+	}
+	return svc
 }
 
 // splitList parses a comma-separated env value into a trimmed, non-empty slice.
@@ -236,6 +240,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	scenarioStore := memstore.NewScenarioStore()
 	userScenarioStore := memstore.NewUserScenarioStore()
 	userTechniqueStore := memstore.NewUserTechniqueStore()
+	feedStore := memstore.NewAdvisoryFeedStore()
 	credStore := memstore.NewCredentialStore()
 	jobStore := memstore.NewJobStore()
 	userStore := memstore.NewUserStore()
@@ -267,7 +272,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Auth:           svcAuth,
 		Projects:       svcProject,
 		AllowedOrigins: corsOriginsFromEnv(),
-		ThreatFeed:     buildThreatFeed(log),
+		ThreatFeed:     buildThreatFeed(log, feedStore),
 	}, log)
 
 	runServer(log, router, svcC2)
@@ -293,6 +298,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 	scenarioStore := storepostgres.NewScenarioStore(pool)
 	userScenarioStore := storepostgres.NewUserScenarioStore(pool)
 	userTechniqueStore := storepostgres.NewUserTechniqueStore(pool)
+	feedStore := storepostgres.NewAdvisoryFeedStore(pool)
 	credStore := storepostgres.NewCredentialStore(pool)
 	jobStore := storepostgres.NewJobStore(pool)
 	userStore := storepostgres.NewUserStore(pool)
@@ -331,7 +337,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		Auth:           svcAuth,
 		Projects:       svcProject,
 		AllowedOrigins: corsOriginsFromEnv(),
-		ThreatFeed:     buildThreatFeed(log),
+		ThreatFeed:     buildThreatFeed(log, feedStore),
 	}, log)
 
 	runServer(log, router, svcC2)

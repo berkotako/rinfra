@@ -173,3 +173,115 @@ func TestMultiSource_MergeDedupAndTolerateErrors(t *testing.T) {
 		t.Error("expected error when every source fails")
 	}
 }
+
+// fakeFeedStore is an in-test threatfeed.FeedStore.
+type fakeFeedStore struct{ feeds []threatfeed.Feed }
+
+func (s *fakeFeedStore) ListFeeds(context.Context) ([]threatfeed.Feed, error) { return s.feeds, nil }
+func (s *fakeFeedStore) CreateFeed(_ context.Context, f threatfeed.Feed) (threatfeed.Feed, error) {
+	s.feeds = append(s.feeds, f)
+	return f, nil
+}
+func (s *fakeFeedStore) DeleteFeed(_ context.Context, id string) error {
+	for i, f := range s.feeds {
+		if f.ID == id {
+			s.feeds = append(s.feeds[:i], s.feeds[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
+func TestFeedValidate(t *testing.T) {
+	bad := []threatfeed.Feed{
+		{Name: "", Kind: "url", URL: "https://x"},
+		{Name: "n", Kind: "url", URL: "not a url"},
+		{Name: "n", Kind: "url", URL: "ftp://x"},
+		{Name: "n", Kind: "inline", Inline: ""},
+		{Name: "n", Kind: "inline", Inline: "{ not json"},
+		{Name: "n", Kind: "bogus"},
+	}
+	for i, f := range bad {
+		if err := f.Validate(); err == nil {
+			t.Errorf("case %d: expected validation error for %+v", i, f)
+		}
+	}
+	good := []threatfeed.Feed{
+		{Name: "n", Kind: "url", URL: "https://intel.example.com/a.json"},
+		{Name: "n", Kind: "inline", Inline: `[{"id":"A","title":"rce","summary":"remote code execution"}]`},
+	}
+	for i, f := range good {
+		if err := f.Validate(); err != nil {
+			t.Errorf("good case %d unexpectedly invalid: %v", i, err)
+		}
+	}
+}
+
+func TestServiceFeeds_MergeAndCRUD(t *testing.T) {
+	ctx := context.Background()
+	svc := threatfeed.New(threatfeed.BundledSource{}).WithStore(&fakeFeedStore{})
+
+	// Add an inline feed with one advisory.
+	f, err := svc.AddFeed(ctx, threatfeed.Feed{
+		Name:   "Internal Intel",
+		Kind:   "inline",
+		Inline: `[{"id":"INT-1","title":"web shell upload","summary":"webshell"}]`,
+	})
+	if err != nil {
+		t.Fatalf("AddFeed: %v", err)
+	}
+	if f.ID == "" || !f.Enabled {
+		t.Errorf("AddFeed should assign id and enable: %+v", f)
+	}
+
+	// List should now include the feed advisory alongside the bundled ones.
+	adv, err := svc.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := false
+	for _, a := range adv {
+		if a.ID == "INT-1" {
+			found = true
+			if a.Source != "Internal Intel" {
+				t.Errorf("feed advisory source = %q, want feed name", a.Source)
+			}
+		}
+	}
+	if !found {
+		t.Error("collected advisories should include the inline feed entry")
+	}
+
+	// SourceNames should include the feed name.
+	names := svc.SourceNames(ctx)
+	if !contains(names, "Internal Intel") {
+		t.Errorf("SourceNames = %v, want it to include the feed", names)
+	}
+
+	// Delete and confirm it's gone.
+	if err := svc.DeleteFeed(ctx, f.ID); err != nil {
+		t.Fatalf("DeleteFeed: %v", err)
+	}
+	adv2, _ := svc.List(ctx)
+	for _, a := range adv2 {
+		if a.ID == "INT-1" {
+			t.Error("deleted feed advisory still collected")
+		}
+	}
+}
+
+func TestServiceFeeds_NoStore(t *testing.T) {
+	svc := threatfeed.New(threatfeed.BundledSource{})
+	if _, err := svc.AddFeed(context.Background(), threatfeed.Feed{Name: "x", Kind: "url", URL: "https://x.test/a"}); err == nil {
+		t.Error("AddFeed without a store should return ErrFeedsUnsupported")
+	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/service"
+	"github.com/rinfra/rinfra/internal/threatfeed"
 )
 
 // handlers holds all HTTP handler methods.
@@ -531,14 +533,84 @@ func (h *handlers) listAdvisories(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"advisories": adv})
 }
 
-// listAdvisorySources reports which advisory resources are configured, so the
-// UI can show exactly what is being collected.
+// listAdvisorySources reports which advisory resources are collected (base
+// sources + enabled persisted feeds), so the UI can show exactly what's in scope.
 func (h *handlers) listAdvisorySources(w http.ResponseWriter, r *http.Request) {
 	if h.svc.ThreatFeed == nil {
 		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "threat feed is not configured")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sources": h.svc.ThreatFeed.SourceNames()})
+	writeJSON(w, http.StatusOK, map[string]any{"sources": h.svc.ThreatFeed.SourceNames(r.Context())})
+}
+
+// listAdvisoryFeeds returns the operator-managed feeds.
+func (h *handlers) listAdvisoryFeeds(w http.ResponseWriter, r *http.Request) {
+	if h.svc.ThreatFeed == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "threat feed is not configured")
+		return
+	}
+	feeds, err := h.svc.ThreatFeed.ListFeeds(r.Context())
+	if err != nil {
+		writeFeedError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"feeds": feeds})
+}
+
+type createFeedRequest struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	URL    string `json:"url"`
+	Inline string `json:"inline"`
+}
+
+// createAdvisoryFeed persists a new operator-managed feed.
+func (h *handlers) createAdvisoryFeed(w http.ResponseWriter, r *http.Request) {
+	if h.svc.ThreatFeed == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "threat feed is not configured")
+		return
+	}
+	var req createFeedRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	created, err := h.svc.ThreatFeed.AddFeed(r.Context(), threatfeed.Feed{
+		Name:      req.Name,
+		Kind:      req.Kind,
+		URL:       req.URL,
+		Inline:    req.Inline,
+		CreatedBy: actorFrom(r.Context()),
+	})
+	if err != nil {
+		writeFeedError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"feed": created})
+}
+
+// deleteAdvisoryFeed removes a feed by id.
+func (h *handlers) deleteAdvisoryFeed(w http.ResponseWriter, r *http.Request) {
+	if h.svc.ThreatFeed == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "threat feed is not configured")
+		return
+	}
+	if err := h.svc.ThreatFeed.DeleteFeed(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeFeedError(w, h.log, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeFeedError maps threatfeed feed errors to HTTP statuses.
+func writeFeedError(w http.ResponseWriter, log *slog.Logger, err error) {
+	switch {
+	case errors.Is(err, threatfeed.ErrFeedsUnsupported):
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", err.Error())
+	case errors.Is(err, threatfeed.ErrInvalidFeed):
+		writeErrorCode(w, http.StatusUnprocessableEntity, "invalid_feed", err.Error())
+	default:
+		writeError(w, log, err)
+	}
 }
 
 // ---------- TTP library (operator-authored techniques) ----------

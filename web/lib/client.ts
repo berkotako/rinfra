@@ -10,6 +10,8 @@ import type {
   Technique,
   Coverage,
   Advisory,
+  AdvisoryFeed,
+  NewAdvisoryFeed,
   NodeStatus,
   EngagementStatus,
   User,
@@ -32,7 +34,48 @@ import {
   trmFromCounts,
   BUNDLED_ADVISORIES,
   MOCK_ADVISORY_SOURCES,
+  parseAdvisoryFeed,
 } from "./data";
+
+// ---------- Mock advisory-feed persistence ----------
+// The demo has no backend, so operator-managed feeds are persisted to
+// localStorage. This mirrors the server's advisory_feeds table closely enough
+// that the Settings UI behaves identically against mock and REST.
+const MOCK_FEEDS_KEY = "rinfra-advisory-feeds";
+
+function mockLoadFeeds(): AdvisoryFeed[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(MOCK_FEEDS_KEY);
+    return raw ? (JSON.parse(raw) as AdvisoryFeed[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function mockSaveFeeds(feeds: AdvisoryFeed[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MOCK_FEEDS_KEY, JSON.stringify(feeds));
+  } catch {
+    // ignore quota / serialization errors in the demo
+  }
+}
+
+// mockFeedAdvisories parses the inline feeds into advisories (URL feeds can't be
+// fetched cross-origin in the static demo, so they show as a source only).
+function mockFeedAdvisories(feeds: AdvisoryFeed[]): Advisory[] {
+  const out: Advisory[] = [];
+  for (const f of feeds) {
+    if (!f.enabled || f.kind !== "inline" || !f.inline) continue;
+    try {
+      out.push(...parseAdvisoryFeed(f.inline, f.name));
+    } catch {
+      // skip feeds that no longer parse
+    }
+  }
+  return out;
+}
 
 function mapAdvisoryFromApi(a: Record<string, unknown>): Advisory {
   const ttps = Array.isArray(a["suggestedTtps"])
@@ -323,6 +366,10 @@ export interface RInfraClient {
   listAdvisories(): Promise<Advisory[]>;
   // Which advisory resources are configured/collected (display only).
   listAdvisorySources(): Promise<string[]>;
+  // Operator-managed advisory feeds (persisted; managed from Settings).
+  listAdvisoryFeeds(): Promise<AdvisoryFeed[]>;
+  addAdvisoryFeed(input: NewAdvisoryFeed): Promise<AdvisoryFeed>;
+  deleteAdvisoryFeed(id: string): Promise<void>;
 }
 
 export interface CreateUserParams {
@@ -704,11 +751,54 @@ export class MockClient implements RInfraClient {
   }
 
   async listAdvisories(): Promise<Advisory[]> {
-    return BUNDLED_ADVISORIES;
+    const feedAdv = mockFeedAdvisories(mockLoadFeeds());
+    const seen = new Set<string>();
+    const merged: Advisory[] = [];
+    for (const a of [...feedAdv, ...BUNDLED_ADVISORIES]) {
+      if (seen.has(a.id)) continue;
+      seen.add(a.id);
+      merged.push(a);
+    }
+    return merged;
   }
 
   async listAdvisorySources(): Promise<string[]> {
-    return MOCK_ADVISORY_SOURCES;
+    const feedNames = mockLoadFeeds().filter((f) => f.enabled).map((f) => f.name);
+    return [...MOCK_ADVISORY_SOURCES, ...feedNames];
+  }
+
+  async listAdvisoryFeeds(): Promise<AdvisoryFeed[]> {
+    return mockLoadFeeds();
+  }
+
+  async addAdvisoryFeed(input: NewAdvisoryFeed): Promise<AdvisoryFeed> {
+    const name = input.name.trim();
+    if (!name) throw new Error("name is required");
+    if (input.kind === "url") {
+      const u = (input.url ?? "").trim();
+      if (!/^https?:\/\/.+/.test(u)) throw new Error("url must be a valid http(s) URL");
+    } else if (input.kind === "inline") {
+      if (!(input.inline ?? "").trim()) throw new Error("inline JSON is required");
+      parseAdvisoryFeed(input.inline as string, name); // throws on malformed JSON
+    } else {
+      throw new Error("kind must be url or inline");
+    }
+    const feed: AdvisoryFeed = {
+      id: "feed_" + Math.random().toString(36).slice(2, 10),
+      name,
+      kind: input.kind,
+      url: input.url,
+      inline: input.inline,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      createdBy: "demo",
+    };
+    mockSaveFeeds([...mockLoadFeeds(), feed]);
+    return feed;
+  }
+
+  async deleteAdvisoryFeed(id: string): Promise<void> {
+    mockSaveFeeds(mockLoadFeeds().filter((f) => f.id !== id));
   }
 }
 
@@ -1433,6 +1523,23 @@ export class RestClient implements RInfraClient {
   async listAdvisorySources(): Promise<string[]> {
     const body = await this.fetch<{ sources: string[] }>("/advisories/sources");
     return body.sources ?? [];
+  }
+
+  async listAdvisoryFeeds(): Promise<AdvisoryFeed[]> {
+    const body = await this.fetch<{ feeds: AdvisoryFeed[] }>("/advisories/feeds");
+    return body.feeds ?? [];
+  }
+
+  async addAdvisoryFeed(input: NewAdvisoryFeed): Promise<AdvisoryFeed> {
+    const body = await this.fetch<{ feed: AdvisoryFeed }>("/advisories/feeds", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return body.feed;
+  }
+
+  async deleteAdvisoryFeed(id: string): Promise<void> {
+    await this.fetch<undefined>(`/advisories/feeds/${id}`, { method: "DELETE" });
   }
 }
 

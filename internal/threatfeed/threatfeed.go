@@ -45,32 +45,77 @@ type Source interface {
 }
 
 // Service caches advisories from a Source and serves them. Fetched lazily and
-// refreshed when the cache is older than ttl.
+// refreshed when the cache is older than ttl. An optional FeedStore supplies
+// operator-managed feeds that are merged with the base source on every refresh.
 type Service struct {
-	src Source
-	ttl time.Duration
+	base  Source
+	store FeedStore // optional; nil disables persistent feeds
+	ttl   time.Duration
 
 	mu        sync.Mutex
 	cache     []Advisory
 	fetchedAt time.Time
 }
 
-// New constructs a Service over the given source (default refresh TTL 1h).
+// New constructs a Service over the given base source (default refresh TTL 1h).
 func New(src Source) *Service {
-	return &Service{src: src, ttl: time.Hour}
+	return &Service{base: src, ttl: time.Hour}
 }
 
-// SourceNames lists the configured advisory sources, expanding a MultiSource
-// into its members so the UI can show exactly which resources are collected.
-func (s *Service) SourceNames() []string {
-	if ms, ok := s.src.(MultiSource); ok {
+// WithStore attaches a FeedStore so operator-managed feeds are collected
+// alongside the base source. Returns the service for chaining.
+func (s *Service) WithStore(store FeedStore) *Service {
+	s.store = store
+	return s
+}
+
+// effectiveSource composes the base source with the enabled persisted feeds.
+func (s *Service) effectiveSource(ctx context.Context) Source {
+	if s.store == nil {
+		return s.base
+	}
+	feeds, err := s.store.ListFeeds(ctx)
+	if err != nil || len(feeds) == 0 {
+		return s.base // feeds unavailable — fall back to the base source
+	}
+	sources := []Source{s.base}
+	for _, f := range feeds {
+		if f.Enabled {
+			sources = append(sources, feedToSource(f))
+		}
+	}
+	if len(sources) == 1 {
+		return s.base
+	}
+	return MultiSource{Sources: sources}
+}
+
+// SourceNames lists the advisory sources currently collected — the base
+// source(s) plus any enabled persisted feeds — so the UI can show exactly which
+// resources are in scope.
+func (s *Service) SourceNames(ctx context.Context) []string {
+	names := baseNames(s.base)
+	if s.store != nil {
+		if feeds, err := s.store.ListFeeds(ctx); err == nil {
+			for _, f := range feeds {
+				if f.Enabled {
+					names = append(names, f.Name)
+				}
+			}
+		}
+	}
+	return names
+}
+
+func baseNames(src Source) []string {
+	if ms, ok := src.(MultiSource); ok {
 		names := make([]string, 0, len(ms.Sources))
 		for _, m := range ms.Sources {
 			names = append(names, m.Name())
 		}
 		return names
 	}
-	return []string{s.src.Name()}
+	return []string{src.Name()}
 }
 
 // List returns cached advisories, refreshing if the cache is empty or stale.
@@ -85,10 +130,10 @@ func (s *Service) List(ctx context.Context) ([]Advisory, error) {
 	return s.Refresh(ctx)
 }
 
-// Refresh fetches advisories from the source and updates the cache. On a fetch
-// error the previous cache is retained and returned.
+// Refresh fetches advisories from the effective source and updates the cache.
+// On a fetch error the previous cache is retained and returned.
 func (s *Service) Refresh(ctx context.Context) ([]Advisory, error) {
-	adv, err := s.src.Fetch(ctx)
+	adv, err := s.effectiveSource(ctx).Fetch(ctx)
 	if err != nil {
 		s.mu.Lock()
 		prev := s.cache

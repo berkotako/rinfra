@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/store"
+	"github.com/rinfra/rinfra/internal/threatfeed"
 )
 
 // --- EngagementStore ---
@@ -840,6 +841,65 @@ func (s *UserTechniqueStore) Delete(ctx context.Context, attackID string) error 
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("user_technique %s: %w", attackID, store.ErrNotFound)
+	}
+	return nil
+}
+
+// --- AdvisoryFeedStore ---
+
+// AdvisoryFeedStore is the Postgres implementation of threatfeed.FeedStore.
+type AdvisoryFeedStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewAdvisoryFeedStore returns a new AdvisoryFeedStore backed by pool.
+func NewAdvisoryFeedStore(pool *pgxpool.Pool) *AdvisoryFeedStore {
+	return &AdvisoryFeedStore{pool: pool}
+}
+
+var _ threatfeed.FeedStore = (*AdvisoryFeedStore)(nil)
+
+// ListFeeds returns all feeds ordered by creation time.
+func (s *AdvisoryFeedStore) ListFeeds(ctx context.Context) ([]threatfeed.Feed, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, kind, url, inline, enabled, created_at, created_by
+		FROM advisory_feeds ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("query advisory_feeds: %w", err)
+	}
+	defer rows.Close()
+	var out []threatfeed.Feed
+	for rows.Next() {
+		var f threatfeed.Feed
+		if err := rows.Scan(&f.ID, &f.Name, &f.Kind, &f.URL, &f.Inline, &f.Enabled, &f.CreatedAt, &f.CreatedBy); err != nil {
+			return nil, fmt.Errorf("scan advisory_feed: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// CreateFeed inserts a feed (the service assigns id/timestamp).
+func (s *AdvisoryFeedStore) CreateFeed(ctx context.Context, f threatfeed.Feed) (threatfeed.Feed, error) {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO advisory_feeds (id, name, kind, url, inline, enabled, created_at, created_by)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		f.ID, f.Name, f.Kind, f.URL, f.Inline, f.Enabled, f.CreatedAt, f.CreatedBy,
+	)
+	if err != nil {
+		return threatfeed.Feed{}, fmt.Errorf("insert advisory_feed: %w", err)
+	}
+	return f, nil
+}
+
+// DeleteFeed removes a feed by id.
+func (s *AdvisoryFeedStore) DeleteFeed(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM advisory_feeds WHERE id=$1`, id)
+	if err != nil {
+		return fmt.Errorf("delete advisory_feed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("advisory_feed %s: %w", id, store.ErrNotFound)
 	}
 	return nil
 }

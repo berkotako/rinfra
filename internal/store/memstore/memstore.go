@@ -17,6 +17,7 @@ import (
 	"github.com/rinfra/rinfra/internal/audit"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/store"
+	"github.com/rinfra/rinfra/internal/threatfeed"
 )
 
 // --- EngagementStore ---
@@ -441,6 +442,62 @@ func (s *UserTechniqueStore) Delete(_ context.Context, attackID string) error {
 		return fmt.Errorf("technique %s: %w", attackID, store.ErrNotFound)
 	}
 	delete(s.techniques, attackID)
+	return nil
+}
+
+// --- AdvisoryFeedStore ---
+
+// AdvisoryFeedStore is the in-memory implementation of threatfeed.FeedStore.
+type AdvisoryFeedStore struct {
+	mu    sync.RWMutex
+	feeds map[string]threatfeed.Feed
+	order []string // insertion order, for stable listing
+}
+
+// NewAdvisoryFeedStore returns an empty AdvisoryFeedStore.
+func NewAdvisoryFeedStore() *AdvisoryFeedStore {
+	return &AdvisoryFeedStore{feeds: make(map[string]threatfeed.Feed)}
+}
+
+var _ threatfeed.FeedStore = (*AdvisoryFeedStore)(nil)
+
+// ListFeeds returns feeds in insertion order.
+func (s *AdvisoryFeedStore) ListFeeds(_ context.Context) ([]threatfeed.Feed, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]threatfeed.Feed, 0, len(s.order))
+	for _, id := range s.order {
+		out = append(out, s.feeds[id])
+	}
+	return out, nil
+}
+
+// CreateFeed stores a feed (the service assigns the id/timestamp).
+func (s *AdvisoryFeedStore) CreateFeed(_ context.Context, f threatfeed.Feed) (threatfeed.Feed, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.feeds[f.ID]; ok {
+		return threatfeed.Feed{}, fmt.Errorf("advisory feed %s already exists", f.ID)
+	}
+	s.feeds[f.ID] = f
+	s.order = append(s.order, f.ID)
+	return f, nil
+}
+
+// DeleteFeed removes a feed by id.
+func (s *AdvisoryFeedStore) DeleteFeed(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.feeds[id]; !ok {
+		return fmt.Errorf("advisory feed %s: %w", id, store.ErrNotFound)
+	}
+	delete(s.feeds, id)
+	for i, x := range s.order {
+		if x == id {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 

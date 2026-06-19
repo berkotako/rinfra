@@ -1,34 +1,18 @@
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Icons } from "../icons";
 import { PageHead } from "../ui";
 import { useStore } from "../../lib/store";
 import { getClient } from "../../lib/client";
-import { parseAdvisoryFeed } from "../../lib/data";
 import type { Advisory, SuggestedTTP } from "../../lib/types";
 
 const CONF_CLS: Record<string, string> = { high: "ok", medium: "info", low: "" };
-
-const SAMPLE_FEED = `[
-  {
-    "id": "INTERNAL-2026-0001",
-    "title": "Exploited deserialization in internal portal",
-    "summary": "Active exploitation enabling remote code execution.",
-    "vendor": "Internal",
-    "product": "Portal",
-    "published": "2026-06-18"
-  }
-]`;
 
 export default function ThreatFeedScreen() {
   const { techniques, addTechnique, pushToast } = useStore();
   const [advisories, setAdvisories] = useState<Advisory[] | null>(null);
   const [sources, setSources] = useState<string[]>([]);
-  const [extra, setExtra] = useState<Advisory[]>([]); // feeds added in this session
-  const [showAdd, setShowAdd] = useState(false);
-  const [feedName, setFeedName] = useState("");
-  const [feedJson, setFeedJson] = useState(SAMPLE_FEED);
-  const [feedErr, setFeedErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -45,7 +29,6 @@ export default function ThreatFeedScreen() {
   }, []);
 
   const haveIds = useMemo(() => new Set(techniques.map((t) => t.id)), [techniques]);
-  const allAdvisories = useMemo(() => [...extra, ...(advisories ?? [])], [extra, advisories]);
 
   const addTtp = (adv: Advisory, s: SuggestedTTP) => {
     addTechnique({
@@ -59,23 +42,6 @@ export default function ThreatFeedScreen() {
       .catch(() => pushToast(`Could not add ${s.attackId}`, "danger"));
   };
 
-  const importFeed = () => {
-    const label = feedName.trim() || "Custom feed";
-    try {
-      const parsed = parseAdvisoryFeed(feedJson, label);
-      if (parsed.length === 0) throw new Error("no advisories found");
-      setExtra((cur) => [...parsed, ...cur]);
-      setSources((cur) => (cur.includes(label) ? cur : [...cur, label]));
-      setFeedErr(null);
-      setShowAdd(false);
-      setFeedName("");
-      setFeedJson(SAMPLE_FEED);
-      pushToast(`Collected ${parsed.length} advisory(ies) from “${label}”`, "ok");
-    } catch (e) {
-      setFeedErr(e instanceof Error ? e.message : "could not parse feed");
-    }
-  };
-
   return (
     <div className="scroll" style={{ height: "100%", padding: "26px 32px 40px" }}>
       <div style={{ maxWidth: 1000, margin: "0 auto" }}>
@@ -84,7 +50,7 @@ export default function ThreatFeedScreen() {
           sub="Actively-exploited advisories with suggested ATT&CK techniques — fold emerging threats into the TTP library."
         />
 
-        {/* Collection sources — which resources we collect advisories from. */}
+        {/* Collection sources — read-only; managed in Settings. */}
         <div className="card" style={{ padding: 16, marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -101,59 +67,21 @@ export default function ThreatFeedScreen() {
                 )}
               </div>
             </div>
-            <button className="btn ghost sm" onClick={() => setShowAdd((v) => !v)}>
-              <Icons.Plus size={13} /> Add a feed
-            </button>
+            <Link href="/settings" style={{ textDecoration: "none" }}>
+              <button className="btn ghost sm">
+                <Icons.Settings size={13} /> Manage feeds
+              </button>
+            </Link>
           </div>
-
-          {showAdd && (
-            <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
-              <div style={{ fontSize: 12, color: "var(--text-2)", lineHeight: 1.5, marginBottom: 10 }}>
-                Paste advisories in RInfra&apos;s Advisory JSON schema — a top-level array or{" "}
-                <span className="mono">{`{ "advisories": [...] }`}</span>. Each entry only needs{" "}
-                <span className="mono">id</span>/<span className="mono">title</span>/<span className="mono">summary</span>;
-                ATT&CK suggestions are derived automatically when omitted. On a deployed server, point
-                <span className="mono"> RINFRA_THREATFEED_URLS</span>/<span className="mono">_FILES</span> at the same
-                shape to collect it on every refresh — this preview adds it to the current view.
-              </div>
-              <input
-                className="input"
-                placeholder="Feed name (e.g. Acme Threat Intel)"
-                value={feedName}
-                onChange={(e) => setFeedName(e.target.value)}
-                style={{ width: "100%", marginBottom: 8 }}
-              />
-              <textarea
-                className="input mono"
-                value={feedJson}
-                onChange={(e) => setFeedJson(e.target.value)}
-                spellCheck={false}
-                style={{ width: "100%", minHeight: 150, fontSize: 12, resize: "vertical" }}
-              />
-              {feedErr && (
-                <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>
-                  <Icons.AlertTriangle size={12} /> {feedErr}
-                </div>
-              )}
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button className="btn primary sm" onClick={importFeed}>
-                  <Icons.Plus size={13} /> Collect feed
-                </button>
-                <button className="btn ghost sm" onClick={() => { setShowAdd(false); setFeedErr(null); }}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
         </div>
 
         {advisories === null ? (
           <div style={{ fontSize: 13, color: "var(--text-3)" }}>Loading advisories…</div>
-        ) : allAdvisories.length === 0 ? (
+        ) : advisories.length === 0 ? (
           <div style={{ fontSize: 13, color: "var(--text-3)" }}>No advisories available.</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {allAdvisories.map((adv) => (
+            {advisories.map((adv) => (
               <div key={adv.id} className="card" style={{ padding: 16 }}>
                 <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -224,12 +152,9 @@ export default function ThreatFeedScreen() {
           </div>
         )}
         <div style={{ fontSize: 11, color: "var(--text-4)", marginTop: 14, lineHeight: 1.5 }}>
-          Suggested techniques are heuristic mappings from advisory text — review before use. Choose which
-          resources to collect with <span className="mono">RINFRA_THREATFEED</span> (e.g.
-          <span className="mono"> bundled,cisa-kev</span>), or add your own feeds in RInfra&apos;s Advisory JSON
-          schema via <span className="mono">RINFRA_THREATFEED_URLS</span> /{" "}
-          <span className="mono">RINFRA_THREATFEED_FILES</span> (see{" "}
-          <span className="mono">config/threatfeed.example.json</span>).
+          Suggested techniques are heuristic mappings from advisory text — review before use. Manage which
+          resources are collected — built-in sources and your own feeds — under{" "}
+          <Link href="/settings" style={{ color: "var(--accent)" }}>Settings → Threat feed</Link>.
         </div>
       </div>
     </div>

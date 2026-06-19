@@ -1,12 +1,23 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Icons } from "../icons";
 import { PageHead, ProviderBadge } from "../ui";
 import { useStore, ACCENTS } from "../../lib/store";
 import { useAuth } from "../../lib/auth";
 import { getClient, isRestMode, ApiError } from "../../lib/client";
 import { PROVIDERS } from "../../lib/data";
-import type { CloudProvider, NodeStyle } from "../../lib/types";
+import type { AdvisoryFeed, CloudProvider, NodeStyle } from "../../lib/types";
+
+const SAMPLE_FEED_JSON = `[
+  {
+    "id": "INTERNAL-2026-0001",
+    "title": "Exploited deserialization in internal portal",
+    "summary": "Active exploitation enabling remote code execution.",
+    "vendor": "Internal",
+    "product": "Portal",
+    "published": "2026-06-18"
+  }
+]`;
 
 // ---------------------------------------------------------------------------
 // Per-provider credential field specs. Keys mirror the env-var names the Go
@@ -51,11 +62,12 @@ const CLOUD_FIELDS: Record<CloudProvider, FieldSpec[]> = {
 
 const CLOUD_ORDER: CloudProvider[] = ["aws", "gcp", "azure", "digitalocean"];
 
-type SectionId = "credentials" | "account" | "appearance" | "connection";
+type SectionId = "credentials" | "account" | "threatfeed" | "appearance" | "connection";
 
 const SECTIONS: { id: SectionId; label: string; icon: string }[] = [
   { id: "credentials", label: "Cloud credentials", icon: "Lock" },
   { id: "account", label: "Account", icon: "User" },
+  { id: "threatfeed", label: "Threat feed", icon: "Activity" },
   { id: "appearance", label: "Appearance", icon: "Sliders" },
   { id: "connection", label: "Connection", icon: "Cloud" },
 ];
@@ -119,6 +131,7 @@ export default function SettingsScreen() {
             {section === "account" && (
               <AccountSettings username={username} updateAccount={updateAccount} logout={logout} onToast={pushToast} />
             )}
+            {section === "threatfeed" && <ThreatFeedSettings onToast={pushToast} />}
             {section === "appearance" && (
               <AppearanceSettings
                 preferences={preferences}
@@ -479,6 +492,214 @@ function AccountSettings({
         </div>
       </div>
     </Card>
+  );
+}
+
+// --- Threat feed ---
+function ThreatFeedSettings({
+  onToast,
+}: {
+  onToast: (m: string, k?: "ok" | "warn" | "info" | "danger") => void;
+}) {
+  const rest = isRestMode();
+  const [sources, setSources] = useState<string[]>([]);
+  const [feeds, setFeeds] = useState<AdvisoryFeed[] | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
+  const [kind, setKind] = useState<"inline" | "url">("inline");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [inline, setInline] = useState(SAMPLE_FEED_JSON);
+  const [busy, setBusy] = useState(false);
+
+  const reload = useCallback(() => {
+    const c = getClient();
+    c.listAdvisorySources().then(setSources).catch(() => setSources([]));
+    c.listAdvisoryFeeds()
+      .then((f) => {
+        setFeeds(f);
+        setUnsupported(false);
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 501) setUnsupported(true);
+        setFeeds([]);
+      });
+  }, []);
+
+  useEffect(() => reload(), [reload]);
+
+  async function add() {
+    if (!name.trim()) {
+      onToast("Give the feed a name.", "warn");
+      return;
+    }
+    setBusy(true);
+    try {
+      await getClient().addAdvisoryFeed({
+        name: name.trim(),
+        kind,
+        url: kind === "url" ? url.trim() : undefined,
+        inline: kind === "inline" ? inline : undefined,
+      });
+      onToast(`Feed “${name.trim()}” added — collected on the next refresh.`, "ok");
+      setName("");
+      setUrl("");
+      setInline(SAMPLE_FEED_JSON);
+      reload();
+    } catch (e) {
+      onToast(
+        e instanceof ApiError ? e.toastMessage() : e instanceof Error ? e.message : "Could not add feed.",
+        "danger"
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(f: AdvisoryFeed) {
+    try {
+      await getClient().deleteAdvisoryFeed(f.id);
+      onToast(`Removed “${f.name}”.`, "ok");
+      reload();
+    } catch (e) {
+      onToast(e instanceof ApiError ? e.toastMessage() : "Could not remove feed.", "danger");
+    }
+  }
+
+  return (
+    <>
+      {/* Collected sources */}
+      <Card
+        title="Collection sources"
+        desc="Which advisory resources RInfra collects. The base sources come from server configuration (RINFRA_THREATFEED); feeds added below are persisted and collected alongside them."
+      >
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+          {sources.length === 0 ? (
+            <span style={{ fontSize: 12.5, color: "var(--text-3)" }}>No sources configured.</span>
+          ) : (
+            sources.map((s) => (
+              <span key={s} className="pill info" style={{ height: 24 }}>
+                <Icons.Activity size={12} /> {s}
+              </span>
+            ))
+          )}
+        </div>
+      </Card>
+
+      {/* Managed feeds */}
+      <Card
+        title="Your feeds"
+        desc="Advisories in RInfra's native schema — a remote URL or an inline JSON document. Each entry needs id/title/summary; ATT&CK suggestions are derived automatically when omitted."
+        footer={
+          <button className="btn primary" onClick={add} disabled={busy || unsupported}>
+            {busy ? "Adding…" : "Add feed"}
+          </button>
+        }
+      >
+        {unsupported ? (
+          <div style={{ fontSize: 12.5, color: "var(--text-3)", lineHeight: 1.5 }}>
+            This control plane has no database configured, so persistent feeds are unavailable. Run with
+            Postgres (or use <span className="mono">RINFRA_THREATFEED_URLS</span> /{" "}
+            <span className="mono">RINFRA_THREATFEED_FILES</span> at startup).
+          </div>
+        ) : (
+          <>
+            {/* existing feeds */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: feeds && feeds.length ? 18 : 0 }}>
+              {feeds === null ? (
+                <span style={{ fontSize: 12.5, color: "var(--text-3)" }}>Loading…</span>
+              ) : feeds.length === 0 ? (
+                <span style={{ fontSize: 12.5, color: "var(--text-3)" }}>No feeds yet — add one below.</span>
+              ) : (
+                feeds.map((f) => (
+                  <div
+                    key={f.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "9px 11px",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--r-sm)",
+                      background: "var(--surface-2)",
+                    }}
+                  >
+                    <span className="pill" style={{ height: 20, fontSize: 10, textTransform: "uppercase" }}>{f.kind}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{f.name}</div>
+                      <div className="mono" style={{ fontSize: 11, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {f.kind === "url" ? f.url : `${(f.inline ?? "").length} chars inline`}
+                      </div>
+                    </div>
+                    <button className="btn ghost sm" onClick={() => remove(f)} title="Remove feed">
+                      <Icons.Trash size={13} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* add form */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div className="field">
+                <label>Feed name</label>
+                <input
+                  className="input"
+                  placeholder="e.g. Acme Threat Intel"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>Type</label>
+                <div className="seg" style={{ maxWidth: 280 }}>
+                  {(["inline", "url"] as const).map((k) => (
+                    <button key={k} className={kind === k ? "active" : ""} onClick={() => setKind(k)} style={{ flex: 1, textTransform: "capitalize" }}>
+                      {k === "inline" ? "Inline JSON" : "Remote URL"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {kind === "url" ? (
+                <div className="field">
+                  <label>Feed URL</label>
+                  <input
+                    className="input mono"
+                    placeholder="https://intel.example.com/advisories.json"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                  />
+                  <span className="hint" style={{ fontSize: 11 }}>
+                    An http(s) endpoint returning advisories in RInfra&apos;s schema.
+                  </span>
+                </div>
+              ) : (
+                <div className="field">
+                  <label>Advisories (JSON)</label>
+                  <textarea
+                    className="input mono"
+                    value={inline}
+                    onChange={(e) => setInline(e.target.value)}
+                    spellCheck={false}
+                    style={{ minHeight: 150, fontSize: 12, resize: "vertical" }}
+                  />
+                  <span className="hint" style={{ fontSize: 11 }}>
+                    A top-level array or <span className="mono">{`{ "advisories": [...] }`}</span>.
+                  </span>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </Card>
+
+      {!rest && (
+        <div style={{ fontSize: 11.5, color: "var(--text-3)", lineHeight: 1.5 }}>
+          In this demo build feeds are stored in your browser (no backend). On a deployed control plane they are
+          persisted in Postgres and collected on every refresh. URL feeds aren&apos;t fetched in the static demo —
+          use an inline feed to see advisories appear on the Threat Feed screen.
+        </div>
+      )}
+    </>
   );
 }
 
