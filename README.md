@@ -73,21 +73,27 @@ flowchart LR
   subgraph cloud["Customer cloud (BYO credentials)"]
     R1["HTTPS redirector<br/>AWS · cdn-assets.net"]
     R2["DNS redirector<br/>DigitalOcean"]
+    P["Payload / staging host<br/>AWS · updates-delivery.net"]
     C1["Sliver teamserver<br/>GCP · mTLS · Orchestrated"]
     C2["Mythic teamserver<br/>Azure · HTTPS · Orchestrated"]
-    P["Payload host<br/>AWS · staging"]
   end
-  T <-->|"beacon"| R1
+  T -->|"fetch stager"| P
+  T <-->|"beacon (HTTPS)"| R1
   T <-->|"DNS"| R2
   R1 --> C1
   R2 --> C1
   R1 --> C2
-  C1 --> P
+  P -. "hosted stager beacons to" .-> C1
 ```
 
-The operator never connects to a teamserver directly: manual access is delivered
-over an SSH local-forward (`ssh -L`) or the in-browser **web shell**, both bound
-to the engagement and audited.
+Two distinct channels reach the target: **redirectors** front the C2 beacon
+traffic to the teamservers, while the **payload/staging host** serves the
+initial-access stager from its own delivery domain. They aren't a
+parent/child relationship — the only link is that the staged payload is
+*configured to call back* to a teamserver (the dashed edge). The operator never
+connects to a teamserver directly: manual access is delivered over an SSH
+local-forward (`ssh -L`) or the in-browser **web shell**, both bound to the
+engagement and audited.
 
 ### Example: a TTP and a scenario
 
