@@ -9,6 +9,7 @@ import type {
   Scenario,
   Technique,
   Coverage,
+  Advisory,
   NodeStatus,
   EngagementStatus,
   User,
@@ -29,7 +30,31 @@ import {
   buildMockCoverage,
   buildImportedIndex,
   trmFromCounts,
+  BUNDLED_ADVISORIES,
 } from "./data";
+
+function mapAdvisoryFromApi(a: Record<string, unknown>): Advisory {
+  const ttps = Array.isArray(a["suggestedTtps"])
+    ? (a["suggestedTtps"] as Record<string, unknown>[]).map((t) => ({
+        attackId: String(t["attackId"] ?? ""),
+        name: String(t["name"] ?? ""),
+        tactic: String(t["tactic"] ?? ""),
+        confidence: String(t["confidence"] ?? ""),
+      }))
+    : [];
+  return {
+    id: String(a["id"] ?? ""),
+    source: String(a["source"] ?? ""),
+    title: String(a["title"] ?? ""),
+    vendor: String(a["vendor"] ?? ""),
+    product: String(a["product"] ?? ""),
+    published: String(a["published"] ?? ""),
+    summary: String(a["summary"] ?? ""),
+    url: String(a["url"] ?? ""),
+    ransomware: Boolean(a["ransomware"]),
+    suggestedTtps: ttps,
+  };
+}
 
 // Builds an ATT&CK Navigator layer from a coverage rollup (used by MockClient;
 // the REST backend produces its own).
@@ -292,6 +317,9 @@ export interface RInfraClient {
   // Coverage & ATT&CK Navigator export
   getCoverage(engagementId: string): Promise<Coverage>;
   getNavigatorLayer(engagementId: string): Promise<unknown>;
+
+  // Threat advisories (CISA KEV etc.) with suggested TTPs.
+  listAdvisories(): Promise<Advisory[]>;
 }
 
 export interface CreateUserParams {
@@ -670,6 +698,10 @@ export class MockClient implements RInfraClient {
 
   async getNavigatorLayer(engagementId: string): Promise<unknown> {
     return navigatorLayerFromCoverage(buildMockCoverage(engagementId));
+  }
+
+  async listAdvisories(): Promise<Advisory[]> {
+    return BUNDLED_ADVISORIES;
   }
 }
 
@@ -1384,6 +1416,11 @@ export class RestClient implements RInfraClient {
 
   async getNavigatorLayer(engagementId: string): Promise<unknown> {
     return this.fetch<unknown>(`/engagements/${engagementId}/navigator`);
+  }
+
+  async listAdvisories(): Promise<Advisory[]> {
+    const body = await this.fetch<{ advisories: Record<string, unknown>[] }>("/advisories");
+    return (body.advisories ?? []).map(mapAdvisoryFromApi);
   }
 }
 

@@ -234,6 +234,11 @@ allowed CORS origins are configurable via **`RINFRA_CORS_ORIGINS`**
 (comma-separated; defaults to the dev frontend `http://localhost:3000`; `*`
 reflects any Origin).
 
+The **Threat Feed** screen surfaces actively-exploited advisories with suggested
+ATT&CK techniques you can fold into the TTP library. It serves a bundled snapshot
+by default; set **`RINFRA_THREATFEED=cisa-kev`** to pull the live CISA Known
+Exploited Vulnerabilities catalog (needs outbound egress).
+
 | Role | Capabilities |
 |------|--------------|
 | `admin` | Everything: manage all users, projects, and engagements. |

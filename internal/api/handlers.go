@@ -516,6 +516,21 @@ func (h *handlers) deleteScenario(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---------- Threat advisories ----------
+
+func (h *handlers) listAdvisories(w http.ResponseWriter, r *http.Request) {
+	if h.svc.ThreatFeed == nil {
+		writeErrorCode(w, http.StatusNotImplemented, "not_implemented", "threat feed is not configured")
+		return
+	}
+	adv, err := h.svc.ThreatFeed.List(r.Context())
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"advisories": adv})
+}
+
 // ---------- TTP library (operator-authored techniques) ----------
 
 func (h *handlers) listTechniques(w http.ResponseWriter, r *http.Request) {

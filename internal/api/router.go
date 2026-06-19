@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rinfra/rinfra/internal/audit"
 	"github.com/rinfra/rinfra/internal/service"
+	"github.com/rinfra/rinfra/internal/threatfeed"
 )
 
 // Services bundles the service layer injected into the router.
@@ -25,6 +26,8 @@ type Services struct {
 	// AllowedOrigins configures CORS. Empty defaults to the dev frontend
 	// (http://localhost:3000); "*" reflects any request Origin.
 	AllowedOrigins []string
+	// ThreatFeed is optional; when nil the /advisories route reports 501.
+	ThreatFeed *threatfeed.Service
 }
 
 // NewRouter builds and returns the chi router with all API v1 routes mounted.
@@ -113,6 +116,9 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 
 		// C2 frameworks (from registry).
 		r.Get("/c2/frameworks", h.listC2Frameworks)
+
+		// Threat advisories (CISA KEV etc.) with suggested TTPs.
+		r.Get("/advisories", h.listAdvisories)
 
 		// Scenarios — built-in catalog + operator-authored (full CRUD on authored).
 		r.Get("/scenarios", h.listScenarios)

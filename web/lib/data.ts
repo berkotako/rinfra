@@ -13,6 +13,7 @@ import type {
   OperatorSession,
   DeployedC2,
   Coverage,
+  Advisory,
 } from "./types";
 
 export const PROVIDERS: Record<CloudProvider, ProviderMeta> = {
@@ -939,6 +940,52 @@ export function buildImportedIndex(): { scenario: Scenario; techniques: Techniqu
     techniques,
   };
 }
+
+// Bundled threat advisories for the demo (mirrors the Go bundled source). The
+// real backend serves the live CISA KEV catalog when RINFRA_THREATFEED=cisa-kev.
+export const BUNDLED_ADVISORIES: Advisory[] = [
+  {
+    id: "CVE-2026-1041", source: "CISA KEV", title: "Acme Edge Gateway Remote Code Execution",
+    vendor: "Acme", product: "Edge Gateway", published: "2026-06-10",
+    summary: "Unauthenticated remote code execution in the management API allows arbitrary command execution.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-1041", ransomware: false,
+    suggestedTtps: [{ attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "high" }],
+  },
+  {
+    id: "CVE-2026-0907", source: "CISA KEV", title: "Globex VPN Authentication Bypass",
+    vendor: "Globex", product: "SecureConnect VPN", published: "2026-06-08",
+    summary: "Authentication bypass permits access with valid accounts without credentials.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0907", ransomware: false,
+    suggestedTtps: [{ attackId: "T1078", name: "Valid Accounts", tactic: "Initial Access", confidence: "medium" }],
+  },
+  {
+    id: "CVE-2026-0455", source: "CISA KEV", title: "Initech Mail Server Web Shell Upload",
+    vendor: "Initech", product: "Mail Server", published: "2026-06-03",
+    summary: "Arbitrary file upload leads to web shell deployment and persistence.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0455", ransomware: true,
+    suggestedTtps: [
+      { attackId: "T1505.003", name: "Web Shell", tactic: "Persistence", confidence: "high" },
+      { attackId: "T1486", name: "Data Encrypted for Impact", tactic: "Impact", confidence: "medium" },
+    ],
+  },
+  {
+    id: "CVE-2026-0188", source: "CISA KEV", title: "Umbrella ERP SQL Injection",
+    vendor: "Umbrella", product: "ERP", published: "2026-05-29",
+    summary: "SQL injection in the reporting module exposes credentials and enables data theft.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0188", ransomware: false,
+    suggestedTtps: [
+      { attackId: "T1190", name: "Exploit Public-Facing Application", tactic: "Initial Access", confidence: "high" },
+      { attackId: "T1003", name: "OS Credential Dumping", tactic: "Credential Access", confidence: "low" },
+    ],
+  },
+  {
+    id: "CVE-2026-0042", source: "CISA KEV", title: "Hooli Kernel Privilege Escalation",
+    vendor: "Hooli", product: "OS Kernel", published: "2026-05-21",
+    summary: "Local privilege escalation via improper handling allows elevation of privilege to SYSTEM.",
+    url: "https://nvd.nist.gov/vuln/detail/CVE-2026-0042", ransomware: false,
+    suggestedTtps: [{ attackId: "T1068", name: "Exploitation for Privilege Escalation", tactic: "Privilege Escalation", confidence: "high" }],
+  },
+];
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {
   live: { label: "Live", cls: "ok" },
