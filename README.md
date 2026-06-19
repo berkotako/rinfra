@@ -235,9 +235,21 @@ allowed CORS origins are configurable via **`RINFRA_CORS_ORIGINS`**
 reflects any Origin).
 
 The **Threat Feed** screen surfaces actively-exploited advisories with suggested
-ATT&CK techniques you can fold into the TTP library. It serves a bundled snapshot
-by default; set **`RINFRA_THREATFEED=cisa-kev`** to pull the live CISA Known
-Exploited Vulnerabilities catalog (needs outbound egress).
+ATT&CK techniques you can fold into the TTP library. **Which resources it collects
+is configurable** via **`RINFRA_THREATFEED`** (comma-separated source keys):
+
+- `bundled` — a built-in offline snapshot of real CISA KEV entries (default; no egress).
+- `cisa-kev` — the live CISA Known Exploited Vulnerabilities catalog (needs outbound egress).
+
+Bring your own feeds in RInfra's native **Advisory JSON schema** ("our data style")
+— internal threat intel, a partner advisory mirror, a curated list — without
+writing code: emit the documented shape and point a source at it with
+**`RINFRA_THREATFEED_URLS`** (http(s) endpoints) or **`RINFRA_THREATFEED_FILES`**
+(local files). All selected sources are merged (de-duplicated by id, newest
+first); a dead feed never blanks the list. See
+[`config/threatfeed.example.json`](config/threatfeed.example.json) for the schema —
+each advisory only needs `id`/`title`/`summary`, and the ATT&CK `suggestedTtps`
+are auto-derived from a keyword heuristic when omitted (or hand-mapped).
 
 | Role | Capabilities |
 |------|--------------|

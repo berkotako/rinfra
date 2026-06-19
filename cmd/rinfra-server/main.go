@@ -17,6 +17,14 @@
 //   - PULUMI_BACKEND_DIR         optional: root directory for Pulumi local state
 //     files (default: $HOME/.rinfra/pulumi-state). Passed to orchestration.Engine.
 //
+// Threat feed (which advisory resources to collect; see config/threatfeed.example.json):
+//   - RINFRA_THREATFEED        comma-separated source keys: "bundled" (default,
+//     no egress) and/or "cisa-kev" (live CISA KEV catalog).
+//   - RINFRA_THREATFEED_URLS   comma-separated http(s) URLs serving advisories in
+//     RInfra's native Advisory JSON schema ("our data style").
+//   - RINFRA_THREATFEED_FILES  comma-separated local files in that same schema.
+//     All selected sources are merged (deduped by id, newest first).
+//
 // Pulumi uses the Pulumi CLI binary on PATH to run the automation API engine.
 // Install the Pulumi CLI before enabling real cloud provisioning:
 // https://www.pulumi.com/docs/install/
@@ -72,14 +80,65 @@ import (
 	"github.com/rinfra/rinfra/internal/threatfeed"
 )
 
-// buildThreatFeed selects the advisory source. Default is the bundled snapshot
-// (no egress); set RINFRA_THREATFEED=cisa-kev to fetch the live CISA KEV catalog.
+// buildThreatFeed assembles the advisory feed from configuration. RINFRA_THREATFEED
+// is a comma-separated list of source keys that select which resources we
+// collect advisories from. Built-in keys:
+//
+//   - bundled    static snapshot of real CISA KEV entries (default; no egress)
+//   - cisa-kev   live CISA Known Exploited Vulnerabilities catalog (needs egress)
+//
+// Operators add their own feeds in RInfra's native Advisory JSON schema ("our
+// data style"; see config/threatfeed.example.json):
+//
+//   - RINFRA_THREATFEED_URLS    comma-separated http(s) URLs serving that schema
+//   - RINFRA_THREATFEED_FILES   comma-separated local file paths in that schema
+//
+// All selected sources are merged (de-duplicated by CVE id, newest first). With
+// nothing configured, the bundled snapshot is used.
 func buildThreatFeed(log *slog.Logger) *threatfeed.Service {
-	if os.Getenv("RINFRA_THREATFEED") == "cisa-kev" {
-		log.Info("threat feed: live CISA KEV source")
-		return threatfeed.New(threatfeed.NewCISAKEVSource())
+	var sources []threatfeed.Source
+	for _, key := range splitList(os.Getenv("RINFRA_THREATFEED")) {
+		switch key {
+		case "bundled":
+			sources = append(sources, threatfeed.BundledSource{})
+		case "cisa-kev":
+			sources = append(sources, threatfeed.NewCISAKEVSource())
+		default:
+			log.Warn("threat feed: unknown source key, ignoring", "key", key)
+		}
 	}
-	return threatfeed.New(threatfeed.BundledSource{})
+	for _, u := range splitList(os.Getenv("RINFRA_THREATFEED_URLS")) {
+		sources = append(sources, &threatfeed.JSONSource{URL: u})
+	}
+	for _, f := range splitList(os.Getenv("RINFRA_THREATFEED_FILES")) {
+		sources = append(sources, &threatfeed.JSONSource{File: f})
+	}
+	if len(sources) == 0 {
+		sources = append(sources, threatfeed.BundledSource{})
+	}
+
+	var src threatfeed.Source
+	if len(sources) == 1 {
+		src = sources[0]
+	} else {
+		src = threatfeed.MultiSource{Sources: sources}
+	}
+	log.Info("threat feed source", "source", src.Name())
+	return threatfeed.New(src)
+}
+
+// splitList parses a comma-separated env value into a trimmed, non-empty slice.
+func splitList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func main() {

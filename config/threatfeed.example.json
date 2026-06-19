@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "Custom threat-feed in RInfra's native Advisory schema ('our data style').",
+    "Point a source at this file or a URL that serves the same shape:",
+    "  RINFRA_THREATFEED_FILES=/etc/rinfra/threatfeed.json",
+    "  RINFRA_THREATFEED_URLS=https://intel.example.com/advisories.json",
+    "A top-level array is also accepted (drop the { \"advisories\": ... } wrapper).",
+    "Per advisory: id, title, summary are the essentials. 'source' defaults to the",
+    "feed label, and 'suggestedTtps' is auto-derived from the title+summary keyword",
+    "heuristic when omitted — so you only hand-map ATT&CK when you want to override it.",
+    "Fields prefixed with _ are ignored by the parser."
+  ],
+  "advisories": [
+    {
+      "id": "INTERNAL-2026-0007",
+      "source": "Acme Threat Intel",
+      "title": "Exploited deserialization in internal billing portal",
+      "vendor": "Internal",
+      "product": "Billing Portal",
+      "published": "2026-06-17",
+      "summary": "Active exploitation of an insecure deserialization endpoint enabling remote code execution against the billing portal.",
+      "url": "https://intel.example.com/advisories/INTERNAL-2026-0007",
+      "ransomware": false
+    },
+    {
+      "id": "VENDOR-2026-1188",
+      "source": "Partner Advisory Mirror",
+      "title": "Authentication bypass in EdgeProxy appliance",
+      "vendor": "EdgeProxy",
+      "product": "Appliance",
+      "published": "2026-06-14",
+      "summary": "An authentication bypass allows unauthenticated access to the management console.",
+      "url": "https://partner.example.com/sa/VENDOR-2026-1188",
+      "ransomware": false,
+      "suggestedTtps": [
+        { "attackId": "T1078", "name": "Valid Accounts", "tactic": "Initial Access", "confidence": "high" }
+      ]
+    }
+  ]
+}
