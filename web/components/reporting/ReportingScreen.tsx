@@ -71,6 +71,9 @@ export default function ReportingScreen() {
   const executed = coverage?.executedCount ?? 0;
   const validated = coverage?.validatedCount ?? 0;
   const coveragePct = total > 0 ? Math.round((covered / total) * 100) : 0;
+  const trm = coverage?.trm ?? 0;
+  const trmTrend = coverage?.trmTrend ?? [];
+  const trmColor = trm >= 80 ? "var(--ok)" : trm >= 50 ? "var(--warn)" : "var(--danger)";
 
   const copyNavigator = () => {
     getClient()
@@ -155,6 +158,50 @@ export default function ReportingScreen() {
                   ))}
                 </select>
               </label>
+            </div>
+
+            {/* Threat Resilience Metric — benchmarked ATT&CK alignment */}
+            <div
+              className="card"
+              style={{ padding: "16px 18px", marginBottom: 14, display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}
+            >
+              <div style={{ flex: "none" }}>
+                <div className="eyebrow">Threat Resilience Metric</div>
+                <div className="mono" style={{ fontSize: 40, fontWeight: 700, color: trmColor, lineHeight: 1.1 }}>
+                  {trm}%
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+                  {validated} / {covered} exercised techniques passed (detected or blocked)
+                </div>
+              </div>
+              {/* trend */}
+              {trmTrend.length > 0 && (
+                <div style={{ flex: "none" }}>
+                  <div className="eyebrow" style={{ marginBottom: 8 }}>Trend</div>
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 56 }}>
+                    {trmTrend.map((p) => (
+                      <div key={p.label} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                        <div
+                          style={{
+                            width: 22,
+                            height: Math.max(4, (p.trm / 100) * 48),
+                            borderRadius: 3,
+                            background: p.trm >= 80 ? "var(--ok)" : p.trm >= 50 ? "var(--warn)" : "var(--danger)",
+                          }}
+                          title={`${p.label}: ${p.trm}%`}
+                        />
+                        <span style={{ fontSize: 9.5, color: "var(--text-3)" }}>{p.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div style={{ flex: 1, minWidth: 220, fontSize: 12, color: "var(--text-2)", lineHeight: 1.55 }}>
+                Benchmarked ATT&amp;CK alignment: instead of chasing all of ATT&amp;CK, measure the
+                share of a representative <strong>index</strong> of threat-actor techniques your
+                defenses pass. Run the <strong>ATT&amp;CK Index</strong> scenario each quarter and
+                track this number over time.
+              </div>
             </div>
 
             <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>

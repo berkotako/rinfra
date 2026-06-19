@@ -499,6 +499,17 @@ export const SCENARIOS: Scenario[] = [
     desc: "Built-in-binary baseline: WMI execution, BITS transfer, scheduled tasks, signed-binary proxy execution and host discovery.",
     techniques: ["T1047", "T1197", "T1053.005", "T1218.011", "T1082", "T1016"].map(lib),
   },
+  {
+    id: "index-2026",
+    name: "ATT&CK Index 2026 (benchmark)",
+    actor: "Benchmark · top threat actors",
+    desc: "A representative, cross-sector index of techniques drawn from the year's top threat actors (S&P-500-style sample, à la SRA). Run it each quarter and track the Threat Resilience Metric over time rather than chasing all of ATT&CK.",
+    techniques: [
+      "T1566.002", "T1078.004", "T1059.001", "T1047", "T1547.001", "T1053.005",
+      "T1055", "T1562.001", "T1003.001", "T1555.003", "T1621", "T1018", "T1082",
+      "T1021.001", "T1570", "T1567.002", "T1486",
+    ].map(lib),
+  },
 ];
 
 // Initial topology for the hero engagement (ENG-2411)
@@ -819,6 +830,7 @@ export function buildMockCoverage(engagementId: string): Coverage {
       if (te.level >= 2) executed++;
       if (te.level === 3) validated++;
     }
+  const trm = exercised > 0 ? Math.round((validated / exercised) * 100) : 0;
   return {
     engagementId,
     tactics,
@@ -826,7 +838,21 @@ export function buildMockCoverage(engagementId: string): Coverage {
     exercisedCount: exercised,
     executedCount: executed,
     validatedCount: validated,
+    trm,
+    // Demo quarterly trend showing program improvement over time.
+    trmTrend: [
+      { label: "Q1", trm: Math.max(0, trm - 34) },
+      { label: "Q2", trm: Math.max(0, trm - 21) },
+      { label: "Q3", trm: Math.max(0, trm - 9) },
+      { label: "Q4", trm },
+    ],
   };
+}
+
+// trmFromCounts computes the Threat Resilience Metric (% of exercised techniques
+// that passed / were validated) from a coverage rollup's counts.
+export function trmFromCounts(exercised: number, validated: number): number {
+  return exercised > 0 ? Math.round((validated / exercised) * 100) : 0;
 }
 
 export const STATUS_META: Record<string, { label: string; cls: string }> = {

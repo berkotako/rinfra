@@ -27,6 +27,7 @@ import {
   C2_OPERATOR_ACCESS,
   deployedC2FromNode,
   buildMockCoverage,
+  trmFromCounts,
 } from "./data";
 
 // Builds an ATT&CK Navigator layer from a coverage rollup (used by MockClient;
@@ -1342,7 +1343,10 @@ export class RestClient implements RInfraClient {
   }
 
   async getCoverage(engagementId: string): Promise<Coverage> {
-    return this.fetch<Coverage>(`/engagements/${engagementId}/coverage`);
+    const c = await this.fetch<Coverage>(`/engagements/${engagementId}/coverage`);
+    // The backend rollup doesn't emit the TRM yet; derive it from the counts.
+    const trm = c.trm ?? trmFromCounts(c.exercisedCount ?? 0, c.validatedCount ?? 0);
+    return { ...c, trm, trmTrend: c.trmTrend ?? [{ label: "now", trm }] };
   }
 
   async getNavigatorLayer(engagementId: string): Promise<unknown> {
