@@ -147,6 +147,27 @@ operated by hand; orchestrated/scripted frameworks expose an `Operator` API the
 engine drives. The **TTPs** screen shows the full library with per-technique C2
 tags, and supports authoring your own (full CRUD).
 
+The Emulation screen also has a **Timeline (Gantt) view** that plots each
+technique as a bar on a time axis as the run progresses — so the ordered TTP
+chain, durations, and which steps ran (vs. were skipped as manual) are visible
+at a glance, à la Caldera operation timelines / VECTR:
+
+```mermaid
+gantt
+  title APT29 run — TTP chain timeline
+  dateFormat  s
+  axisFormat  %Ss
+  section Sliver
+  T1059.001 PowerShell           :done, a1, 0, 2s
+  T1547.001 Registry Run Keys    :done, a2, after a1, 2s
+  T1055 Process Injection        :done, a3, after a2, 2s
+  T1003.001 LSASS Memory         :done, a4, after a3, 2s
+  T1018 Remote System Discovery  :done, a5, after a4, 1s
+  T1021.001 RDP                  :active, a6, after a5, 2s
+  section Manual
+  T1566.002 Spearphishing Link   :crit, m1, 0, 1s
+```
+
 ## Layout
 
 | Path | Purpose |
