@@ -116,8 +116,12 @@ export default function ThreatFeedScreen() {
           </div>
         )}
         <div style={{ fontSize: 11, color: "var(--text-4)", marginTop: 14, lineHeight: 1.5 }}>
-          Suggested techniques are heuristic mappings from advisory text — review before use. Set
-          <span className="mono"> RINFRA_THREATFEED=cisa-kev </span> on the server to pull the live catalog.
+          Suggested techniques are heuristic mappings from advisory text — review before use. Choose which
+          resources to collect with <span className="mono">RINFRA_THREATFEED</span> (e.g.
+          <span className="mono"> bundled,cisa-kev</span>), or add your own feeds in RInfra&apos;s Advisory JSON
+          schema via <span className="mono">RINFRA_THREATFEED_URLS</span> /{" "}
+          <span className="mono">RINFRA_THREATFEED_FILES</span> (see{" "}
+          <span className="mono">config/threatfeed.example.json</span>).
         </div>
       </div>
     </div>
