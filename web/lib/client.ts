@@ -280,6 +280,8 @@ export interface RInfraClient {
   deleteScenario(id: string): Promise<void>;
   startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }>;
   getRun(runId: string): Promise<ScenarioRun>;
+  // Purple-team scoring: record the defender outcome for a technique in a run.
+  recordDetection(runId: string, techniqueId: string, outcome: string): Promise<void>;
 
   // TTP library — operator-authored techniques
   listTechniques(): Promise<Technique[]>;
@@ -640,6 +642,12 @@ export class MockClient implements RInfraClient {
       startedAt: null,
       finishedAt: null,
     };
+  }
+
+  async recordDetection(runId: string, techniqueId: string, outcome: string): Promise<void> {
+    void runId;
+    void techniqueId;
+    void outcome; // mock: scoring is session-local
   }
 
   // Mock mode: authored TTPs are kept session-local by the store.
@@ -1319,6 +1327,13 @@ export class RestClient implements RInfraClient {
       startedAt: run["startedAt"] ? String(run["startedAt"]) : null,
       finishedAt: run["finishedAt"] ? String(run["finishedAt"]) : null,
     };
+  }
+
+  async recordDetection(runId: string, techniqueId: string, outcome: string): Promise<void> {
+    await this.fetch<undefined>(`/runs/${runId}/detection`, {
+      method: "POST",
+      body: JSON.stringify({ techniqueId, outcome }),
+    });
   }
 
   async listTechniques(): Promise<Technique[]> {

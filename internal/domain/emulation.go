@@ -54,11 +54,34 @@ const (
 	ExecSkipped ExecutionStatus = "skipped" // e.g. Fronted-tier C2: no Operator
 )
 
+// DetectionOutcome is the defender's response to an executed technique — the
+// SRA-style three-part evaluation. A technique "passes" when the defenders
+// blocked, detected, or raised an actionable alert on it.
+type DetectionOutcome string
+
+const (
+	DetectNone     DetectionOutcome = "none"     // no defensive response observed
+	DetectAlerted  DetectionOutcome = "alerted"  // an actionable SOC alert fired
+	DetectDetected DetectionOutcome = "detected" // detected by a control (EDR/SIEM)
+	DetectBlocked  DetectionOutcome = "blocked"  // prevented outright
+)
+
+// Passed reports whether the defenders handled the technique (block/detect/alert).
+func (d DetectionOutcome) Passed() bool {
+	switch d {
+	case DetectAlerted, DetectDetected, DetectBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
 // Result records the outcome of executing one Technique.
 type Result struct {
 	TechniqueAttackID string
 	Status            ExecutionStatus
-	Output            string // sanitized summary, not raw tool output
+	Output            string           // sanitized summary, not raw tool output
+	Detection         DetectionOutcome // defender response (block/detect/alert/none)
 	StartedAt         time.Time
 	FinishedAt        time.Time
 	Err               string

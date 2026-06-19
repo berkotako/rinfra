@@ -42,6 +42,26 @@ const TACTIC_TONE: Record<string, number> = {
   Impact: 25,
 };
 
+// Defender outcome (SRA three-part evaluation). "passed" = alerted/detected/blocked.
+type DetectionOutcome = "none" | "alerted" | "detected" | "blocked";
+const DET_META: Record<DetectionOutcome, { label: string; cls: string }> = {
+  none: { label: "missed", cls: "danger" },
+  alerted: { label: "alerted", cls: "info" },
+  detected: { label: "detected", cls: "ok" },
+  blocked: { label: "blocked", cls: "ok" },
+};
+const DET_OPTIONS: DetectionOutcome[] = ["none", "alerted", "detected", "blocked"];
+const detPassed = (d?: DetectionOutcome) => d === "alerted" || d === "detected" || d === "blocked";
+
+// simDetection picks a plausible defender outcome for the demo run.
+function simDetection(): DetectionOutcome {
+  const r = Math.random();
+  if (r < 0.4) return "none";
+  if (r < 0.65) return "detected";
+  if (r < 0.85) return "alerted";
+  return "blocked";
+}
+
 export default function EmulationScreen() {
   const {
     activeEngagement,
@@ -64,6 +84,7 @@ export default function EmulationScreen() {
   const [editing, setEditing] = useState<Scenario | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Scenario | null>(null);
   const [view, setView] = useState<"steps" | "timeline">("steps");
+  const [detection, setDetection] = useState<Record<number, DetectionOutcome>>({});
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState(SAMPLE_INDEX_YAML);
   const [timeline, setTimeline] = useState<Record<number, { start: number; end?: number }>>({});
@@ -151,6 +172,7 @@ export default function EmulationScreen() {
     timers.current = [];
     setStepState(baseStepState());
     setTimeline({});
+    setDetection({});
     setRunning(false);
   };
 
@@ -170,6 +192,20 @@ export default function EmulationScreen() {
       return tl;
     });
   }, []);
+
+  // setDet records a defender outcome for a technique and, in REST mode, sends
+  // it to the backend (purple-team scoring → TRM).
+  const setDet = useCallback(
+    (i: number, d: DetectionOutcome) => {
+      setDetection((m) => ({ ...m, [i]: d }));
+      const tid = scenario.techniques[i]?.id;
+      const runID = runIdRef.current;
+      if (tid && runID) {
+        client.recordDetection(runID, tid, d).catch(() => undefined);
+      }
+    },
+    [client, scenario]
+  );
 
   // Cleanup on unmount
   useEffect(() => {
@@ -192,6 +228,7 @@ export default function EmulationScreen() {
     timers.current = [];
     setStepState(baseStepState());
     setTimeline({});
+    setDetection({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenarioId, c2Id]);
 
@@ -261,6 +298,7 @@ export default function EmulationScreen() {
     timers.current = [];
     setStepState(baseStepState());
     setTimeline({});
+    setDetection({});
     runStartRef.current = Date.now();
     setRunning(true);
     const via = selectedC2 ? selectedC2.frameworkName : "auto-routed agents";
@@ -293,7 +331,10 @@ export default function EmulationScreen() {
       );
       timers.current.push(
         setTimeout(
-          () => markStep(i, Math.random() < 0.28 ? "detected" : "done"),
+          () => {
+            markStep(i, "done");
+            setDet(i, simDetection());
+          },
           order * 1500 + 1300
         )
       );
@@ -310,7 +351,8 @@ export default function EmulationScreen() {
   const done = scenario.techniques.filter(
     (_, i) => stepState[i] === "done" || stepState[i] === "detected"
   ).length;
-  const detected = scenario.techniques.filter((_, i) => stepState[i] === "detected").length;
+  const passed = scenario.techniques.filter((_, i) => detPassed(detection[i])).length;
+  const liveTRM = done > 0 ? Math.round((passed / done) * 100) : 0;
   const pct = runnableCount ? Math.round((done / runnableCount) * 100) : 0;
   const canRun = runnableCount > 0;
 
@@ -629,6 +671,27 @@ export default function EmulationScreen() {
                           {st !== "pending" && st !== "running" && <Ico size={13} />}
                           {m.label}
                         </span>
+                        {(st === "done" || st === "detected") && (
+                          <select
+                            className="select"
+                            value={detection[i] ?? "none"}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => setDet(i, e.target.value as DetectionOutcome)}
+                            title="Defender outcome (purple-team scoring)"
+                            style={{
+                              height: 24,
+                              fontSize: 11,
+                              padding: "0 6px",
+                              color: `var(--${DET_META[detection[i] ?? "none"].cls === "danger" ? "danger" : DET_META[detection[i] ?? "none"].cls === "info" ? "info" : "ok"})`,
+                            }}
+                          >
+                            {DET_OPTIONS.map((o) => (
+                              <option key={o} value={o}>
+                                {DET_META[o].label}
+                              </option>
+                            ))}
+                          </select>
+                        )}
                         <span style={{ color: "var(--text-4)" }}>
                           <Icons.ChevronRight size={15} />
                         </span>
@@ -809,7 +872,10 @@ export default function EmulationScreen() {
                       gap: 5,
                     }}
                   >
-                    <Icons.Eye size={13} /> {detected} detected by blue team
+                    <Icons.Eye size={13} /> {passed} passed (block/detect/alert)
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 3 }}>
+                    TRM <b style={{ color: liveTRM >= 80 ? "var(--ok)" : liveTRM >= 50 ? "var(--warn)" : "var(--danger)" }}>{liveTRM}%</b> of executed
                   </div>
                 </div>
               </div>

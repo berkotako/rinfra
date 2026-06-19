@@ -717,3 +717,59 @@ func TestEmulationScopeEnforcement(t *testing.T) {
 		t.Errorf("in-scope run status: want success, got %s", run.Status)
 	}
 }
+
+// TestRecordDetection_FeedsTRM verifies the purple-team scoring step records a
+// defender outcome and lifts the technique to "validated", raising the TRM.
+func TestRecordDetection_FeedsTRM(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithResolver(service.NewFakeResolver())
+
+	runID, err := svcEmu.Start(ctx, eng.ID, "apt29", "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var run domain.ScenarioRun
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ = svcEmu.GetRun(ctx, runID)
+		if run.Status != domain.ExecRunning && len(run.Results) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(run.Results) == 0 {
+		t.Fatal("run produced no results")
+	}
+
+	// Baseline: nothing detected yet → TRM 0.
+	cov0, _ := svcEmu.GetCoverage(ctx, eng.ID)
+	if cov0.TRM != 0 || cov0.ValidatedCount != 0 {
+		t.Errorf("baseline TRM/validated should be 0, got trm=%d validated=%d", cov0.TRM, cov0.ValidatedCount)
+	}
+
+	tid := run.Results[0].TechniqueAttackID
+	if err := svcEmu.RecordDetection(ctx, runID, tid, domain.DetectDetected, "op"); err != nil {
+		t.Fatalf("RecordDetection: %v", err)
+	}
+
+	cov1, _ := svcEmu.GetCoverage(ctx, eng.ID)
+	if cov1.ValidatedCount < 1 || cov1.TRM <= 0 {
+		t.Errorf("after detection: want validated>=1 and trm>0, got validated=%d trm=%d", cov1.ValidatedCount, cov1.TRM)
+	}
+	if !hasAuditAction(s.audit, "emulation.detection", "") && !hasAuditAction(s.audit, "emulation.detection", eng.ID) {
+		t.Error("expected emulation.detection audit event")
+	}
+
+	// Invalid outcome and unknown technique are rejected.
+	if err := svcEmu.RecordDetection(ctx, runID, tid, domain.DetectionOutcome("bogus"), "op"); err == nil {
+		t.Error("expected error for invalid outcome")
+	}
+	if err := svcEmu.RecordDetection(ctx, runID, "T9999", domain.DetectBlocked, "op"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown technique: want ErrNotFound, got %v", err)
+	}
+}

@@ -497,6 +497,27 @@ func (s *EmulationService) GetRun(ctx context.Context, id string) (domain.Scenar
 	return s.scenarios.GetRun(ctx, id)
 }
 
+// RecordDetection sets the defender outcome (block/detect/alert/none) for a
+// technique within a run — the purple-team scoring step that feeds the TRM.
+func (s *EmulationService) RecordDetection(ctx context.Context, runID, attackID string, outcome domain.DetectionOutcome, actor string) error {
+	switch outcome {
+	case domain.DetectNone, domain.DetectAlerted, domain.DetectDetected, domain.DetectBlocked:
+	default:
+		return fmt.Errorf("invalid detection outcome %q", outcome)
+	}
+	if err := s.scenarios.SetResultDetection(ctx, runID, attackID, outcome); err != nil {
+		return err
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		Actor:  actor,
+		Action: "emulation.detection",
+		Target: runID,
+		Detail: fmt.Sprintf("technique=%s outcome=%s", attackID, outcome),
+		At:     time.Now().UTC(),
+	})
+	return nil
+}
+
 // ListRuns returns all runs for an engagement.
 func (s *EmulationService) ListRuns(ctx context.Context, engagementID string) ([]domain.ScenarioRun, error) {
 	return s.scenarios.RunsForEngagement(ctx, engagementID)
@@ -561,7 +582,9 @@ type Coverage struct {
 	TotalTechniques int `json:"totalTechniques"`
 	ExercisedCount  int `json:"exercisedCount"` // level >= 1
 	ExecutedCount   int `json:"executedCount"`  // level >= 2
-	ValidatedCount  int `json:"validatedCount"` // level == 3
+	ValidatedCount  int `json:"validatedCount"` // level == 3 (passed: block/detect/alert)
+	// TRM (Threat Resilience Metric): % of exercised techniques that passed.
+	TRM int `json:"trm"`
 }
 
 // GetCoverage rolls up all runs for an engagement into a Coverage report.
@@ -584,7 +607,7 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 			continue
 		}
 		for _, r := range full.Results {
-			lvl := resultToLevel(r.Status)
+			lvl := resultLevel(r)
 			if existing, ok := levels[r.TechniqueAttackID]; !ok || lvl > existing {
 				levels[r.TechniqueAttackID] = lvl
 			}
@@ -682,6 +705,10 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 	_ = names
 	_ = tactics
 
+	trm := 0
+	if exercised > 0 {
+		trm = int(float64(validated) / float64(exercised) * 100)
+	}
 	return Coverage{
 		EngagementID:    engagementID,
 		Tactics:         tacticList,
@@ -689,23 +716,25 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 		ExercisedCount:  exercised,
 		ExecutedCount:   executed,
 		ValidatedCount:  validated,
+		TRM:             trm,
 	}, nil
 }
 
-// resultToLevel converts a technique execution status to a coverage level.
-// The rubric:
+// resultLevel converts a technique result to a coverage level, factoring in the
+// defender outcome:
 //
 //	0 = not exercised (never ran)
 //	1 = attempted (ran but failed/skipped)
-//	2 = executed (ran and succeeded)
-//	3 = validated (TODO: wire detection signal; for now same as executed)
-func resultToLevel(status domain.ExecutionStatus) CoverageLevel {
-	switch status {
+//	2 = executed (ran and succeeded, but defenders didn't catch it)
+//	3 = validated (executed AND blocked/detected/alerted — the defenders passed)
+func resultLevel(r domain.Result) CoverageLevel {
+	switch r.Status {
 	case domain.ExecSuccess:
+		if r.Detection.Passed() {
+			return CoverageLevelValidated
+		}
 		return CoverageLevelExecuted
-	case domain.ExecFailed:
-		return CoverageLevelAttempted
-	case domain.ExecSkipped:
+	case domain.ExecFailed, domain.ExecSkipped:
 		return CoverageLevelAttempted
 	default:
 		return CoverageLevelNone

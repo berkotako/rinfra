@@ -351,6 +351,7 @@ func runToJSON(r domain.ScenarioRun) map[string]any {
 			"techniqueId": res.TechniqueAttackID,
 			"status":      string(res.Status),
 			"output":      res.Output,
+			"detection":   string(res.Detection),
 			"startedAt":   res.StartedAt,
 			"finishedAt":  res.FinishedAt,
 			"err":         res.Err,

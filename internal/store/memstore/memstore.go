@@ -286,6 +286,28 @@ func (s *ScenarioStore) SaveResult(_ context.Context, runID string, result domai
 	return nil
 }
 
+// SetResultDetection updates the detection outcome for a technique in a run.
+func (s *ScenarioStore) SetResultDetection(_ context.Context, runID, attackID string, outcome domain.DetectionOutcome) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.runs[runID]
+	if !ok {
+		return fmt.Errorf("scenario_run %s: %w", runID, store.ErrNotFound)
+	}
+	found := false
+	for i := range run.Results {
+		if run.Results[i].TechniqueAttackID == attackID {
+			run.Results[i].Detection = outcome
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("technique %s in run %s: %w", attackID, runID, store.ErrNotFound)
+	}
+	s.runs[runID] = run
+	return nil
+}
+
 // --- UserScenarioStore ---
 
 // UserScenarioStore is the in-memory implementation of store.UserScenarioStore.

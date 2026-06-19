@@ -651,6 +651,37 @@ func (h *handlers) getRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"run": runToJSON(run)})
 }
 
+type recordDetectionRequest struct {
+	TechniqueID string `json:"techniqueId"`
+	Outcome     string `json:"outcome"`
+}
+
+// recordDetection sets the defender outcome (block/detect/alert/none) for a
+// technique in a run — the purple-team scoring step that feeds the TRM.
+func (h *handlers) recordDetection(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req recordDetectionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	run, err := h.svc.Emulation.GetRun(r.Context(), id)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	if eng, err := h.svc.Engagement.Get(r.Context(), run.EngagementID); err == nil {
+		if !h.canAccessEngagement(r.Context(), actorUser(r.Context()), eng) {
+			writeErrorCode(w, http.StatusForbidden, "forbidden", "you do not have access to this run")
+			return
+		}
+	}
+	if err := h.svc.Emulation.RecordDetection(r.Context(), id, req.TechniqueID, domain.DetectionOutcome(req.Outcome), actorFrom(r.Context())); err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---------- Coverage + Navigator ----------
 
 func (h *handlers) getCoverage(w http.ResponseWriter, r *http.Request) {
