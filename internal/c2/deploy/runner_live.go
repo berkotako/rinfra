@@ -251,5 +251,5 @@ func sshConfigFromEnv(host string) (SSHConfig, error) {
 // errRunner is a Runner that always fails with a fixed configuration error.
 type errRunner struct{ err error }
 
-func (e *errRunner) Run(context.Context, string) (string, error) { return "", e.err }
+func (e *errRunner) Run(context.Context, string) (string, error)  { return "", e.err }
 func (e *errRunner) Upload(context.Context, string, string) error { return e.err }

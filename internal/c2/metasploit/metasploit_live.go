@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,8 +42,9 @@ type liveClient struct {
 	token string
 }
 
-// NewLiveClient connects to msfrpcd and authenticates.
-func NewLiveClient(ctx context.Context, cfg LiveConfig) (MsfRpcdClient, error) {
+// newLiveClient builds an unauthenticated msfrpcd client against cfg.BaseURL.
+// Callers that have credentials call Auth before issuing other RPCs.
+func newLiveClient(cfg LiveConfig) (*liveClient, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("metasploit: LiveConfig.BaseURL is required")
 	}
@@ -58,11 +60,58 @@ func NewLiveClient(ctx context.Context, cfg LiveConfig) (MsfRpcdClient, error) {
 			},
 		}
 	}
-	c := &liveClient{url: strings.TrimRight(cfg.BaseURL, "/") + msfRPCPath, httpc: httpc}
+	return &liveClient{url: strings.TrimRight(cfg.BaseURL, "/") + msfRPCPath, httpc: httpc}, nil
+}
+
+// NewLiveClient connects to msfrpcd and authenticates.
+func NewLiveClient(ctx context.Context, cfg LiveConfig) (MsfRpcdClient, error) {
+	c, err := newLiveClient(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if err := c.Auth(ctx, cfg.Username, cfg.Password); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// clientForTeamserver builds a live msfrpcd client pointed at a deployed
+// teamserver's RPC endpoint. msfrpcd serves the MessagePack RPC over HTTPS with
+// a self-signed cert by default, so TLS verification is skipped (the endpoint is
+// reached over the per-engagement tunnel, not the public internet). The returned
+// client is unauthenticated; the caller authenticates with the per-engagement
+// RPC credentials before driving it.
+func clientForTeamserver(ts c2.Teamserver) MsfRpcdClient {
+	port := ts.Port
+	if port == 0 {
+		port = msfRpcdPort
+	}
+	base := fmt.Sprintf("https://%s", net.JoinHostPort(ts.Host, strconv.Itoa(port)))
+	c, err := newLiveClient(LiveConfig{BaseURL: base, InsecureSkipVerify: true})
+	if err != nil {
+		// BaseURL is always non-empty here, so this path is unreachable in
+		// practice; return a client that surfaces a clear error rather than nil.
+		return &errClient{err: err}
+	}
+	return c
+}
+
+// errClient is an MsfRpcdClient whose every method fails with a fixed error,
+// used so a misconfigured Control() surfaces a real message rather than nil.
+type errClient struct{ err error }
+
+func (e *errClient) Auth(context.Context, string, string) error         { return e.err }
+func (e *errClient) ConsoleCreate(context.Context) (string, error)      { return "", e.err }
+func (e *errClient) ConsoleWrite(context.Context, string, string) error { return e.err }
+func (e *errClient) ConsoleRead(context.Context, string) (string, error) {
+	return "", e.err
+}
+func (e *errClient) SessionList(context.Context) ([]MsfSession, error) { return nil, e.err }
+func (e *errClient) SessionShellWrite(context.Context, string, string) error {
+	return e.err
+}
+func (e *errClient) SessionShellRead(context.Context, string) (string, error) {
+	return "", e.err
 }
 
 // LiveOperator composes a live client into a ready Operator for the service layer.

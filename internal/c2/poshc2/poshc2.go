@@ -7,12 +7,13 @@
 // # Automation seam note
 //
 // PoshC2 does not expose a stable machine-readable operator API. The partial
-// operator implemented here uses the poshc2 Python CLI (posh-get-implants,
-// posh-shell-command, etc.) via SSH. This is brittle by design — users should
-// prefer Sliver or Mythic for operator-API-driven emulation.
+// operator implemented here drives the poshc2 implant-handler CLI (the
+// `posh` / `poshc2` console, e.g. posh -i to issue implant tasks) via SSH on the
+// teamserver host and parses its textual output. This is brittle by design —
+// users should prefer Sliver or Mythic for operator-API-driven emulation.
 //
-// TODO(live): if a future PoshC2 release exposes a proper API, update
-// PoshC2Client to use it and expand supportedTechniques.
+// If a future PoshC2 release exposes a proper API, swap the cliPoshC2Client
+// command strings for it and expand supportedTechniques.
 package poshc2
 
 import (
@@ -109,11 +110,11 @@ func (p *provider) RedirectorConfig(prof domain.Profile) (string, error) {
 // Control returns a scripted partial Operator. Techniques outside
 // supportedTechniques return ExecSkipped.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	return &operator{ts: ts, client: &noopPoshC2Client{}}, true
+	client := newCLIPoshC2Client(deploy.NewNodeRunner(ts.Host))
+	return &operator{ts: ts, client: client}, true
 }
 
-// PoshC2Client wraps the PoshC2 Python CLI for limited automation.
-// TODO(live): replace with a proper API client if Nettitude publishes one.
+// PoshC2Client wraps the PoshC2 implant-handler CLI for limited automation.
 type PoshC2Client interface {
 	Execute(ctx context.Context, implantID, command string) (string, error)
 	Implants(ctx context.Context) ([]PoshC2Implant, error)
@@ -217,27 +218,107 @@ func techniqueToCommand(t domain.Technique) string {
 	}
 }
 
-func runnerFromNode(_ domain.Node) deploy.Runner {
-	return &noopRunner{}
+func runnerFromNode(node domain.Node) deploy.Runner {
+	return deploy.NewNodeRunner(node.PublicIP)
 }
 
-type noopRunner struct{}
+// cliPoshC2Client is the live PoshC2Client. It drives the upstream PoshC2
+// implant-handler CLI (`poshc2`) on the teamserver host through a deploy.Runner
+// and parses its textual stdout. RInfra composes the upstream tool here: every
+// command string below targets PoshC2's own CLI — RInfra authors no implants,
+// payloads, or evasion.
+type cliPoshC2Client struct {
+	runner deploy.Runner
+}
 
-func (n *noopRunner) Run(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("poshc2: SSH runner not wired (TODO(live))")
-}
-func (n *noopRunner) Upload(_ context.Context, _, _ string) error {
-	return fmt.Errorf("poshc2: SSH runner not wired (TODO(live))")
+// newCLIPoshC2Client constructs a live CLI-backed PoshC2Client. runner executes
+// commands on the teamserver host (production: deploy.NewNodeRunner).
+func newCLIPoshC2Client(runner deploy.Runner) *cliPoshC2Client {
+	return &cliPoshC2Client{runner: runner}
 }
 
-type noopPoshC2Client struct{}
+// Execute tasks an implant with a command via the PoshC2 implant-handler and
+// returns the task output. The handler is driven non-interactively with `-i`
+// (implant id) and `-c` (command) flags.
+func (c *cliPoshC2Client) Execute(ctx context.Context, implantID, command string) (string, error) {
+	cmd := fmt.Sprintf("poshc2 -i %s -c %s", shellQuote(implantID), shellQuote(command))
+	out, err := c.runner.Run(ctx, cmd)
+	if err != nil {
+		return out, fmt.Errorf("poshc2: implant-handler task on %s: %w", implantID, err)
+	}
+	return out, nil
+}
 
-func (n *noopPoshC2Client) Execute(_ context.Context, _, _ string) (string, error) {
-	return "", fmt.Errorf("poshc2: client not wired (TODO(live))")
+// Implants lists active implants by parsing `poshc2 --list-implants` output.
+func (c *cliPoshC2Client) Implants(ctx context.Context) ([]PoshC2Implant, error) {
+	out, err := c.runner.Run(ctx, "poshc2 --list-implants")
+	if err != nil {
+		return nil, fmt.Errorf("poshc2: list implants: %w", err)
+	}
+	return parsePoshImplants(out), nil
 }
-func (n *noopPoshC2Client) Implants(_ context.Context) ([]PoshC2Implant, error) {
-	return nil, fmt.Errorf("poshc2: client not wired (TODO(live))")
+
+// StartListener creates a listener on the PoshC2 server via the implant-handler.
+func (c *cliPoshC2Client) StartListener(ctx context.Context, protocol string, port int) error {
+	cmd := fmt.Sprintf("poshc2 --create-listener --name rinfra-%s --type %s --port %d",
+		protocol, protocol, port)
+	if _, err := c.runner.Run(ctx, cmd); err != nil {
+		return fmt.Errorf("poshc2: create listener: %w", err)
+	}
+	return nil
 }
-func (n *noopPoshC2Client) StartListener(_ context.Context, _ string, _ int) error {
-	return fmt.Errorf("poshc2: client not wired (TODO(live))")
+
+// parsePoshImplants parses the tabular output of `poshc2 --list-implants`. Each
+// implant row is whitespace/pipe separated:
+//
+//	ID | Hostname | Username
+//
+// Header lines, separators, and blanks are skipped; short rows fill what they can.
+func parsePoshImplants(out string) []PoshC2Implant {
+	var implants []PoshC2Implant
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "id") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "=") {
+			continue
+		}
+		fields := splitColumns(line)
+		if len(fields) == 0 {
+			continue
+		}
+		im := PoshC2Implant{ID: fields[0]}
+		if len(fields) > 1 {
+			im.Hostname = fields[1]
+		}
+		if len(fields) > 2 {
+			im.Username = fields[2]
+		}
+		implants = append(implants, im)
+	}
+	return implants
+}
+
+// splitColumns splits a PoshC2 table row on pipes or runs of whitespace.
+func splitColumns(line string) []string {
+	var raw []string
+	if strings.Contains(line, "|") {
+		raw = strings.Split(line, "|")
+	} else {
+		raw = strings.Fields(line)
+	}
+	out := make([]string, 0, len(raw))
+	for _, f := range raw {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// shellQuote single-quotes s for safe use as a shell argument.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

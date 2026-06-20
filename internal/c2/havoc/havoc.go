@@ -13,8 +13,9 @@
 // # Scripted operator API
 //
 // HavocClient is the interface over Havoc's scripting layer. The live
-// implementation runs Havoc's Python API bridge (havoc.py); tests inject a
-// FakeHavocClient. TODO(live) for real wiring.
+// implementation (cliHavocClient) drives the upstream Havoc client binary on the
+// teamserver host over the shared SSH Runner and parses its textual output;
+// tests inject a FakeHavocClient.
 //
 // # PoshC2 note
 //
@@ -139,8 +140,8 @@ func havocRedirectorConfig(prof domain.Profile) (string, error) {
 // Control returns a scripted Operator for Havoc. The operator supports a
 // curated subset of techniques; others return ExecSkipped.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	// TODO(live): construct a real HavocClient from the teamserver connection info.
-	return &operator{ts: ts, client: &noopHavocClient{}}, true
+	client := newCLIHavocClient(deploy.NewNodeRunner(ts.Host), ts.Host, ts.Port)
+	return &operator{ts: ts, client: client}, true
 }
 
 // HavocClient is the minimal interface over Havoc's scripting layer.
@@ -313,27 +314,133 @@ func sanitize(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-func runnerFromNode(_ domain.Node) deploy.Runner {
-	return &noopRunner{}
+func runnerFromNode(node domain.Node) deploy.Runner {
+	return deploy.NewNodeRunner(node.PublicIP)
 }
 
-type noopRunner struct{}
+// cliHavocClient is the live HavocClient. It drives the upstream Havoc client
+// (the `havoc` operator binary, invoked headless with `havoc client ...`) on the
+// teamserver host through a deploy.Runner and parses its textual stdout. RInfra
+// composes the upstream tool here: every command string below targets Havoc's
+// own client CLI — RInfra authors no implants, payloads, or evasion. The client
+// connects to the teamserver over loopback on the host, so host/port describe
+// the local teamserver endpoint the Havoc client attaches to.
+type cliHavocClient struct {
+	runner deploy.Runner
+	host   string
+	port   int
+}
 
-func (n *noopRunner) Run(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("havoc: SSH runner not wired (TODO(live))")
-}
-func (n *noopRunner) Upload(_ context.Context, _, _ string) error {
-	return fmt.Errorf("havoc: SSH runner not wired (TODO(live))")
+// newCLIHavocClient constructs a live CLI-backed HavocClient. runner executes
+// commands on the teamserver host (production: deploy.NewNodeRunner); host/port
+// identify the teamserver endpoint the Havoc client connects to.
+func newCLIHavocClient(runner deploy.Runner, host string, port int) *cliHavocClient {
+	if port == 0 {
+		port = havocPort
+	}
+	return &cliHavocClient{runner: runner, host: host, port: port}
 }
 
-type noopHavocClient struct{}
+// clientInvoke builds the `havoc client` invocation prefix that connects to the
+// local teamserver before running a sub-command. The Havoc client attaches over
+// loopback on the teamserver host itself.
+func (c *cliHavocClient) clientInvoke(sub string) string {
+	return fmt.Sprintf("havoc client --host 127.0.0.1 --port %d %s", c.port, sub)
+}
 
-func (n *noopHavocClient) Execute(_ context.Context, _, _ string) (string, error) {
-	return "", fmt.Errorf("havoc: scripting client not wired (TODO(live))")
+// Execute runs a demon command on an active session via the Havoc client and
+// returns the demon's textual output.
+func (c *cliHavocClient) Execute(ctx context.Context, sessionID, command string) (string, error) {
+	cmd := c.clientInvoke(fmt.Sprintf("demon %s exec %s", shellQuote(sessionID), command))
+	out, err := c.runner.Run(ctx, cmd)
+	if err != nil {
+		return out, fmt.Errorf("havoc: client exec on demon %s: %w", sessionID, err)
+	}
+	return out, nil
 }
-func (n *noopHavocClient) Sessions(_ context.Context) ([]HavocSession, error) {
-	return nil, fmt.Errorf("havoc: scripting client not wired (TODO(live))")
+
+// Sessions lists active demon sessions by parsing the Havoc client's
+// `demon list` output.
+func (c *cliHavocClient) Sessions(ctx context.Context) ([]HavocSession, error) {
+	out, err := c.runner.Run(ctx, c.clientInvoke("demon list"))
+	if err != nil {
+		return nil, fmt.Errorf("havoc: client demon list: %w", err)
+	}
+	return parseHavocSessions(out), nil
 }
-func (n *noopHavocClient) StartListener(_ context.Context, _, _ string, _ int) error {
-	return fmt.Errorf("havoc: scripting client not wired (TODO(live))")
+
+// StartListener creates a listener on the teamserver via the Havoc client.
+func (c *cliHavocClient) StartListener(ctx context.Context, protocol, host string, port int) error {
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	sub := fmt.Sprintf("listener add --name rinfra-%s --protocol %s --host %s --port %d",
+		protocol, protocol, host, port)
+	if _, err := c.runner.Run(ctx, c.clientInvoke(sub)); err != nil {
+		return fmt.Errorf("havoc: client listener add: %w", err)
+	}
+	return nil
+}
+
+// parseHavocSessions parses the tabular output of `havoc client demon list`.
+// Each demon row is whitespace/pipe separated:
+//
+//	ID | Hostname | Username | OS | Arch
+//
+// Header lines, separators, and blanks are skipped. Parsing is lenient: a row
+// with fewer fields fills what it can.
+func parseHavocSessions(out string) []HavocSession {
+	var sessions []HavocSession
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip a header or separator row.
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "id") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "=") {
+			continue
+		}
+		fields := splitColumns(line)
+		if len(fields) == 0 {
+			continue
+		}
+		s := HavocSession{ID: fields[0]}
+		if len(fields) > 1 {
+			s.Hostname = fields[1]
+		}
+		if len(fields) > 2 {
+			s.Username = fields[2]
+		}
+		if len(fields) > 3 {
+			s.OS = fields[3]
+		}
+		if len(fields) > 4 {
+			s.Arch = fields[4]
+		}
+		sessions = append(sessions, s)
+	}
+	return sessions
+}
+
+// splitColumns splits a Havoc/PoshC2 table row on pipes or runs of whitespace.
+func splitColumns(line string) []string {
+	var raw []string
+	if strings.Contains(line, "|") {
+		raw = strings.Split(line, "|")
+	} else {
+		raw = strings.Fields(line)
+	}
+	out := make([]string, 0, len(raw))
+	for _, f := range raw {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// shellQuote single-quotes s for safe use as a shell argument.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

@@ -1,10 +1,29 @@
-// Package custom adapts an in-house / custom C2 framework to RInfra.
-// Orchestrated-tier: you own the operator surface, so it supports full
-// automated emulation.
+// Package custom adapts RInfra's in-house / custom C2 framework. It is
+// Orchestrated-tier: RInfra owns the operator surface, so it supports full
+// automated emulation via the Operator interface.
 //
-// Replace the constants and client interface with your framework's actual
-// deploy mechanics and operator API. This adapter is a template that
-// demonstrates the Orchestrated-tier pattern.
+// # Operator API contract
+//
+// Because the custom framework is in-house, RInfra defines its operator API.
+// It is a small REST + JSON surface served by the teamserver on
+// customOperatorAPIPort and authenticated with a per-engagement bearer token
+// (Authorization: Bearer <token>). The contract, implemented live by
+// httpCustomClient (client.go):
+//
+//	POST /api/v1/listeners
+//	    req:  {"name","protocol","bind","port"}
+//	    resp: 2xx on success (body ignored); non-2xx => error
+//
+//	GET /api/v1/sessions
+//	    resp: [{"id","host","user"}, ...]
+//
+//	POST /api/v1/sessions/{id}/exec
+//	    req:  {"command"}
+//	    resp: {"output"}
+//
+// Any non-2xx response is surfaced as a Go error. Control() constructs the live
+// client against the deployed teamserver; tests inject a fake via
+// NewOperatorWithClient or stand up an httptest server (client_test.go).
 //
 // # Posture
 //
@@ -27,10 +46,16 @@ import (
 
 func init() { c2.Register(&provider{}) }
 
-// Replace these with the actual custom framework's install coordinates.
 const (
 	customFrameworkName = "custom"
-	customPort          = 8080
+	// customPort is the implant-facing listener port fronted by the redirector.
+	customPort = 8080
+	// customOperatorAPIPort is the port the in-house teamserver serves its
+	// operator REST API on (see the package doc for the contract). It is
+	// separate from the implant listener port and is not exposed through the
+	// redirector — operators reach it directly over the engagement's control
+	// channel.
+	customOperatorAPIPort = 9443
 	// customReleaseURL is the URL of the official framework release archive.
 	// Operator: set this to the actual release URL + pin the checksum.
 	customReleaseURL = "https://example.com/custom-framework/releases/latest/server_linux"
@@ -95,10 +120,15 @@ func (p *provider) RedirectorConfig(prof domain.Profile) (string, error) {
 	return cfg, nil
 }
 
-// Control returns an Orchestrated Operator. Replace CustomClient with the
-// actual framework's API client.
+// Control returns an Orchestrated-tier Operator backed by the live HTTP
+// operator-API client. The custom framework is RInfra's own in-house C2, so the
+// operator API is defined here (see httpCustomClient for the contract). The
+// client targets the teamserver's operator API, which listens on
+// customOperatorAPIPort (see deriveOperatorBaseURL); its bearer token is read
+// from the per-engagement environment (EnvCustomAPIToken). Tests inject a fake
+// via NewOperatorWithClient or stand up an httptest server (client_test.go).
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	return &operator{ts: ts, client: &noopCustomClient{}}, true
+	return &operator{ts: ts, client: newHTTPClientForTeamserver(ts)}, true
 }
 
 // CustomClient is the operator API interface for the custom framework.
@@ -197,27 +227,8 @@ func techniqueToCommand(t domain.Technique) (string, error) {
 	}
 }
 
-func runnerFromNode(_ domain.Node) deploy.Runner {
-	return &noopRunner{}
-}
-
-type noopRunner struct{}
-
-func (n *noopRunner) Run(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("custom: SSH runner not wired (TODO(live))")
-}
-func (n *noopRunner) Upload(_ context.Context, _, _ string) error {
-	return fmt.Errorf("custom: SSH runner not wired (TODO(live))")
-}
-
-type noopCustomClient struct{}
-
-func (n *noopCustomClient) Execute(_ context.Context, _, _ string) (string, error) {
-	return "", fmt.Errorf("custom: operator client not wired (TODO(live))")
-}
-func (n *noopCustomClient) Sessions(_ context.Context) ([]CustomSession, error) {
-	return nil, fmt.Errorf("custom: operator client not wired (TODO(live))")
-}
-func (n *noopCustomClient) StartListener(_ context.Context, _, _ string, _ int) error {
-	return fmt.Errorf("custom: operator client not wired (TODO(live))")
+// runnerFromNode builds the production SSH Runner for a node. SSH key material
+// is loaded from the per-engagement environment by deploy.NewNodeRunner.
+func runnerFromNode(node domain.Node) deploy.Runner {
+	return deploy.NewNodeRunner(node.PublicIP)
 }

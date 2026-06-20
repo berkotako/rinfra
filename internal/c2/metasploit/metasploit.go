@@ -7,16 +7,20 @@
 // Deploys and drives the upstream Metasploit release. Implements no payloads,
 // modules, or evasion. Open source (Rapid7) — no license key required.
 //
-// # msfrpcd client note (TODO:live)
+// # msfrpcd client
 //
 // MsfRpcdClient is the minimal interface over the msfrpcd MessagePack-over-HTTP
-// RPC protocol. The live implementation uses HTTP POST to
-// /api/1.0/ with msgpack-encoded calls. Tests inject a fake; the live wiring
-// is deferred behind TODO(live) markers to avoid adding a large msgpack dep.
+// RPC protocol. The live implementation (liveClient, metasploit_live.go) issues
+// HTTP POSTs to /api/1.0/ with msgpack-encoded calls using the in-house codec
+// in msgpack.go. Control() wires it against the deployed teamserver; tests
+// inject a fake (metasploit_test.go) or an in-process msfrpcd stand-in
+// (metasploit_live_test.go).
 package metasploit
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -24,6 +28,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/secrets"
 )
 
 func init() { c2.Register(&provider{}) }
@@ -46,26 +51,36 @@ func (p *provider) Tier() c2.SupportTier { return c2.TierOrchestrated }
 // Deploy installs the upstream Metasploit Framework on the node via SSH, then
 // starts msfrpcd (the RPC daemon) as a systemd service.
 func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
-	runner := runnerFromNode(node)
+	runner := deploy.NewNodeRunner(node.PublicIP)
 	return deployMSF(ctx, runner, node, cfg)
 }
 
 func deployMSF(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2.Config) (c2.Teamserver, error) {
 	rpcUser := "msf"
-	rpcPass := "rinfra-generated" // TODO(live): generate per-engagement via secrets package.
+	// Generate a per-engagement msfrpcd RPC password instead of a shared
+	// constant: every deployed teamserver gets unique credentials. The value is
+	// wrapped in secrets.Redacted so it can never leak into logs or the audit
+	// trail; the plaintext is only used to build the remote install command and
+	// is written to the node's 0600 /etc/msf/rpc.env, never echoed to stdout.
+	rpcPass, err := generateRPCPassword()
+	if err != nil {
+		return c2.Teamserver{}, fmt.Errorf("metasploit.Deploy: generate RPC password: %w", err)
+	}
 
 	extraSetup := []string{
 		"# Install Metasploit Framework from the official Rapid7 omnibus installer.",
 		"bash /tmp/rinfra-install.sh || true", // installer sets up the MSF install
-		fmt.Sprintf("msfdb init || true"),
-		fmt.Sprintf("msfrpcd -P '%s' -U '%s' -a 127.0.0.1 -p %d -S -f &", rpcPass, rpcUser, msfRpcdPort),
+		"msfdb init || true",
+		// Write the per-engagement RPC password to a 0600 env file first, then
+		// reference it by variable so the plaintext never appears in argv or the
+		// script's stdout.
+		"install -m 0600 /dev/null /etc/msf/rpc.env",
+		fmt.Sprintf("printf 'MSF_RPC_USER=%%s\\n' %s >> /etc/msf/rpc.env", shellSingleQuote(rpcUser)),
+		fmt.Sprintf("printf 'MSF_RPC_PASS=%%s\\n' %s >> /etc/msf/rpc.env", shellSingleQuote(string(rpcPass))),
+		fmt.Sprintf("set -a; . /etc/msf/rpc.env; set +a; msfrpcd -P \"$MSF_RPC_PASS\" -U \"$MSF_RPC_USER\" -a 127.0.0.1 -p %d -S -f &", msfRpcdPort),
 		"sleep 3",
 		"pkill -f msfrpcd || true",
 		"echo '[rinfra-msf] msfrpcd credentials written to /etc/msf/rpc.env'",
-		fmt.Sprintf("install -m 0600 /dev/null /etc/msf/rpc.env"),
-		fmt.Sprintf("echo 'MSF_RPC_USER=%s' >> /etc/msf/rpc.env", rpcUser),
-		// Password goes to env file; not echoed to script stdout.
-		"echo 'MSF_RPC_PASS=<from-secrets>' >> /etc/msf/rpc.env",
 	}
 
 	params := deploy.InstallParams{
@@ -119,12 +134,14 @@ func msfRedirectorConfig(prof domain.Profile) (string, error) {
 	return cfg, nil
 }
 
-// Control returns an Orchestrated-tier Operator backed by the msfrpcd RPC API.
-// The live client is wired in metasploit_live.go: the service layer calls
-// LiveOperator with the msfrpcd URL + credentials (from the per-engagement env
-// file). Until then this returns a noop-backed operator so nothing regresses.
+// Control returns an Orchestrated-tier Operator backed by the live msfrpcd RPC
+// client (metasploit_live.go), pointed at the deployed teamserver's RPC
+// endpoint. The returned client is unauthenticated; the caller authenticates
+// with the per-engagement RPC credentials (from /etc/msf/rpc.env) by calling
+// Auth before driving sessions. The service layer can instead call LiveOperator
+// to obtain an already-authenticated Operator in one step.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	return &operator{ts: ts, client: &noopMsfClient{}}, true
+	return &operator{ts: ts, client: clientForTeamserver(ts)}, true
 }
 
 // MsfRpcdClient is the minimal interface over msfrpcd's MessagePack-over-HTTP
@@ -353,39 +370,18 @@ func sanitize(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-func runnerFromNode(_ domain.Node) deploy.Runner {
-	return &noopRunner{}
+// generateRPCPassword returns a per-engagement msfrpcd RPC password as 32 hex
+// chars of cryptographically random entropy, wrapped in secrets.Redacted so it
+// is never captured by logs or the audit trail.
+func generateRPCPassword() (secrets.Redacted, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("read random: %w", err)
+	}
+	return secrets.Redacted(hex.EncodeToString(buf)), nil
 }
 
-type noopRunner struct{}
-
-func (n *noopRunner) Run(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("metasploit: SSH runner not wired (TODO(live))")
-}
-func (n *noopRunner) Upload(_ context.Context, _, _ string) error {
-	return fmt.Errorf("metasploit: SSH runner not wired (TODO(live))")
-}
-
-type noopMsfClient struct{}
-
-func (n *noopMsfClient) Auth(_ context.Context, _, _ string) error {
-	return fmt.Errorf("metasploit: msfrpcd client not wired (TODO(live))")
-}
-func (n *noopMsfClient) ConsoleCreate(_ context.Context) (string, error) {
-	return "", fmt.Errorf("metasploit: msfrpcd client not wired (TODO(live))")
-}
-func (n *noopMsfClient) ConsoleWrite(_ context.Context, _, _ string) error {
-	return fmt.Errorf("metasploit: msfrpcd client not wired (TODO(live))")
-}
-func (n *noopMsfClient) ConsoleRead(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("metasploit: msfrpcd client not wired (TODO(live))")
-}
-func (n *noopMsfClient) SessionList(_ context.Context) ([]MsfSession, error) {
-	return nil, fmt.Errorf("metasploit: msfrpcd client not wired (TODO(live))")
-}
-func (n *noopMsfClient) SessionShellWrite(_ context.Context, _, _ string) error {
-	return fmt.Errorf("metasploit: msfrpcd client not wired (TODO(live))")
-}
-func (n *noopMsfClient) SessionShellRead(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("metasploit: msfrpcd client not wired (TODO(live))")
+// shellSingleQuote single-quotes s for safe use as a shell argument.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

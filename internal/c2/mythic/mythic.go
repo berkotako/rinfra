@@ -9,12 +9,16 @@
 // Mythic via docker-compose (the official install method) by fetching the
 // official install script from the Mythic GitHub repo at a pinned version.
 //
-// # HTTP client note (TODO:live)
+// # HTTP client
 //
-// MythicClient is the thin HTTP interface over Mythic's REST/GraphQL API.
-// The live implementation makes HTTP/GraphQL calls against the deployed Mythic
-// instance. Tests inject FakeMythicClient. TODO(live) markers indicate where
-// real HTTP calls need to be wired.
+// MythicClient is the thin HTTP interface over Mythic's REST/GraphQL API. It is
+// wired live by httpMythicClient (this file), which authenticates to Mythic's
+// /auth endpoint for a bearer JWT and then drives the Hasura /graphql/ endpoint
+// using the shared liveClient implementation in mythic_live.go. Control()
+// constructs it against the deployed teamserver, with operator credentials read
+// from the per-engagement environment; auth happens lazily on first use so the
+// (context-free) Control hook stays cheap. Tests inject FakeMythicClient or
+// stand up an httptest server (client_test.go, mythic_live_test.go).
 package mythic
 
 import (
@@ -120,13 +124,15 @@ func mythicRedirectorConfig(prof domain.Profile) (string, error) {
 	return cfg, nil
 }
 
-// Control returns an Operator backed by a MythicClient for the REST/GraphQL API.
-// The live client is wired in mythic_live.go: the service layer calls
-// LiveOperator with the Mythic base URL + operator credentials (from the
-// install) to obtain a fully live Operator. Until then this returns a
-// noop-backed operator so nothing regresses.
+// Control returns an Orchestrated-tier Operator backed by the live Mythic
+// REST/GraphQL client. The client targets the deployed teamserver (Mythic's
+// HTTPS UI/API, default port 7443) and authenticates lazily on first use with
+// operator credentials read from the per-engagement environment (see
+// newHTTPClientForTeamserver). The service layer may instead call LiveOperator
+// (mythic_live.go) when it holds explicit credentials; both paths produce the
+// same live Operator.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	return &operator{ts: ts, client: &noopMythicClient{}}, true
+	return &operator{ts: ts, client: newHTTPClientForTeamserver(ts)}, true
 }
 
 // MythicClient is the minimal interface over Mythic's REST/GraphQL API.
@@ -167,7 +173,9 @@ type operator struct {
 }
 
 func (o *operator) StartListener(ctx context.Context, spec c2.ListenerSpec) error {
-	// TODO(live): call MythicClient.CreateListener via the Mythic API.
+	// Drive the Mythic API: ensure the C2 profile for this listener protocol is
+	// present and running on the teamserver (Mythic profiles run as containers
+	// started at deploy time; CreateListener verifies/activates them).
 	profile := mythicC2ProfileForProtocol(spec.Protocol)
 	port := 443
 	if spec.Protocol == "dns" {
@@ -348,36 +356,8 @@ func paramsToJSON(p map[string]string) string {
 	return string(b)
 }
 
-// runnerFromNode builds a production SSH Runner for a node.
-// TODO(live): wire real per-engagement SSH key auth from internal/secrets.
-func runnerFromNode(_ domain.Node) deploy.Runner {
-	return &noopRunner{}
-}
-
-type noopRunner struct{}
-
-func (n *noopRunner) Run(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("mythic: SSH runner not wired (TODO(live))")
-}
-func (n *noopRunner) Upload(_ context.Context, _, _ string) error {
-	return fmt.Errorf("mythic: SSH runner not wired (TODO(live))")
-}
-
-// noopMythicClient is the stub returned before the live HTTP client is wired.
-type noopMythicClient struct{}
-
-func (n *noopMythicClient) CreateCallback(_ context.Context, _, _, _ string) (string, error) {
-	return "", fmt.Errorf("mythic: HTTP client not wired (TODO(live))")
-}
-func (n *noopMythicClient) Callbacks(_ context.Context) ([]MythicCallback, error) {
-	return nil, fmt.Errorf("mythic: HTTP client not wired (TODO(live))")
-}
-func (n *noopMythicClient) IssueTasking(_ context.Context, _, _ string, _ map[string]string) (string, error) {
-	return "", fmt.Errorf("mythic: HTTP client not wired (TODO(live))")
-}
-func (n *noopMythicClient) TaskOutput(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("mythic: HTTP client not wired (TODO(live))")
-}
-func (n *noopMythicClient) CreateListener(_ context.Context, _, _ string, _ int) error {
-	return fmt.Errorf("mythic: HTTP client not wired (TODO(live))")
+// runnerFromNode builds the production SSH Runner for a node. SSH key material
+// is loaded from the per-engagement environment by deploy.NewNodeRunner.
+func runnerFromNode(node domain.Node) deploy.Runner {
+	return deploy.NewNodeRunner(node.PublicIP)
 }
