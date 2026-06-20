@@ -2,8 +2,9 @@
 
 This checklist documents how to verify the Phase 4 cloud provisioning on a
 throwaway DigitalOcean account. The same pattern (credential store → deploy
-→ verify → teardown) applies to AWS, GCP, and Azure once those providers
-have their TODO(live) seams filled in.
+→ verify → teardown) applies to AWS, GCP, and Azure once those providers have
+their standalone `TODO(live)` seams filled in (DigitalOcean's are wired via
+godo and unit-tested).
 
 ## Prerequisites
 
@@ -197,6 +198,9 @@ The same flow applies to AWS, GCP, and Azure. The credential key names differ:
 | GCP | `GOOGLE_CREDENTIALS` (SA JSON), `GOOGLE_PROJECT` |
 | Azure | `ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`, `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET` |
 
-AWS/GCP/Azure providers have `TODO(live)` stubs for the API calls but are
-structurally complete and compile-verified. Fill in the TODO(live) stubs and
-run through this checklist pattern on each cloud's throwaway account.
+DigitalOcean's standalone API methods (ConfigureIngress, AssignStaticIP,
+ManageDNS, Destroy, SweepOrphans) are wired against the live DO API via `godo`
+and unit-tested against an httptest fake. AWS/GCP/Azure still have `TODO(live)`
+stubs for their standalone API calls but are structurally complete and
+compile-verified; fill those in and run through this checklist pattern on each
+cloud's throwaway account.

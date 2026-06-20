@@ -19,19 +19,9 @@ func TestSweepOrphansNoCreds(t *testing.T) {
 	}
 }
 
-// TestSweepOrphansWithCreds verifies that SweepOrphans does not error on the
-// credential check when the token is present. The actual API call is a
-// TODO(live), so the function currently returns nil after the guard.
-func TestSweepOrphansWithCreds(t *testing.T) {
-	p := &provider{}
-	creds := cloud.Credentials{Raw: map[string]string{
-		CredKeyToken: "test-token",
-	}}
-	err := p.SweepOrphans(context.Background(), creds, "test-engagement")
-	if err != nil {
-		t.Errorf("unexpected error with valid token: %v", err)
-	}
-}
+// SweepOrphans with a valid token now performs real godo API calls against the
+// customer's account; that path is covered against an httptest fake in
+// live_test.go (TestSweepOrphans_DeletesTaggedResources).
 
 // TestDestroyIdempotentEmptyRef verifies that Destroy with an empty ProviderRef
 // returns nil (idempotent — node was never provisioned or already destroyed).
