@@ -574,7 +574,7 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 		StartedAt:    time.Now(),
 	}
 	for _, t := range sc.Techniques {
-		op, sid, disp := Route(eng, t, cands)
+		op, sid, disp, detail := Route(eng, t, cands)
 		var res domain.Result
 		if op != nil {
 			var err error
@@ -589,12 +589,21 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 				}
 			}
 		} else {
+			// No operator selected — record the precise reason. For an infra
+			// failure (ExecFailed) the detail carries the operator error so it
+			// surfaces instead of being masked as a scope refusal.
 			res = domain.Result{
 				TechniqueAttackID: t.AttackID,
 				Status:            disp,
 				Output:            noOpMessage(disp),
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
+			}
+			if detail != "" {
+				res.Output = detail
+				if disp == domain.ExecFailed {
+					res.Err = detail
+				}
 			}
 		}
 		s.recordResult(ctx, run, res)

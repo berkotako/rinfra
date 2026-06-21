@@ -110,7 +110,13 @@ func (r *RegistryResolver) Candidates(ctx context.Context, eng domain.Engagement
 		op, ok := provider.Control(c2.Teamserver{Host: n.PublicIP, Status: string(n.Status)})
 		if ok && op != nil {
 			cand.Operator = op
-			if sessions, err := op.Sessions(ctx); err == nil {
+			sessions, err := op.Sessions(ctx)
+			if err != nil {
+				// Preserve the failure: an operator that can't list sessions (bad
+				// creds, missing operator config) must not look like an empty
+				// (scope-blocked) framework.
+				cand.Err = fmt.Errorf("%s: list sessions: %w", n.Spec.C2Framework, err)
+			} else {
 				cand.Sessions = sessions
 			}
 		}
