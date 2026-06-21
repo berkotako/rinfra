@@ -27,15 +27,13 @@ package sliver
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func init() { c2.Register(&provider{}) }
@@ -130,30 +128,36 @@ func redirectorConfig(prof domain.Profile) (string, error) {
 	return cfg, nil
 }
 
-// Control returns an Operator backed by the live gRPC SliverClient. The client
-// dials the teamserver's multiplayer listener lazily (grpc.NewClient), so the
-// connection is established on the first RPC; mapped calls issue REAL gRPC
-// requests via the official generated stub.
+// EnvOperatorConfig points at the Sliver multiplayer operator config file
+// (the mTLS ".cfg" sliver-server generates during Deploy). The service layer
+// fetches it from the teamserver and exports this path before driving emulation.
+const EnvOperatorConfig = "RINFRA_SLIVER_OPERATOR_CONFIG"
+
+// Control returns an Operator backed by the live gRPC SliverClient.
 //
-// Production note: the multiplayer listener is mTLS-protected by an operator
-// config that sliver-server generates during Deploy. When that config is
-// available the caller should build the client with DialOperatorClient (which
-// presents the operator mTLS material) or dial with DialOperator and wrap it
-// via NewGRPCClient, then inject through NewOperatorWithClient. Here we dial the
-// teamserver address directly so Control never returns a non-functional stub;
-// the transport credentials are layered on by whichever dial path supplies the
-// operator config. Tests inject an in-process conn via NewOperatorWithClient.
+// Sliver's multiplayer listener is mTLS-protected: the client must present the
+// operator certificate/key from the config sliver-server generates during
+// Deploy. Control loads that config from RINFRA_SLIVER_OPERATOR_CONFIG and dials
+// with the operator mTLS material (lazy connect; the first RPC drives the
+// handshake). If the config is absent or invalid, Control returns an operator
+// whose RPCs surface a clear error — it deliberately does NOT fall back to an
+// insecure/plaintext dial, which would silently fail to authenticate against a
+// real teamserver. Tests inject an in-process conn via NewOperatorWithClient.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	conn, err := grpc.NewClient(
-		fmt.Sprintf("%s:%d", ts.Host, ts.Port),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		// grpc.NewClient only fails on malformed targets; fall back to a client
-		// whose RPCs surface the dial error rather than panicking.
-		return &operator{ts: ts, client: &dialErrClient{err: fmt.Errorf("sliver: dial %s:%d: %w", ts.Host, ts.Port, err)}}, true
+	path := os.Getenv(EnvOperatorConfig)
+	if path == "" {
+		return &operator{ts: ts, client: &dialErrClient{err: fmt.Errorf(
+			"sliver: operator config required to dial the mTLS multiplayer listener; set %s to the sliver-server operator config", EnvOperatorConfig)}}, true
 	}
-	return &operator{ts: ts, client: &grpcSliverClient{rpc: rpcpb.NewSliverRPCClient(conn), conn: conn}}, true
+	cfg, err := LoadOperatorConfig(path)
+	if err != nil {
+		return &operator{ts: ts, client: &dialErrClient{err: err}}, true
+	}
+	client, err := DialOperatorClient(context.Background(), cfg)
+	if err != nil {
+		return &operator{ts: ts, client: &dialErrClient{err: err}}, true
+	}
+	return &operator{ts: ts, client: client}, true
 }
 
 // SliverClient is the minimal operator API surface RInfra needs from Sliver's

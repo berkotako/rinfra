@@ -103,6 +103,15 @@ func newFakeGCP(t *testing.T, notFound map[string]bool) (*provider, *fakeGCP) {
 				`{"name":"rinfra-eng-1-node-1","zone":"https://compute.googleapis.com/compute/v1/projects/p/zones/us-central1-a"}]}}}`))
 		case strings.Contains(r.URL.Path, "/instances/") && r.Method == http.MethodDelete:
 			w.Write([]byte(operationJSON))
+		// AssignStaticIP attaches the reserved IP: get instance (to find the NIC),
+		// then swap its external access config.
+		case strings.HasSuffix(r.URL.Path, "/addAccessConfig") && r.Method == http.MethodPost:
+			w.Write([]byte(operationJSON))
+		case strings.HasSuffix(r.URL.Path, "/deleteAccessConfig") && r.Method == http.MethodPost:
+			w.Write([]byte(operationJSON))
+		case strings.Contains(r.URL.Path, "/instances/") && r.Method == http.MethodGet:
+			w.Write([]byte(`{"kind":"compute#instance","name":"rinfra-eng-1-node-1",` +
+				`"networkInterfaces":[{"name":"nic0","accessConfigs":[{"name":"External NAT","type":"ONE_TO_ONE_NAT"}]}]}`))
 
 		// --- dns: rrsets list + changes ---
 		case strings.HasSuffix(r.URL.Path, "/rrsets") && r.Method == http.MethodGet:

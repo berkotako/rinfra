@@ -89,6 +89,10 @@ func deployMSF(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2
 		DestPath:    "/usr/local/bin/msfrpcd",
 		SystemdUnit: "msfrpcd",
 		ServiceUser: "root",
+		// Load the per-engagement RPC password into the unit's environment so
+		// ExecStart's ${MSF_RPC_PASS} expands. Without this the daemon would
+		// start with an unset password.
+		EnvironmentFile: "/etc/msf/rpc.env",
 		ExecStart: fmt.Sprintf(
 			"/usr/local/bin/msfrpcd -P ${MSF_RPC_PASS} -U %s -a 0.0.0.0 -p %d -S",
 			rpcUser, msfRpcdPort,
@@ -136,10 +140,11 @@ func msfRedirectorConfig(prof domain.Profile) (string, error) {
 
 // Control returns an Orchestrated-tier Operator backed by the live msfrpcd RPC
 // client (metasploit_live.go), pointed at the deployed teamserver's RPC
-// endpoint. The returned client is unauthenticated; the caller authenticates
-// with the per-engagement RPC credentials (from /etc/msf/rpc.env) by calling
-// Auth before driving sessions. The service layer can instead call LiveOperator
-// to obtain an already-authenticated Operator in one step.
+// endpoint. The client authenticates lazily on its first RPC using the
+// per-engagement credentials exported via RINFRA_MSF_RPC_USER/PASSWORD (the
+// service layer sources these from the secrets store where Deploy persists the
+// generated password). Callers that already hold a context+credentials can use
+// LiveOperator to authenticate eagerly instead.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
 	return &operator{ts: ts, client: clientForTeamserver(ts)}, true
 }

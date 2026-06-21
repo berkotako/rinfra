@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -39,11 +40,14 @@ type LiveConfig struct {
 type liveClient struct {
 	url   string
 	httpc *http.Client
+	user  string
+	pass  string
 	token string
 }
 
 // newLiveClient builds an unauthenticated msfrpcd client against cfg.BaseURL.
-// Callers that have credentials call Auth before issuing other RPCs.
+// It retains any supplied credentials so it can authenticate lazily on the first
+// token-bearing RPC (see ensureAuth); callers may also call Auth explicitly.
 func newLiveClient(cfg LiveConfig) (*liveClient, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("metasploit: LiveConfig.BaseURL is required")
@@ -60,7 +64,26 @@ func newLiveClient(cfg LiveConfig) (*liveClient, error) {
 			},
 		}
 	}
-	return &liveClient{url: strings.TrimRight(cfg.BaseURL, "/") + msfRPCPath, httpc: httpc}, nil
+	return &liveClient{
+		url:   strings.TrimRight(cfg.BaseURL, "/") + msfRPCPath,
+		httpc: httpc,
+		user:  cfg.Username,
+		pass:  cfg.Password,
+	}, nil
+}
+
+// ensureAuth logs in on demand when no token is held yet. This lets the operator
+// returned by Control() (which has no ctx/credentials of its own) authenticate
+// transparently on its first RPC using the per-engagement credentials the client
+// was constructed with. An explicit prior Auth() short-circuits it.
+func (c *liveClient) ensureAuth(ctx context.Context) error {
+	if c.token != "" {
+		return nil
+	}
+	if c.user == "" {
+		return fmt.Errorf("metasploit: no RPC credentials configured (set %s/%s)", EnvMsfRPCUser, EnvMsfRPCPassword)
+	}
+	return c.Auth(ctx, c.user, c.pass)
 }
 
 // NewLiveClient connects to msfrpcd and authenticates.
@@ -87,7 +110,16 @@ func clientForTeamserver(ts c2.Teamserver) MsfRpcdClient {
 		port = msfRpcdPort
 	}
 	base := fmt.Sprintf("https://%s", net.JoinHostPort(ts.Host, strconv.Itoa(port)))
-	c, err := newLiveClient(LiveConfig{BaseURL: base, InsecureSkipVerify: true})
+	user := os.Getenv(EnvMsfRPCUser)
+	if user == "" {
+		user = defaultRPCUser
+	}
+	c, err := newLiveClient(LiveConfig{
+		BaseURL:            base,
+		Username:           user,
+		Password:           os.Getenv(EnvMsfRPCPassword),
+		InsecureSkipVerify: true,
+	})
 	if err != nil {
 		// BaseURL is always non-empty here, so this path is unreachable in
 		// practice; return a client that surfaces a clear error rather than nil.
@@ -95,6 +127,16 @@ func clientForTeamserver(ts c2.Teamserver) MsfRpcdClient {
 	}
 	return c
 }
+
+// Environment variables carrying the per-engagement msfrpcd RPC credentials.
+// The service layer exports these (from the secrets store, where Deploy persists
+// the generated password) before driving emulation, so the operator returned by
+// Control authenticates lazily without a separate Auth call.
+const (
+	EnvMsfRPCUser     = "RINFRA_MSF_RPC_USER"
+	EnvMsfRPCPassword = "RINFRA_MSF_RPC_PASSWORD"
+	defaultRPCUser    = "msf"
+)
 
 // errClient is an MsfRpcdClient whose every method fails with a fixed error,
 // used so a misconfigured Control() surfaces a real message rather than nil.
@@ -170,6 +212,9 @@ func (c *liveClient) Auth(ctx context.Context, user, pass string) error {
 }
 
 func (c *liveClient) ConsoleCreate(ctx context.Context) (string, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return "", err
+	}
 	m, err := c.rpc(ctx, "console.create", c.token)
 	if err != nil {
 		return "", err
@@ -182,11 +227,17 @@ func (c *liveClient) ConsoleCreate(ctx context.Context) (string, error) {
 }
 
 func (c *liveClient) ConsoleWrite(ctx context.Context, consoleID, command string) error {
+	if err := c.ensureAuth(ctx); err != nil {
+		return err
+	}
 	_, err := c.rpc(ctx, "console.write", c.token, consoleID, command)
 	return err
 }
 
 func (c *liveClient) ConsoleRead(ctx context.Context, consoleID string) (string, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return "", err
+	}
 	m, err := c.rpc(ctx, "console.read", c.token, consoleID)
 	if err != nil {
 		return "", err
@@ -195,6 +246,9 @@ func (c *liveClient) ConsoleRead(ctx context.Context, consoleID string) (string,
 }
 
 func (c *liveClient) SessionList(ctx context.Context) ([]MsfSession, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
 	m, err := c.rpc(ctx, "session.list", c.token)
 	if err != nil {
 		return nil, err
@@ -216,11 +270,17 @@ func (c *liveClient) SessionList(ctx context.Context) ([]MsfSession, error) {
 }
 
 func (c *liveClient) SessionShellWrite(ctx context.Context, sessionID, command string) error {
+	if err := c.ensureAuth(ctx); err != nil {
+		return err
+	}
 	_, err := c.rpc(ctx, "session.shell_write", c.token, sessionArg(sessionID), command)
 	return err
 }
 
 func (c *liveClient) SessionShellRead(ctx context.Context, sessionID string) (string, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return "", err
+	}
 	m, err := c.rpc(ctx, "session.shell_read", c.token, sessionArg(sessionID))
 	if err != nil {
 		return "", err

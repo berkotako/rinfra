@@ -72,8 +72,10 @@ func TestGenerate_InvokesBinaryAndHashes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if art.Path != filepath.Join(dir, "rinfra-stager.elf") {
-		t.Errorf("Path = %q", art.Path)
+	if filepath.Dir(art.Path) != dir ||
+		!strings.HasPrefix(filepath.Base(art.Path), "rinfra-stager-") ||
+		!strings.HasSuffix(art.Path, ".elf") {
+		t.Errorf("Path = %q, want %s/rinfra-stager-<token>.elf", art.Path, dir)
 	}
 	if art.Format != "elf" {
 		t.Errorf("Format = %q", art.Format)

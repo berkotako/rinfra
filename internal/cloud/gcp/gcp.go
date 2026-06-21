@@ -393,20 +393,20 @@ type gcpFirewallAllow struct {
 	Ports    []string // e.g. ["443"] or ["8000", "8001-8010"]
 }
 
-// AssignStaticIP reserves a regional external static Address for the node and
-// returns the reserved IP.
+// AssignStaticIP reserves a regional external static Address for the node,
+// attaches it to the instance's external access config, and returns the IP.
 //
 // GCP reserves the address asynchronously: addresses.Insert returns an
 // Operation, after which the allocated IP is read back from the Address
-// resource (addresses.Get). The IP is what callers need (to attach to the
-// instance's access config / configure DNS), so we read it back rather than
-// only enqueuing the insert. Attaching to the instance's access config is a
-// separate add-access-config operation handled by the engine BuildProgram path
-// (NatIp on the network interface); standalone we reserve and return.
+// resource (addresses.Get). The reserved IP is then bound to the instance's
+// primary NIC by replacing its external access config (delete + add with NatIP),
+// so the node actually answers on the stable address — DNS pointed at the
+// returned IP reaches the node. Reserving without attaching would leave the VM
+// on its old ephemeral IP.
 //
 // The region is derived from the node's zone (Spec.Region holds the zone, as in
-// BuildProgram). The address resource is named "<instance>-ip" to match the
-// engine naming so reconciliation lines up.
+// BuildProgram). The address resource is named to match the engine naming so
+// reconciliation lines up.
 func (p *provider) AssignStaticIP(ctx context.Context, creds cloud.Credentials, node domain.Node) (string, error) {
 	if node.ProviderRef == "" {
 		return "", fmt.Errorf("gcp.AssignStaticIP: node %s has no ProviderRef", node.ID)
@@ -420,10 +420,7 @@ func (p *provider) AssignStaticIP(ctx context.Context, creds cloud.Credentials, 
 	}
 	proj := project(creds)
 
-	zone := node.Spec.Region
-	if zone == "" {
-		zone = "us-central1-a"
-	}
+	zone, instName := instanceZoneName(node)
 	region := regionFromZone(zone)
 
 	addrName := fmt.Sprintf("rinfra-%s-%s-ip", shortID(node.EngagementID), shortID(node.ID))
@@ -445,7 +442,42 @@ func (p *provider) AssignStaticIP(ctx context.Context, creds cloud.Credentials, 
 	if err != nil {
 		return "", fmt.Errorf("gcp.AssignStaticIP: read back address %s: %w", addrName, err)
 	}
+
+	// Attach the reserved IP to the instance's primary NIC so traffic to it
+	// reaches the node. Replace the existing external access config (a NIC may
+	// have at most one ONE_TO_ONE_NAT config) with one pinned to the reserved IP.
+	if err := attachAddress(ctx, svc, proj, zone, instName, got.Address); err != nil {
+		return got.Address, fmt.Errorf("gcp.AssignStaticIP: attach %s to %s: %w", got.Address, instName, err)
+	}
 	return got.Address, nil
+}
+
+// attachAddress binds natIP to the instance's primary network interface by
+// swapping its external access config. The existing config is removed first
+// because GCP permits only one ONE_TO_ONE_NAT access config per NIC.
+func attachAddress(ctx context.Context, svc *compute.Service, proj, zone, instName, natIP string) error {
+	inst, err := svc.Instances.Get(proj, zone, instName).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("get instance: %w", err)
+	}
+	if len(inst.NetworkInterfaces) == 0 {
+		return fmt.Errorf("instance %s has no network interface", instName)
+	}
+	nic := inst.NetworkInterfaces[0]
+	for _, ac := range nic.AccessConfigs {
+		if _, err := svc.Instances.DeleteAccessConfig(proj, zone, instName, ac.Name, nic.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+			return fmt.Errorf("remove existing access config %q: %w", ac.Name, err)
+		}
+	}
+	newAC := &compute.AccessConfig{
+		Name:  "External NAT",
+		Type:  "ONE_TO_ONE_NAT",
+		NatIP: natIP,
+	}
+	if _, err := svc.Instances.AddAccessConfig(proj, zone, instName, nic.Name, newAC).Context(ctx).Do(); err != nil {
+		return fmt.Errorf("add access config: %w", err)
+	}
+	return nil
 }
 
 // ManageDNS upserts a GCP Cloud DNS RecordSet.

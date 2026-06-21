@@ -10,6 +10,7 @@ package msfvenom
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rinfra/rinfra/internal/payload"
 )
@@ -79,7 +81,10 @@ func (g *generator) Generate(ctx context.Context, spec payload.Spec) (payload.Ar
 	if outDir == "" {
 		outDir = os.TempDir()
 	}
-	outPath := filepath.Join(outDir, fmt.Sprintf("rinfra-stager.%s", safeExt(spec.Format)))
+	// Unique per generation: re-running or generating concurrently for the same
+	// format must not overwrite a prior artifact whose hash/path is already
+	// recorded for burn tracking.
+	outPath := filepath.Join(outDir, fmt.Sprintf("rinfra-stager-%s.%s", uniqueToken(), safeExt(spec.Format)))
 
 	args := buildArgs(spec, outPath)
 	if _, err := g.runFn()(ctx, bin, args...); err != nil {
@@ -181,6 +186,17 @@ func sortedKeys(m map[string]string) []string {
 		}
 	}
 	return keys
+}
+
+// uniqueToken returns a short random hex string used to keep generated artifact
+// filenames unique across runs.
+func uniqueToken() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fall back to a time-based token; uniqueness is best-effort here.
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func hashFile(path string) (string, error) {
