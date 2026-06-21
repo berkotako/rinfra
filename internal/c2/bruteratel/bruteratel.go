@@ -126,17 +126,10 @@ func (p *provider) Control(_ c2.Teamserver) (c2.Operator, bool) {
 	return nil, false
 }
 
-func runnerFromNode(_ domain.Node) deploy.Runner {
-	return &noopRunner{}
-}
-
-type noopRunner struct{}
-
-func (n *noopRunner) Run(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("bruteratel: SSH runner not wired (TODO(live))")
-}
-func (n *noopRunner) Upload(_ context.Context, _, _ string) error {
-	return fmt.Errorf("bruteratel: SSH runner not wired (TODO(live))")
+// runnerFromNode builds the production SSH Runner for a node, loading
+// per-engagement key material from the environment (see deploy.NewNodeRunner).
+func runnerFromNode(node domain.Node) deploy.Runner {
+	return deploy.NewNodeRunner(node.PublicIP)
 }
 
 // licenseKeyNotInString asserts (for audit logging) that the license key does

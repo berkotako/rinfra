@@ -403,21 +403,41 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 	opt := &godo.ListOptions{PerPage: 200}
 	var errs []error
 
-	// 1. Droplets tagged for this engagement.
+	// 1. Enumerate this engagement's Droplets first (do NOT delete yet).
 	deleted := map[int]bool{}
 	droplets, _, err := client.Droplets.ListByTag(ctx, engTag, opt)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list droplets: %w", err))
 	}
+	engDroplets := map[int]bool{}
 	for _, d := range droplets {
-		if resp, err := client.Droplets.Delete(ctx, d.ID); err != nil && !isNotFound(resp) {
-			errs = append(errs, fmt.Errorf("delete droplet %d: %w", d.ID, err))
-		} else {
-			deleted[d.ID] = true
+		engDroplets[d.ID] = true
+	}
+
+	// 2. Record which Reserved IPs are assigned to those Droplets BEFORE deleting
+	//    them — once a Droplet is gone, DO reports its Reserved IP as unassigned
+	//    (Droplet == nil), which would let the IP survive teardown (orphan).
+	var ripsToRelease []string
+	rips, _, err := client.ReservedIPs.List(ctx, opt)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list reserved IPs: %w", err))
+	}
+	for _, rip := range rips {
+		if rip.Droplet != nil && engDroplets[rip.Droplet.ID] {
+			ripsToRelease = append(ripsToRelease, rip.IP)
 		}
 	}
 
-	// 2. Firewalls carrying the engagement tag.
+	// 3. Delete the Droplets.
+	for id := range engDroplets {
+		if resp, err := client.Droplets.Delete(ctx, id); err != nil && !isNotFound(resp) {
+			errs = append(errs, fmt.Errorf("delete droplet %d: %w", id, err))
+		} else {
+			deleted[id] = true
+		}
+	}
+
+	// 4. Firewalls carrying the engagement tag.
 	fws, _, err := client.Firewalls.List(ctx, opt)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list firewalls: %w", err))
@@ -430,16 +450,11 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 		}
 	}
 
-	// 3. Reserved IPs assigned to a swept Droplet (Reserved IPs carry no tags).
-	rips, _, err := client.ReservedIPs.List(ctx, opt)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("list reserved IPs: %w", err))
-	}
-	for _, rip := range rips {
-		if rip.Droplet != nil && deleted[rip.Droplet.ID] {
-			if resp, err := client.ReservedIPs.Delete(ctx, rip.IP); err != nil && !isNotFound(resp) {
-				errs = append(errs, fmt.Errorf("delete reserved IP %s: %w", rip.IP, err))
-			}
+	// 5. Release the Reserved IPs recorded in step 2 (Reserved IPs carry no tags,
+	//    so the pre-recorded association is the only reliable signal).
+	for _, ip := range ripsToRelease {
+		if resp, err := client.ReservedIPs.Delete(ctx, ip); err != nil && !isNotFound(resp) {
+			errs = append(errs, fmt.Errorf("delete reserved IP %s: %w", ip, err))
 		}
 	}
 

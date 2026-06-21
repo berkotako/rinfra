@@ -12,8 +12,18 @@ import (
 // one resource group, then per node a static public IP, an NSG (allow-SSH), a
 // NIC, an NSG↔NIC association, and a Linux VM. The azurerm provider reads
 // ARM_SUBSCRIPTION_ID/ARM_TENANT_ID/ARM_CLIENT_ID/ARM_CLIENT_SECRET from env.
-func (p *provider) BuildConfig(engagementID string, _ cloud.Credentials, nodes []domain.Node) (*terraform.Config, error) {
-	rgName := "rinfra-" + engagementID[:8]
+//
+// VMs use SSH public-key auth only (admin_ssh_key block +
+// disable_password_authentication=true); the per-engagement public key comes
+// from creds[RINFRA_SSH_PUBLIC_KEY]. If it is absent, BuildConfig fails closed
+// rather than emit a password VM.
+func (p *provider) BuildConfig(engagementID string, creds cloud.Credentials, nodes []domain.Node) (*terraform.Config, error) {
+	sshKey, err := sshPublicKey(creds)
+	if err != nil {
+		return nil, err
+	}
+
+	rgName := resourceGroupName(engagementID)
 	location := DefaultLocation
 	if len(nodes) > 0 && nodes[0].Spec.Region != "" {
 		location = nodes[0].Spec.Region
@@ -29,7 +39,7 @@ func (p *provider) BuildConfig(engagementID string, _ cloud.Credentials, nodes [
 	outputs := map[string]any{}
 
 	for _, n := range nodes {
-		nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
+		nodeName := nodeResourceName(engagementID, n.ID)
 		size := n.Spec.Size
 		if size == "" {
 			size = DefaultSize
@@ -81,10 +91,13 @@ func (p *provider) BuildConfig(engagementID string, _ cloud.Credentials, nodes [
 			"resource_group_name":             rgRef,
 			"location":                        locRef,
 			"size":                            size,
-			"admin_username":                  "rinfra",
-			"disable_password_authentication": false,
-			// TODO(live): replace with a per-engagement SSH key.
-			"admin_password":        "Rinfra!Placeholder1",
+			"admin_username":                  AdminUsername,
+			"disable_password_authentication": true,
+			// SSH-key auth only — no password is ever emitted.
+			"admin_ssh_key": []any{map[string]any{
+				"username":   AdminUsername,
+				"public_key": sshKey,
+			}},
 			"network_interface_ids": []string{fmt.Sprintf("${azurerm_network_interface.%s.id}", key)},
 			"os_disk": []any{map[string]any{
 				"caching":              "ReadWrite",

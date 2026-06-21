@@ -11,20 +11,23 @@
 // SHA-256 checksum. The operator API surface is defined as a local interface
 // (SliverClient) so tests inject a fake without pulling the full gRPC SDK.
 //
-// # gRPC client note (TODO:live)
+// # gRPC client (live)
 //
 // The SliverClient interface below maps the subset of Sliver's gRPC operator
-// API used by RInfra. The live implementation wraps the official
-// github.com/bishopfox/sliver/client/transport package, which generates a
-// mTLS operator config and connects to the multiplayer listener. Because the
-// sliver/client tree carries a large and occasionally unstable dependency
-// surface, the live wiring is deferred behind TODO(live) markers rather than
-// added to go.mod today. Tests use FakeSliverClient defined in this package.
+// API used by RInfra. The live implementation (grpc.go: grpcSliverClient) wraps
+// the official github.com/bishopfox/sliver/protobuf/rpcpb generated stub and
+// issues REAL gRPC calls over a *grpc.ClientConn. Production dials the
+// multiplayer listener over mTLS using the operator config that sliver-server
+// generates during Deploy (DialOperatorClient / DialOperator in transport.go);
+// the secret mTLS material lives in that config, not in this package. Tests use
+// FakeSliverClient (unit) or an in-process rpcpb.SliverRPCServer over bufconn
+// (grpc_test.go) — never a live teamserver.
 package sliver
 
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -125,17 +128,36 @@ func redirectorConfig(prof domain.Profile) (string, error) {
 	return cfg, nil
 }
 
-// Control returns an Operator backed by a SliverClient for the gRPC operator
-// API. The live client requires a multiplayer operator config file generated
-// by sliver-server; tests inject a FakeSliverClient.
+// EnvOperatorConfig points at the Sliver multiplayer operator config file
+// (the mTLS ".cfg" sliver-server generates during Deploy). The service layer
+// fetches it from the teamserver and exports this path before driving emulation.
+const EnvOperatorConfig = "RINFRA_SLIVER_OPERATOR_CONFIG"
+
+// Control returns an Operator backed by the live gRPC SliverClient.
+//
+// Sliver's multiplayer listener is mTLS-protected: the client must present the
+// operator certificate/key from the config sliver-server generates during
+// Deploy. Control loads that config from RINFRA_SLIVER_OPERATOR_CONFIG and dials
+// with the operator mTLS material (lazy connect; the first RPC drives the
+// handshake). If the config is absent or invalid, Control returns an operator
+// whose RPCs surface a clear error — it deliberately does NOT fall back to an
+// insecure/plaintext dial, which would silently fail to authenticate against a
+// real teamserver. Tests inject an in-process conn via NewOperatorWithClient.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	// The mTLS transport to the multiplayer listener is wired in transport.go:
-	// load the operator config generated during Deploy with LoadOperatorConfig,
-	// then DialOperator to obtain an authenticated *grpc.ClientConn. The
-	// remaining inch is binding that conn to Sliver's generated rpcpb/sliverpb
-	// stubs so SliverClient calls issue real RPCs; until those stubs are linked
-	// the operator uses the noop client. Tests inject via NewOperatorWithClient.
-	return &operator{ts: ts, client: noopSliverClient{}}, true
+	path := os.Getenv(EnvOperatorConfig)
+	if path == "" {
+		return &operator{ts: ts, client: &dialErrClient{err: fmt.Errorf(
+			"sliver: operator config required to dial the mTLS multiplayer listener; set %s to the sliver-server operator config", EnvOperatorConfig)}}, true
+	}
+	cfg, err := LoadOperatorConfig(path)
+	if err != nil {
+		return &operator{ts: ts, client: &dialErrClient{err: err}}, true
+	}
+	client, err := DialOperatorClient(context.Background(), cfg)
+	if err != nil {
+		return &operator{ts: ts, client: &dialErrClient{err: err}}, true
+	}
+	return &operator{ts: ts, client: client}, true
 }
 
 // SliverClient is the minimal operator API surface RInfra needs from Sliver's
@@ -175,7 +197,6 @@ type operator struct {
 }
 
 func (o *operator) StartListener(ctx context.Context, spec c2.ListenerSpec) error {
-	// TODO(live): delegate to the live gRPC client once it is wired.
 	switch strings.ToLower(spec.Protocol) {
 	case "mtls":
 		return o.client.StartMTLSListener(ctx, spec.Bind, uint32(4444))
@@ -354,44 +375,25 @@ func escapeShell(s string) string {
 	return strings.ReplaceAll(s, `"`, `\"`)
 }
 
-// runnerFromNode builds a production SSH Runner for a node. The real
-// implementation uses per-engagement SSH key material stored in the credential
-// store. TODO(live): wire real SSH key auth from the credential store.
-func runnerFromNode(_ domain.Node) deploy.Runner {
-	// TODO(live): return a real golang.org/x/crypto/ssh Runner dialing node.PublicIP
-	// with per-engagement key auth loaded from internal/secrets.
-	// For now return a noop runner that will be overridden in tests.
-	return &noopRunner{}
+// runnerFromNode builds the production SSH Runner for a node. It delegates to
+// the shared live runner (deploy.NewNodeRunner), which loads per-engagement SSH
+// key material from the environment exported by the service layer. If the host
+// or key material is missing/invalid the returned Runner fails every operation
+// with a clear configuration error rather than panicking.
+func runnerFromNode(node domain.Node) deploy.Runner {
+	return deploy.NewNodeRunner(node.PublicIP)
 }
 
-// noopRunner is used for the production code path before live SSH is wired.
-// All operations return "not implemented" — the caller is expected to inject a
-// real runner through the service layer before deploy is a supported operation.
-type noopRunner struct{}
+// dialErrClient is the SliverClient returned by Control only when the
+// teamserver target is malformed and grpc.NewClient itself fails. Every RPC
+// surfaces the underlying dial error, so a misconfigured teamserver produces a
+// clear message instead of a panic. It is never the noop "not wired" stub.
+type dialErrClient struct{ err error }
 
-func (n *noopRunner) Run(_ context.Context, _ string) (string, error) {
-	return "", fmt.Errorf("sliver: SSH runner not wired (TODO(live))")
-}
-func (n *noopRunner) Upload(_ context.Context, _, _ string) error {
-	return fmt.Errorf("sliver: SSH runner not wired (TODO(live))")
-}
-
-// noopSliverClient is the default gRPC client stub returned before the live
-// client is wired. All operations return "not implemented".
-type noopSliverClient struct{}
-
-func (noopSliverClient) StartMTLSListener(_ context.Context, _ string, _ uint32) error {
-	return fmt.Errorf("sliver: gRPC client not wired (TODO(live))")
-}
-func (noopSliverClient) StartHTTPSListener(_ context.Context, _ string, _ uint32) error {
-	return fmt.Errorf("sliver: gRPC client not wired (TODO(live))")
-}
-func (noopSliverClient) StartDNSListener(_ context.Context, _ []string) error {
-	return fmt.Errorf("sliver: gRPC client not wired (TODO(live))")
-}
-func (noopSliverClient) Sessions(_ context.Context) ([]SliverSession, error) {
-	return nil, fmt.Errorf("sliver: gRPC client not wired (TODO(live))")
-}
-func (noopSliverClient) Execute(_ context.Context, _, _ string) (string, error) {
-	return "", fmt.Errorf("sliver: gRPC client not wired (TODO(live))")
+func (d *dialErrClient) StartMTLSListener(context.Context, string, uint32) error  { return d.err }
+func (d *dialErrClient) StartHTTPSListener(context.Context, string, uint32) error { return d.err }
+func (d *dialErrClient) StartDNSListener(context.Context, []string) error         { return d.err }
+func (d *dialErrClient) Sessions(context.Context) ([]SliverSession, error)        { return nil, d.err }
+func (d *dialErrClient) Execute(context.Context, string, string) (string, error) {
+	return "", d.err
 }

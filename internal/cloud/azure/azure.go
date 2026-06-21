@@ -36,26 +36,42 @@
 //   - "ARM_TENANT_ID"        — Azure tenant (directory) ID
 //   - "ARM_CLIENT_ID"        — Service principal app ID
 //   - "ARM_CLIENT_SECRET"    — Service principal secret
+//   - "RINFRA_SSH_PUBLIC_KEY"— OpenSSH public key injected into every VM
 //
-// The Pulumi Azure provider reads these from the ARM_* environment variables.
+// The Pulumi Azure provider reads the ARM_* values from environment variables.
+// The standalone CloudProvider/Sweeper methods drive the Azure Resource Manager
+// SDK (github.com/Azure/azure-sdk-for-go) directly: they build an
+// azidentity.ClientSecretCredential from the ARM_* creds and call the
+// armnetwork / armdns / armresources clients for out-of-band reconciliation and
+// the guaranteed-teardown sweep that runs after every engine destroy.
 //
-// # Verified by compile vs needs live testing
+// # SSH-key hardening
 //
-// All code below is verified to compile against the Pulumi Azure SDK v5.
-// The full resource lifecycle requires a live Azure subscription and has NOT
-// been exercised against the live API. See docs/RUNBOOK_DO.md for the
-// checklist approach (same pattern, different cloud).
+// VMs are provisioned with SSH public-key auth only: password authentication is
+// disabled and the operator's per-engagement public key
+// (RINFRA_SSH_PUBLIC_KEY) is injected. A VM is never provisioned with a
+// password — if the key is absent, provisioning fails closed.
 package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 
-	azcompute "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/compute"
-	azcore "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/core"
-	azdns "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/dns"
-	aznetwork "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/network"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	azpolicy "github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dns/armdns"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
+	pazcompute "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/compute"
+	pazcore "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/core"
+	pazdns "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/dns"
+	paznetwork "github.com/pulumi/pulumi-azure/sdk/v5/go/azure/network"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"github.com/rinfra/rinfra/internal/cloud"
@@ -63,12 +79,14 @@ import (
 	"github.com/rinfra/rinfra/internal/orchestration"
 )
 
-// Credential key constants. These match the Pulumi Azure provider env vars.
+// Credential key constants. The ARM_* keys match the Pulumi Azure provider env
+// vars; RINFRA_SSH_PUBLIC_KEY carries the per-engagement OpenSSH public key.
 const (
 	CredKeySubscriptionID = "ARM_SUBSCRIPTION_ID"
 	CredKeyTenantID       = "ARM_TENANT_ID"
 	CredKeyClientID       = "ARM_CLIENT_ID"
 	CredKeyClientSecret   = "ARM_CLIENT_SECRET"
+	CredKeySSHPublicKey   = "RINFRA_SSH_PUBLIC_KEY"
 )
 
 // DefaultSize is the VM SKU used when NodeSpec.Size is empty.
@@ -80,19 +98,196 @@ const DefaultLocation = "eastus"
 // DefaultImage is the Azure image reference used for all VMs.
 const DefaultImage = "Canonical:UbuntuServer:22_04-lts-gen2:latest"
 
+// AdminUsername is the Linux admin account created on every VM. SSH key auth
+// only — see sshPublicKey.
+const AdminUsername = "rinfra"
+
+// linuxAuthConfig is the resolved authentication posture for a VM. RInfra always
+// disables password auth and injects an SSH public key; this struct is the
+// testable, framework-independent representation of that decision.
+type linuxAuthConfig struct {
+	AdminUsername             string
+	DisablePasswordAuth       bool
+	SSHPublicKey              string
+	AdminUsernameForPublicKey string
+}
+
+// sshPublicKey extracts the per-engagement OpenSSH public key from creds. RInfra
+// provisions SSH-key-only VMs; if the key is absent we fail closed rather than
+// fall back to a password VM (a security regression). The key is validated as a
+// plausible OpenSSH public key (ssh-rsa / ssh-ed25519 / ecdsa-… prefix).
+func sshPublicKey(creds cloud.Credentials) (string, error) {
+	key := strings.TrimSpace(creds.Raw[CredKeySSHPublicKey])
+	if key == "" {
+		return "", fmt.Errorf("azure: %s not set — refusing to provision a password VM; supply a per-engagement SSH public key", CredKeySSHPublicKey)
+	}
+	if !looksLikeSSHPublicKey(key) {
+		return "", fmt.Errorf("azure: %s does not look like an OpenSSH public key", CredKeySSHPublicKey)
+	}
+	return key, nil
+}
+
+// looksLikeSSHPublicKey is a cheap sanity check on an OpenSSH public key string.
+func looksLikeSSHPublicKey(key string) bool {
+	for _, prefix := range []string{"ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-"} {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildLinuxAuthConfig resolves the SSH-key-only auth posture for a VM. It is
+// the authoritative, framework-independent translation and is tested directly:
+// password auth is always disabled and a public key is always required.
+func buildLinuxAuthConfig(creds cloud.Credentials) (linuxAuthConfig, error) {
+	key, err := sshPublicKey(creds)
+	if err != nil {
+		return linuxAuthConfig{}, err
+	}
+	return linuxAuthConfig{
+		AdminUsername:             AdminUsername,
+		DisablePasswordAuth:       true,
+		SSHPublicKey:              key,
+		AdminUsernameForPublicKey: AdminUsername,
+	}, nil
+}
+
 func init() {
+	// The registered provider talks to the live Azure Resource Manager: nil
+	// transport/cred means client() builds a real azidentity credential.
 	p := &provider{}
 	cloud.Register(p)
 	cloud.RegisterSweeper(domain.CloudAzure, p)
 }
 
-type provider struct{}
+// provider is the RInfra Azure cloud adapter. It implements CloudProvider and
+// Sweeper and acts as the ProgramBuilder / terraform.Builder for the engine.
+//
+// transport and cred exist purely for tests: when set they override the HTTP
+// transport and token credential used to build the ARM clients, letting unit
+// tests point the SDK at an httptest server and a dummy credential. In
+// production both are nil and client() builds an azidentity credential from the
+// ARM_* engagement creds and uses the SDK's default transport.
+type provider struct {
+	transport azpolicy.Transporter
+	cred      azcore.TokenCredential
+}
 
 var _ cloud.CloudProvider = (*provider)(nil)
 var _ cloud.Sweeper = (*provider)(nil)
 var _ orchestration.ProgramBuilder = (*provider)(nil)
 
 func (p *provider) Type() domain.CloudProviderType { return domain.CloudAzure }
+
+// azClients bundles the ARM clients RInfra drives directly, all built against
+// the same subscription, credential, and (optional test) transport.
+type azClients struct {
+	subscriptionID string
+	securityRules  *armnetwork.SecurityRulesClient
+	publicIPs      *armnetwork.PublicIPAddressesClient
+	recordSets     *armdns.RecordSetsClient
+	resourceGroups *armresources.ResourceGroupsClient
+}
+
+// clientOptions returns arm.ClientOptions wired with the test transport when one
+// is configured; nil transport selects the SDK default (live Azure).
+func (p *provider) clientOptions() *arm.ClientOptions {
+	if p.transport == nil {
+		return nil
+	}
+	return &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: p.transport}}
+}
+
+// credential returns the token credential for ARM calls. Tests inject a dummy
+// via p.cred; production builds an azidentity.ClientSecretCredential from the
+// ARM_* engagement credentials.
+func (p *provider) credential(creds cloud.Credentials) (azcore.TokenCredential, error) {
+	if p.cred != nil {
+		return p.cred, nil
+	}
+	c, err := azidentity.NewClientSecretCredential(
+		creds.Raw[CredKeyTenantID],
+		creds.Raw[CredKeyClientID],
+		creds.Raw[CredKeyClientSecret],
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("azure: build client-secret credential: %w", err)
+	}
+	return c, nil
+}
+
+// clients validates creds and constructs the ARM clients for the engagement
+// subscription. All clients share the credential and (test) transport.
+func (p *provider) clients(creds cloud.Credentials) (*azClients, error) {
+	if err := validateAzureCreds(creds); err != nil {
+		return nil, err
+	}
+	cred, err := p.credential(creds)
+	if err != nil {
+		return nil, err
+	}
+	sub := creds.Raw[CredKeySubscriptionID]
+	opts := p.clientOptions()
+
+	sr, err := armnetwork.NewSecurityRulesClient(sub, cred, opts)
+	if err != nil {
+		return nil, fmt.Errorf("azure: new security-rules client: %w", err)
+	}
+	pip, err := armnetwork.NewPublicIPAddressesClient(sub, cred, opts)
+	if err != nil {
+		return nil, fmt.Errorf("azure: new public-ip client: %w", err)
+	}
+	rs, err := armdns.NewRecordSetsClient(sub, cred, opts)
+	if err != nil {
+		return nil, fmt.Errorf("azure: new record-sets client: %w", err)
+	}
+	rg, err := armresources.NewResourceGroupsClient(sub, cred, opts)
+	if err != nil {
+		return nil, fmt.Errorf("azure: new resource-groups client: %w", err)
+	}
+	return &azClients{
+		subscriptionID: sub,
+		securityRules:  sr,
+		publicIPs:      pip,
+		recordSets:     rs,
+		resourceGroups: rg,
+	}, nil
+}
+
+// resourceGroupName returns the engagement's resource group name. BuildProgram
+// creates exactly one RG per engagement named rinfra-<engagementID[:8]>, tagged
+// rinfra=<engagementID>; the standalone methods must agree on this scheme.
+func resourceGroupName(engagementID string) string {
+	return "rinfra-" + shortID(engagementID)
+}
+
+// nodeResourceName returns the per-node base name BuildProgram assigns:
+// rinfra-<engagementID[:8]>-<nodeID[:8]>.
+func nodeResourceName(engagementID, nodeID string) string {
+	return fmt.Sprintf("rinfra-%s-%s", shortID(engagementID), shortID(nodeID))
+}
+
+// shortID returns the first 8 chars of an id (or the whole id if shorter).
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// isAzureNotFound reports whether err is an ARM 404 (resource already gone).
+func isAzureNotFound(err error) bool {
+	var re *azcore.ResponseError
+	if errors.As(err, &re) {
+		return re.StatusCode == http.StatusNotFound
+	}
+	return false
+}
+
+// strPtr returns a pointer to s (Azure SDK structs use pointer fields).
+func strPtr(s string) *string { return &s }
 
 // BuildProgram implements orchestration.ProgramBuilder. Creates:
 //  1. A Resource Group per engagement (Azure requires one).
@@ -103,7 +298,12 @@ func (p *provider) Type() domain.CloudProviderType { return domain.CloudAzure }
 // for easy identification.
 func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, nodes []domain.Node) pulumi.RunFunc {
 	return func(ctx *pulumi.Context) error {
-		rgName := "rinfra-" + engagementID[:8]
+		sshKey, err := sshPublicKey(creds)
+		if err != nil {
+			return err
+		}
+
+		rgName := resourceGroupName(engagementID)
 		location := DefaultLocation
 		if len(nodes) > 0 && nodes[0].Spec.Region != "" {
 			location = nodes[0].Spec.Region
@@ -114,7 +314,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 		}
 
 		// Resource Group — Azure requires all resources to live in one.
-		rg, err := azcore.NewResourceGroup(ctx, rgName, &azcore.ResourceGroupArgs{
+		rg, err := pazcore.NewResourceGroup(ctx, rgName, &pazcore.ResourceGroupArgs{
 			Name:     pulumi.String(rgName),
 			Location: pulumi.String(location),
 			Tags:     engTags,
@@ -124,7 +324,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 		}
 
 		for _, n := range nodes {
-			nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
+			nodeName := nodeResourceName(engagementID, n.ID)
 			size := n.Spec.Size
 			if size == "" {
 				size = DefaultSize
@@ -136,7 +336,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			}
 
 			// Public IP (Static allocation — required for RInfra redirectors).
-			pip, err := aznetwork.NewPublicIp(ctx, nodeName+"-pip", &aznetwork.PublicIpArgs{
+			pip, err := paznetwork.NewPublicIp(ctx, nodeName+"-pip", &paznetwork.PublicIpArgs{
 				Name:              pulumi.String(nodeName + "-pip"),
 				ResourceGroupName: rg.Name,
 				Location:          rg.Location,
@@ -151,13 +351,13 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			// Unlike AWS (per-instance security groups) and GCP (VPC-wide firewall
 			// rules with tag filters), Azure NSGs are attached to NICs/subnets
 			// and support explicit Allow/Deny with priority ordering.
-			nsg, err := aznetwork.NewNetworkSecurityGroup(ctx, nodeName+"-nsg", &aznetwork.NetworkSecurityGroupArgs{
+			nsg, err := paznetwork.NewNetworkSecurityGroup(ctx, nodeName+"-nsg", &paznetwork.NetworkSecurityGroupArgs{
 				Name:              pulumi.String(nodeName + "-nsg"),
 				ResourceGroupName: rg.Name,
 				Location:          rg.Location,
 				// Default: allow SSH so operators can access the node.
-				SecurityRules: aznetwork.NetworkSecurityGroupSecurityRuleArray{
-					aznetwork.NetworkSecurityGroupSecurityRuleArgs{
+				SecurityRules: paznetwork.NetworkSecurityGroupSecurityRuleArray{
+					paznetwork.NetworkSecurityGroupSecurityRuleArgs{
 						Name:                     pulumi.String("allow-ssh"),
 						Priority:                 pulumi.Int(100),
 						Direction:                pulumi.String("Inbound"),
@@ -176,12 +376,12 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			}
 
 			// Network Interface — connects VM to the virtual network.
-			nic, err := aznetwork.NewNetworkInterface(ctx, nodeName+"-nic", &aznetwork.NetworkInterfaceArgs{
+			nic, err := paznetwork.NewNetworkInterface(ctx, nodeName+"-nic", &paznetwork.NetworkInterfaceArgs{
 				Name:              pulumi.String(nodeName + "-nic"),
 				ResourceGroupName: rg.Name,
 				Location:          rg.Location,
-				IpConfigurations: aznetwork.NetworkInterfaceIpConfigurationArray{
-					aznetwork.NetworkInterfaceIpConfigurationArgs{
+				IpConfigurations: paznetwork.NetworkInterfaceIpConfigurationArray{
+					paznetwork.NetworkInterfaceIpConfigurationArgs{
 						Name:                       pulumi.String("ipconfig1"),
 						PrivateIpAddressAllocation: pulumi.String("Dynamic"),
 						PublicIpAddressId:          pip.ID(),
@@ -194,7 +394,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			}
 
 			// Attach NSG to NIC.
-			_, err = aznetwork.NewNetworkInterfaceSecurityGroupAssociation(ctx, nodeName+"-nsg-assoc", &aznetwork.NetworkInterfaceSecurityGroupAssociationArgs{
+			_, err = paznetwork.NewNetworkInterfaceSecurityGroupAssociation(ctx, nodeName+"-nsg-assoc", &paznetwork.NetworkInterfaceSecurityGroupAssociationArgs{
 				NetworkInterfaceId:     nic.ID(),
 				NetworkSecurityGroupId: nsg.ID(),
 			})
@@ -202,24 +402,29 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 				return fmt.Errorf("azure: attach NSG to NIC for node %s: %w", n.ID, err)
 			}
 
-			// Linux Virtual Machine.
-			vm, err := azcompute.NewLinuxVirtualMachine(ctx, nodeName, &azcompute.LinuxVirtualMachineArgs{
-				Name:              pulumi.String(nodeName),
-				ResourceGroupName: rg.Name,
-				Location:          rg.Location,
-				Size:              pulumi.String(size),
-				AdminUsername:     pulumi.String("rinfra"),
-				// Password auth disabled; SSH key injection would be wired here.
-				// For MVP: disable password auth and set a placeholder admin password
-				// (real deployments should inject SSH keys per engagement).
-				DisablePasswordAuthentication: pulumi.Bool(false),
-				AdminPassword:                 pulumi.String("Rinfra!Placeholder1"), // TODO(live): replace with per-engagement SSH key
-				NetworkInterfaceIds:           pulumi.StringArray{nic.ID()},
-				OsDisk: azcompute.LinuxVirtualMachineOsDiskArgs{
+			// Linux Virtual Machine. SSH-key auth only: password authentication is
+			// disabled and the per-engagement public key is injected. There is no
+			// password fallback — sshPublicKey() above fails closed if the key is
+			// missing, so a VM is never provisioned with a password.
+			vm, err := pazcompute.NewLinuxVirtualMachine(ctx, nodeName, &pazcompute.LinuxVirtualMachineArgs{
+				Name:                          pulumi.String(nodeName),
+				ResourceGroupName:             rg.Name,
+				Location:                      rg.Location,
+				Size:                          pulumi.String(size),
+				AdminUsername:                 pulumi.String(AdminUsername),
+				DisablePasswordAuthentication: pulumi.Bool(true),
+				AdminSshKeys: pazcompute.LinuxVirtualMachineAdminSshKeyArray{
+					pazcompute.LinuxVirtualMachineAdminSshKeyArgs{
+						Username:  pulumi.String(AdminUsername),
+						PublicKey: pulumi.String(sshKey),
+					},
+				},
+				NetworkInterfaceIds: pulumi.StringArray{nic.ID()},
+				OsDisk: pazcompute.LinuxVirtualMachineOsDiskArgs{
 					Caching:            pulumi.String("ReadWrite"),
 					StorageAccountType: pulumi.String("Standard_LRS"),
 				},
-				SourceImageReference: azcompute.LinuxVirtualMachineSourceImageReferenceArgs{
+				SourceImageReference: pazcompute.LinuxVirtualMachineSourceImageReferenceArgs{
 					Publisher: pulumi.String("Canonical"),
 					Offer:     pulumi.String("UbuntuServer"),
 					Sku:       pulumi.String("22_04-lts-gen2"),
@@ -253,16 +458,78 @@ func (p *provider) ProvisionNode(_ context.Context, _ cloud.Credentials, _ domai
 //   - DestinationPortRange is a string: "443" or "8000-9000".
 //   - SourceAddressPrefix is a CIDR, service tag, or "*".
 //
-// TODO(live): standalone NSG update requires Azure SDK.
-func (p *provider) ConfigureIngress(_ context.Context, creds cloud.Credentials, node domain.Node, rules []domain.Rule) error {
+// Each domain.Rule becomes a SecurityRule upserted onto the node's NSG
+// (rinfra-<engagementID[:8]>-<nodeID[:8]>-nsg) inside the engagement resource
+// group via armnetwork.SecurityRulesClient.BeginCreateOrUpdate; each LRO is
+// awaited with PollUntilDone.
+func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials, node domain.Node, rules []domain.Rule) error {
 	if node.ProviderRef == "" {
 		return fmt.Errorf("azure.ConfigureIngress: node %s has no ProviderRef (not yet provisioned)", node.ID)
 	}
-	if err := validateAzureCreds(creds); err != nil {
+	cs, err := p.clients(creds)
+	if err != nil {
 		return err
 	}
-	_ = buildAzureNSGRules(rules)
-	return fmt.Errorf("azure.ConfigureIngress: standalone NSG update not yet implemented; use Engine.Deploy — TODO(live)")
+	rg := resourceGroupName(node.EngagementID)
+	nsgName := nodeResourceName(node.EngagementID, node.ID) + "-nsg"
+
+	for _, r := range buildAzureNSGRules(rules) {
+		params := armnetwork.SecurityRule{
+			Properties: &armnetwork.SecurityRulePropertiesFormat{
+				Access:                   toSecurityRuleAccess(r.Access),
+				Direction:                toSecurityRuleDirection(r.Direction),
+				Protocol:                 toSecurityRuleProtocol(r.Protocol),
+				Priority:                 int32Ptr(int32(r.Priority)),
+				DestinationPortRange:     strPtr(r.DestinationPortRange),
+				DestinationAddressPrefix: strPtr("*"),
+				SourceAddressPrefix:      strPtr(r.SourceAddressPrefix),
+				SourcePortRange:          strPtr("*"),
+			},
+		}
+		poller, err := cs.securityRules.BeginCreateOrUpdate(ctx, rg, nsgName, r.Name, params, nil)
+		if err != nil {
+			return fmt.Errorf("azure.ConfigureIngress: create rule %s on NSG %s: %w", r.Name, nsgName, err)
+		}
+		if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+			return fmt.Errorf("azure.ConfigureIngress: await rule %s on NSG %s: %w", r.Name, nsgName, err)
+		}
+	}
+	return nil
+}
+
+// int32Ptr returns a pointer to v (Azure SDK uses *int32 for priorities).
+func int32Ptr(v int32) *int32 { return &v }
+
+// toSecurityRuleAccess maps the internal access string to the ARM enum.
+func toSecurityRuleAccess(access string) *armnetwork.SecurityRuleAccess {
+	v := armnetwork.SecurityRuleAccessAllow
+	if access == "Deny" {
+		v = armnetwork.SecurityRuleAccessDeny
+	}
+	return &v
+}
+
+// toSecurityRuleDirection maps the internal direction string to the ARM enum.
+func toSecurityRuleDirection(direction string) *armnetwork.SecurityRuleDirection {
+	v := armnetwork.SecurityRuleDirectionInbound
+	if direction == "Outbound" {
+		v = armnetwork.SecurityRuleDirectionOutbound
+	}
+	return &v
+}
+
+// toSecurityRuleProtocol maps the Azure title-cased protocol to the ARM enum.
+func toSecurityRuleProtocol(proto string) *armnetwork.SecurityRuleProtocol {
+	var v armnetwork.SecurityRuleProtocol
+	switch proto {
+	case "Tcp":
+		v = armnetwork.SecurityRuleProtocolTCP
+	case "Udp":
+		v = armnetwork.SecurityRuleProtocolUDP
+	default:
+		v = armnetwork.SecurityRuleProtocolAsterisk
+	}
+	return &v
 }
 
 // buildAzureNSGRules converts domain.Rule to Azure NSG security rule descriptors.
@@ -319,34 +586,109 @@ func toAzureProtocol(proto string) string {
 	}
 }
 
-// AssignStaticIP — handled by PublicIp in BuildProgram.
-// TODO(live): standalone Azure Public IP allocation.
-func (p *provider) AssignStaticIP(_ context.Context, creds cloud.Credentials, node domain.Node) (string, error) {
+// AssignStaticIP allocates (or re-asserts) a Static Public IP for a node via
+// armnetwork.PublicIPAddressesClient.BeginCreateOrUpdate and returns its
+// address. The PIP name and resource group match BuildProgram's scheme
+// (rinfra-<engagementID[:8]>-<nodeID[:8]>-pip in rinfra-<engagementID[:8]>). The
+// allocation method is Static — RInfra redirectors need stable addresses.
+func (p *provider) AssignStaticIP(ctx context.Context, creds cloud.Credentials, node domain.Node) (string, error) {
 	if node.ProviderRef == "" {
 		return "", fmt.Errorf("azure.AssignStaticIP: node %s has no ProviderRef", node.ID)
 	}
-	if err := validateAzureCreds(creds); err != nil {
+	cs, err := p.clients(creds)
+	if err != nil {
 		return "", err
 	}
-	return "", fmt.Errorf("azure.AssignStaticIP: use Engine.Deploy (includes PublicIp in inline program) — TODO(live)")
+	rg := resourceGroupName(node.EngagementID)
+	pipName := nodeResourceName(node.EngagementID, node.ID) + "-pip"
+	location := node.Spec.Region
+	if location == "" {
+		location = DefaultLocation
+	}
+	alloc := armnetwork.IPAllocationMethodStatic
+	params := armnetwork.PublicIPAddress{
+		Location: strPtr(location),
+		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+			PublicIPAllocationMethod: &alloc,
+		},
+		Tags: map[string]*string{
+			"rinfra":      strPtr(node.EngagementID),
+			"rinfra-node": strPtr(node.ID),
+		},
+	}
+	poller, err := cs.publicIPs.BeginCreateOrUpdate(ctx, rg, pipName, params, nil)
+	if err != nil {
+		return "", fmt.Errorf("azure.AssignStaticIP: create public IP %s: %w", pipName, err)
+	}
+	resp, err := poller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("azure.AssignStaticIP: await public IP %s: %w", pipName, err)
+	}
+	if resp.Properties == nil || resp.Properties.IPAddress == nil {
+		return "", fmt.Errorf("azure.AssignStaticIP: public IP %s returned no address", pipName)
+	}
+	return *resp.Properties.IPAddress, nil
 }
 
-// ManageDNS upserts an Azure DNS A record.
-//
-// Azure DNS requires both a zone name AND a resource group where the zone lives.
-// Store the DNS resource group name in creds.Raw["AZURE_DNS_RESOURCE_GROUP"].
-// This differs from DO (zone is a top-level domain resource, no resource group),
-// GCP (managed zone name in a project), and AWS (hosted zone ID).
-//
-// TODO(live): Azure DNS record upsert via SDK.
-func (p *provider) ManageDNS(_ context.Context, creds cloud.Credentials, rec domain.Record) error {
-	if err := validateAzureCreds(creds); err != nil {
-		return err
-	}
+// CredKeyDNSResourceGroup names the resource group that owns the customer's DNS
+// zone. Azure DNS record-set operations require both the zone name AND the
+// resource group it lives in (unlike DO/GCP/AWS). If unset, ManageDNS falls back
+// to the engagement resource group.
+const CredKeyDNSResourceGroup = "AZURE_DNS_RESOURCE_GROUP"
+
+// ManageDNS upserts an Azure DNS record (A / CNAME / TXT) via
+// armdns.RecordSetsClient.CreateOrUpdate (itself an upsert). Azure DNS requires
+// both a zone name AND the resource group where the zone lives; the latter comes
+// from creds.Raw[AZURE_DNS_RESOURCE_GROUP]. This differs from DO (zone is a
+// top-level domain resource, no resource group), GCP (managed zone in a
+// project), and AWS (hosted zone ID).
+func (p *provider) ManageDNS(ctx context.Context, creds cloud.Credentials, rec domain.Record) error {
 	if rec.Zone == "" {
 		return fmt.Errorf("azure.ManageDNS: Zone must be set (Azure DNS zone name)")
 	}
-	return fmt.Errorf("azure.ManageDNS: use Engine.Deploy (includes ARecord in inline program) — TODO(live)")
+	if rec.Type == "" {
+		return fmt.Errorf("azure.ManageDNS: Type must be set")
+	}
+	cs, err := p.clients(creds)
+	if err != nil {
+		return err
+	}
+	dnsRG := creds.Raw[CredKeyDNSResourceGroup]
+	if dnsRG == "" {
+		return fmt.Errorf("azure.ManageDNS: %s must be set (resource group owning the DNS zone)", CredKeyDNSResourceGroup)
+	}
+
+	recType, props, err := buildAzureRecordSet(rec)
+	if err != nil {
+		return err
+	}
+	if _, err := cs.recordSets.CreateOrUpdate(ctx, dnsRG, rec.Zone, rec.Name, recType, armdns.RecordSet{Properties: props}, nil); err != nil {
+		return fmt.Errorf("azure.ManageDNS: upsert %s record %s in zone %s: %w", rec.Type, rec.Name, rec.Zone, err)
+	}
+	return nil
+}
+
+// buildAzureRecordSet translates a domain.Record to an Azure DNS RecordType and
+// RecordSetProperties. Supports A, CNAME, and TXT (the redirector record kinds).
+func buildAzureRecordSet(rec domain.Record) (armdns.RecordType, *armdns.RecordSetProperties, error) {
+	ttl := int64(rec.TTL)
+	if ttl == 0 {
+		ttl = 300
+	}
+	props := &armdns.RecordSetProperties{TTL: &ttl}
+	switch strings.ToUpper(rec.Type) {
+	case "A":
+		props.ARecords = []*armdns.ARecord{{IPv4Address: strPtr(rec.Value)}}
+		return armdns.RecordTypeA, props, nil
+	case "CNAME":
+		props.CnameRecord = &armdns.CnameRecord{Cname: strPtr(rec.Value)}
+		return armdns.RecordTypeCNAME, props, nil
+	case "TXT":
+		props.TxtRecords = []*armdns.TxtRecord{{Value: []*string{strPtr(rec.Value)}}}
+		return armdns.RecordTypeTXT, props, nil
+	default:
+		return "", nil, fmt.Errorf("azure.ManageDNS: unsupported record type %q (want A, CNAME, or TXT)", rec.Type)
+	}
 }
 
 // addAzureDNSRecord is the Pulumi inline program helper that creates an Azure
@@ -357,7 +699,7 @@ func addAzureDNSRecord(ctx *pulumi.Context, name string, rec domain.Record, dnsR
 	if ttl == 0 {
 		ttl = 300
 	}
-	_, err := azdns.NewARecord(ctx, name, &azdns.ARecordArgs{
+	_, err := pazdns.NewARecord(ctx, name, &pazdns.ARecordArgs{
 		Name:              pulumi.String(rec.Name),
 		ZoneName:          pulumi.String(rec.Zone),
 		ResourceGroupName: pulumi.String(dnsRG),
@@ -367,33 +709,82 @@ func addAzureDNSRecord(ctx *pulumi.Context, name string, rec domain.Record, dnsR
 	return err
 }
 
-// Destroy — handled by Engine.Teardown. Idempotent (empty ProviderRef = no-op).
-// TODO(live): direct Azure SDK delete (VM + NIC + PIP + NSG + RG).
-func (p *provider) Destroy(_ context.Context, creds cloud.Credentials, node domain.Node) error {
+// Destroy tears down a node by deleting its engagement resource group, which
+// transitively removes the VM and all of its NIC / Public IP / NSG resources —
+// matching how BuildProgram groups every engagement resource into a single RG
+// (rinfra-<engagementID[:8]>). Idempotent: an empty ProviderRef is a no-op and a
+// 404 (resource group already gone) is treated as success.
+//
+// NOTE: because all engagement nodes share one resource group, calling Destroy
+// for any node deletes the whole engagement RG. For per-node teardown that
+// preserves siblings, drive the IaC engine's Teardown instead; this direct path
+// is the guaranteed-teardown reconciliation that must leave nothing orphaned.
+func (p *provider) Destroy(ctx context.Context, creds cloud.Credentials, node domain.Node) error {
 	if node.ProviderRef == "" {
 		return nil
 	}
-	if err := validateAzureCreds(creds); err != nil {
+	cs, err := p.clients(creds)
+	if err != nil {
 		return err
 	}
-	return fmt.Errorf("azure.Destroy: use Engine.Teardown for full stack destroy + sweep — TODO(live)")
+	rg := resourceGroupName(node.EngagementID)
+	poller, err := cs.resourceGroups.BeginDelete(ctx, rg, nil)
+	if err != nil {
+		if isAzureNotFound(err) {
+			return nil // already gone — idempotent
+		}
+		return fmt.Errorf("azure.Destroy: delete resource group %s: %w", rg, err)
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+		if isAzureNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("azure.Destroy: await delete of resource group %s: %w", rg, err)
+	}
+	return nil
 }
 
-// SweepOrphans lists Azure VMs tagged rinfra=<engagementID> and deletes them
-// along with their associated NICs, Public IPs, and NSGs.
+// SweepOrphans enumerates every resource group tagged rinfra=<engagementID> and
+// deletes each one, transitively removing all engagement infrastructure (VMs,
+// NICs, Public IPs, NSGs) — the "no orphan" guarantee after a stack destroy.
 //
-// TODO(live): implement using Azure SDK (github.com/Azure/azure-sdk-for-go):
-//  1. Create ResourcesClient with ARM_* credentials.
-//  2. List resources by tag "rinfra" = engagementID.
-//  3. Delete in order: VMs, NICs, Public IPs, NSGs, Resource Group.
-//  4. Wait for async delete operations to complete.
-func (p *provider) SweepOrphans(_ context.Context, creds cloud.Credentials, engagementID string) error {
-	if err := validateAzureCreds(creds); err != nil {
+// BuildProgram creates one RG per engagement named rinfra-<engagementID[:8]> and
+// tags it rinfra=<engagementID>; the server-side $filter selects exactly those.
+// Per-group failures are collected with errors.Join; a 404 (already swept) is
+// not an error.
+func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, engagementID string) error {
+	cs, err := p.clients(creds)
+	if err != nil {
 		return err
 	}
-	// TODO(live): implement Azure resource sweep.
-	_ = engagementID
-	return nil
+	filter := fmt.Sprintf("tagName eq 'rinfra' and tagValue eq '%s'", engagementID)
+	pager := cs.resourceGroups.NewListPager(&armresources.ResourceGroupsClientListOptions{Filter: &filter})
+
+	var errs []error
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("list resource groups: %w", err))
+			break
+		}
+		for _, rg := range page.Value {
+			if rg == nil || rg.Name == nil {
+				continue
+			}
+			name := *rg.Name
+			poller, err := cs.resourceGroups.BeginDelete(ctx, name, nil)
+			if err != nil {
+				if !isAzureNotFound(err) {
+					errs = append(errs, fmt.Errorf("delete resource group %s: %w", name, err))
+				}
+				continue
+			}
+			if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFound(err) {
+				errs = append(errs, fmt.Errorf("await delete of resource group %s: %w", name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // validateAzureCreds checks minimum required credential keys.

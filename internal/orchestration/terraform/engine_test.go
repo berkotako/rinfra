@@ -32,6 +32,16 @@ func node(id string, cl domain.CloudProviderType) domain.Node {
 	return domain.Node{ID: id, Spec: domain.NodeSpec{Cloud: cl}}
 }
 
+// buildCreds carries the credentials a provider's BuildConfig needs to emit a
+// valid config. Azure now provisions SSH-key-only VMs (no password fallback), so
+// its terraform builder requires a per-engagement public key; an absent key
+// fails closed by design. Other providers ignore these creds.
+func buildCreds() cloud.Credentials {
+	return cloud.Credentials{Raw: map[string]string{
+		"RINFRA_SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY operator@rinfra",
+	}}
+}
+
 func TestDOBuildConfig(t *testing.T) {
 	b := builderFor(t, domain.CloudDigitalOcean)
 	cfg, err := b.BuildConfig("eng12345678abcd", cloud.Credentials{}, []domain.Node{node("node-aaaa1111", domain.CloudDigitalOcean)})
@@ -60,7 +70,7 @@ func TestAllProvidersBuildValidJSON(t *testing.T) {
 		domain.CloudDigitalOcean, domain.CloudAWS, domain.CloudGCP, domain.CloudAzure,
 	} {
 		b := builderFor(t, pt)
-		cfg, err := b.BuildConfig("eng12345678abcd", cloud.Credentials{}, []domain.Node{node("nodeabcd1234", pt)})
+		cfg, err := b.BuildConfig("eng12345678abcd", buildCreds(), []domain.Node{node("nodeabcd1234", pt)})
 		if err != nil {
 			t.Fatalf("%s BuildConfig: %v", pt, err)
 		}

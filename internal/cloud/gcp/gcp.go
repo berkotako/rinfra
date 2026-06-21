@@ -29,22 +29,42 @@
 // account JSON. An alternative is GOOGLE_APPLICATION_CREDENTIALS (a file
 // path), but inline JSON is safer for per-engagement credential storage.
 //
+// # SDK split: bulk provisioning vs standalone reconciliation
+//
+// Bulk provisioning runs through the IaC engine (Pulumi/Terraform) via
+// BuildProgram / BuildConfig. The standalone CloudProvider/Sweeper methods
+// (ConfigureIngress, AssignStaticIP, ManageDNS, Destroy, SweepOrphans) drive
+// the Google Cloud REST APIs directly with the google.golang.org/api client
+// libraries, for out-of-band reconciliation and the guaranteed-teardown sweep.
+//
+// These standalone methods issue GCP operations but, by design, do NOT poll
+// the returned long-running Operation to completion: enqueuing the operation is
+// sufficient for reconciliation purposes and the immediate call error is the
+// only failure we surface. The engine path owns full lifecycle convergence.
+//
 // # Verified by compile vs needs live testing
 //
-// All code below is verified to compile against the Pulumi GCP SDK v8.
-// The full resource lifecycle requires a live GCP project and has NOT been
-// exercised against the live API. See docs/RUNBOOK_DO.md for the checklist
-// approach (same pattern, different cloud).
+// The client-backed standalone methods are unit-tested against an httptest fake
+// of the compute/DNS REST APIs (live_test.go) — request routing and response
+// parsing are verified, but the full lifecycle against a real GCP project still
+// wants the docs/RUNBOOK_DO.md checklist. The engine BuildProgram path is
+// compile-verified against the Pulumi GCP SDK v8.
 package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	gcpcompute "github.com/pulumi/pulumi-gcp/sdk/v8/go/gcp/compute"
 	gcpdns "github.com/pulumi/pulumi-gcp/sdk/v8/go/gcp/dns"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	compute "google.golang.org/api/compute/v1"
+	dns "google.golang.org/api/dns/v1"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
@@ -72,13 +92,101 @@ func init() {
 	cloud.RegisterSweeper(domain.CloudGCP, p)
 }
 
-type provider struct{}
+// provider is the RInfra GCP cloud adapter. It implements CloudProvider and
+// Sweeper and acts as the ProgramBuilder/terraform.Builder for the engine.
+//
+// baseEndpoint overrides the compute/DNS REST API root; empty uses the live
+// Google APIs. It exists so tests can point the clients at an httptest server.
+// When set, clients are built with option.WithoutAuthentication() so the fake
+// server need not implement OAuth.
+type provider struct {
+	baseEndpoint string
+}
 
 var _ cloud.CloudProvider = (*provider)(nil)
 var _ cloud.Sweeper = (*provider)(nil)
 var _ orchestration.ProgramBuilder = (*provider)(nil)
 
 func (p *provider) Type() domain.CloudProviderType { return domain.CloudGCP }
+
+// clientOptions builds the option.ClientOption slice shared by the compute and
+// DNS service constructors. With a baseEndpoint set (tests) it disables auth and
+// points at the fake server; otherwise it authenticates with the inline service
+// account JSON from creds.
+func (p *provider) clientOptions(creds cloud.Credentials) []option.ClientOption {
+	if p.baseEndpoint != "" {
+		return []option.ClientOption{
+			option.WithEndpoint(p.baseEndpoint),
+			option.WithoutAuthentication(),
+		}
+	}
+	return []option.ClientOption{
+		option.WithCredentialsJSON([]byte(creds.Raw[CredKeyCredentials])),
+	}
+}
+
+// computeService builds an authenticated GCE compute client for the engagement.
+func (p *provider) computeService(ctx context.Context, creds cloud.Credentials) (*compute.Service, error) {
+	svc, err := compute.NewService(ctx, p.clientOptions(creds)...)
+	if err != nil {
+		return nil, fmt.Errorf("gcp: build compute service: %w", err)
+	}
+	return svc, nil
+}
+
+// dnsService builds an authenticated Cloud DNS client for the engagement.
+func (p *provider) dnsService(ctx context.Context, creds cloud.Credentials) (*dns.Service, error) {
+	svc, err := dns.NewService(ctx, p.clientOptions(creds)...)
+	if err != nil {
+		return nil, fmt.Errorf("gcp: build dns service: %w", err)
+	}
+	return svc, nil
+}
+
+// project returns the GCP project ID from credentials.
+func project(creds cloud.Credentials) string { return creds.Raw[CredKeyProject] }
+
+// isNotFound reports whether err is a GCP 404 (already-deleted / missing),
+// which the idempotent teardown paths treat as success.
+func isNotFound(err error) bool {
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) {
+		return gerr.Code == 404
+	}
+	return false
+}
+
+// lastPathSegment returns the final "/"-delimited segment of s. GCP REST
+// responses express zone/region as full resource URLs (e.g.
+// ".../zones/us-central1-a"); this extracts the bare name.
+func lastPathSegment(s string) string {
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// shortID returns the first 8 chars of an id (or the whole id if shorter).
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// regionFromZone derives a GCP region from a zone by dropping the trailing
+// "-<letter>" (e.g. "us-central1-a" -> "us-central1"). If s is not zone-shaped
+// it is returned unchanged.
+func regionFromZone(s string) string {
+	if len(s) > 2 && s[len(s)-2] == '-' {
+		return s[:len(s)-2]
+	}
+	return s
+}
+
+// firewallName is the deterministic firewall resource name for a node, used by
+// both ConfigureIngress (insert/patch) and SweepOrphans (delete by name).
+func firewallName(nodeID string) string { return "rinfra-fw-" + shortID(nodeID) }
 
 // BuildProgram implements orchestration.ProgramBuilder. Creates a GCE instance
 // with a network tag, a VPC Firewall Rule using that tag (GCP-specific target-
@@ -189,16 +297,76 @@ func (p *provider) ProvisionNode(_ context.Context, _ cloud.Credentials, _ domai
 //   - SourceCIDR → SourceRanges on the Firewall Rule.
 //   - Direction is always INGRESS.
 //
-// TODO(live): standalone GCP firewall update requires live project.
-func (p *provider) ConfigureIngress(_ context.Context, creds cloud.Credentials, node domain.Node, rules []domain.Rule) error {
+// The rule targets the node via its network tag ("rinfra-<nodeID[:8]>", matching
+// BuildProgram). The firewall is upserted: if a rule of the same name already
+// exists it is patched, otherwise it is inserted. The returned compute Operation
+// is not polled to completion (see package doc).
+func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials, node domain.Node, rules []domain.Rule) error {
 	if node.ProviderRef == "" {
 		return fmt.Errorf("gcp.ConfigureIngress: node %s has no ProviderRef (not yet provisioned)", node.ID)
 	}
 	if err := validateGCPCreds(creds); err != nil {
 		return err
 	}
-	_ = buildGCPFirewallAllows(rules)
-	return fmt.Errorf("gcp.ConfigureIngress: standalone firewall update not yet implemented; use Engine.Deploy — TODO(live)")
+	svc, err := p.computeService(ctx, creds)
+	if err != nil {
+		return err
+	}
+	proj := project(creds)
+
+	// Collect source ranges from allow rules; default to anywhere if unset.
+	var sources []string
+	seen := map[string]bool{}
+	for _, r := range rules {
+		if !r.Allow {
+			continue
+		}
+		src := r.SourceCIDR
+		if src == "" {
+			src = "0.0.0.0/0"
+		}
+		if !seen[src] {
+			seen[src] = true
+			sources = append(sources, src)
+		}
+	}
+	if len(sources) == 0 {
+		sources = []string{"0.0.0.0/0"}
+	}
+
+	var allowed []*compute.FirewallAllowed
+	for _, a := range buildGCPFirewallAllows(rules) {
+		allowed = append(allowed, &compute.FirewallAllowed{
+			IPProtocol: a.Protocol,
+			Ports:      a.Ports,
+		})
+	}
+
+	fwName := firewallName(node.ID)
+	fw := &compute.Firewall{
+		Name:         fwName,
+		Network:      "global/networks/default",
+		Direction:    "INGRESS",
+		TargetTags:   []string{"rinfra-" + shortID(node.ID)},
+		SourceRanges: sources,
+		Allowed:      allowed,
+		// Carry the engagement so SweepOrphans can match by description.
+		Description: TagPrefix + node.EngagementID,
+	}
+
+	// Upsert: patch if the named rule exists, else insert.
+	if _, err := svc.Firewalls.Get(proj, fwName).Context(ctx).Do(); err == nil {
+		if _, err := svc.Firewalls.Patch(proj, fwName, fw).Context(ctx).Do(); err != nil {
+			return fmt.Errorf("gcp.ConfigureIngress: patch firewall %s: %w", fwName, err)
+		}
+		return nil
+	} else if !isNotFound(err) {
+		return fmt.Errorf("gcp.ConfigureIngress: get firewall %s: %w", fwName, err)
+	}
+	if _, err := svc.Firewalls.Insert(proj, fw).Context(ctx).Do(); err != nil {
+		return fmt.Errorf("gcp.ConfigureIngress: insert firewall %s: %w", fwName, err)
+	}
+	return nil
 }
 
 // buildGCPFirewallAllows converts domain.Rule to GCP FirewallAllow descriptors.
@@ -225,16 +393,91 @@ type gcpFirewallAllow struct {
 	Ports    []string // e.g. ["443"] or ["8000", "8001-8010"]
 }
 
-// AssignStaticIP — handled by Address in BuildProgram.
-// TODO(live): standalone address allocation.
-func (p *provider) AssignStaticIP(_ context.Context, creds cloud.Credentials, node domain.Node) (string, error) {
+// AssignStaticIP reserves a regional external static Address for the node,
+// attaches it to the instance's external access config, and returns the IP.
+//
+// GCP reserves the address asynchronously: addresses.Insert returns an
+// Operation, after which the allocated IP is read back from the Address
+// resource (addresses.Get). The reserved IP is then bound to the instance's
+// primary NIC by replacing its external access config (delete + add with NatIP),
+// so the node actually answers on the stable address — DNS pointed at the
+// returned IP reaches the node. Reserving without attaching would leave the VM
+// on its old ephemeral IP.
+//
+// The region is derived from the node's zone (Spec.Region holds the zone, as in
+// BuildProgram). The address resource is named to match the engine naming so
+// reconciliation lines up.
+func (p *provider) AssignStaticIP(ctx context.Context, creds cloud.Credentials, node domain.Node) (string, error) {
 	if node.ProviderRef == "" {
 		return "", fmt.Errorf("gcp.AssignStaticIP: node %s has no ProviderRef", node.ID)
 	}
 	if err := validateGCPCreds(creds); err != nil {
 		return "", err
 	}
-	return "", fmt.Errorf("gcp.AssignStaticIP: use Engine.Deploy (includes Address in inline program) — TODO(live)")
+	svc, err := p.computeService(ctx, creds)
+	if err != nil {
+		return "", err
+	}
+	proj := project(creds)
+
+	zone, instName := instanceZoneName(node)
+	region := regionFromZone(zone)
+
+	addrName := fmt.Sprintf("rinfra-%s-%s-ip", shortID(node.EngagementID), shortID(node.ID))
+	addr := &compute.Address{
+		Name:        addrName,
+		AddressType: "EXTERNAL",
+		Labels: map[string]string{
+			"rinfra":      node.EngagementID,
+			"rinfra-node": node.ID,
+		},
+	}
+	if _, err := svc.Addresses.Insert(proj, region, addr).Context(ctx).Do(); err != nil {
+		return "", fmt.Errorf("gcp.AssignStaticIP: reserve address %s in %s: %w", addrName, region, err)
+	}
+
+	// Read back the allocated IP. The insert Operation may still be settling,
+	// but the Address resource exists and carries the assigned address.
+	got, err := svc.Addresses.Get(proj, region, addrName).Context(ctx).Do()
+	if err != nil {
+		return "", fmt.Errorf("gcp.AssignStaticIP: read back address %s: %w", addrName, err)
+	}
+
+	// Attach the reserved IP to the instance's primary NIC so traffic to it
+	// reaches the node. Replace the existing external access config (a NIC may
+	// have at most one ONE_TO_ONE_NAT config) with one pinned to the reserved IP.
+	if err := attachAddress(ctx, svc, proj, zone, instName, got.Address); err != nil {
+		return got.Address, fmt.Errorf("gcp.AssignStaticIP: attach %s to %s: %w", got.Address, instName, err)
+	}
+	return got.Address, nil
+}
+
+// attachAddress binds natIP to the instance's primary network interface by
+// swapping its external access config. The existing config is removed first
+// because GCP permits only one ONE_TO_ONE_NAT access config per NIC.
+func attachAddress(ctx context.Context, svc *compute.Service, proj, zone, instName, natIP string) error {
+	inst, err := svc.Instances.Get(proj, zone, instName).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("get instance: %w", err)
+	}
+	if len(inst.NetworkInterfaces) == 0 {
+		return fmt.Errorf("instance %s has no network interface", instName)
+	}
+	nic := inst.NetworkInterfaces[0]
+	for _, ac := range nic.AccessConfigs {
+		if _, err := svc.Instances.DeleteAccessConfig(proj, zone, instName, ac.Name, nic.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+			return fmt.Errorf("remove existing access config %q: %w", ac.Name, err)
+		}
+	}
+	newAC := &compute.AccessConfig{
+		Name:  "External NAT",
+		Type:  "ONE_TO_ONE_NAT",
+		NatIP: natIP,
+	}
+	if _, err := svc.Instances.AddAccessConfig(proj, zone, instName, nic.Name, newAC).Context(ctx).Do(); err != nil {
+		return fmt.Errorf("add access config: %w", err)
+	}
+	return nil
 }
 
 // ManageDNS upserts a GCP Cloud DNS RecordSet.
@@ -246,15 +489,62 @@ func (p *provider) AssignStaticIP(_ context.Context, creds cloud.Credentials, no
 // GCP record set names must be fully-qualified (trailing dot): "www.example.com."
 // This differs from DO (no trailing dot) and AWS (no trailing dot in most contexts).
 //
-// TODO(live): DNS record upsert via GCP SDK.
-func (p *provider) ManageDNS(_ context.Context, creds cloud.Credentials, rec domain.Record) error {
+// Cloud DNS has no native upsert: a Change atomically applies additions and
+// deletions. To UPSERT we add the new record set and, if a record of the same
+// name+type already exists, include the current record in deletions so the
+// Change replaces it in one transaction. rec.Zone is the managed-zone name.
+func (p *provider) ManageDNS(ctx context.Context, creds cloud.Credentials, rec domain.Record) error {
 	if err := validateGCPCreds(creds); err != nil {
 		return err
 	}
 	if rec.Zone == "" {
 		return fmt.Errorf("gcp.ManageDNS: Zone must be set (GCP managed zone name)")
 	}
-	return fmt.Errorf("gcp.ManageDNS: use Engine.Deploy (includes RecordSet in inline program) — TODO(live)")
+	if rec.Type == "" {
+		return fmt.Errorf("gcp.ManageDNS: Type must be set")
+	}
+	svc, err := p.dnsService(ctx, creds)
+	if err != nil {
+		return err
+	}
+	proj := project(creds)
+
+	// GCP record names are FQDN with a trailing dot.
+	name := rec.Name
+	if !strings.HasSuffix(name, ".") {
+		name += "."
+	}
+	ttl := int64(rec.TTL)
+	if ttl == 0 {
+		ttl = 300
+	}
+	addition := &dns.ResourceRecordSet{
+		Name:    name,
+		Type:    rec.Type,
+		Ttl:     ttl,
+		Rrdatas: []string{rec.Value},
+	}
+
+	change := &dns.Change{Additions: []*dns.ResourceRecordSet{addition}}
+
+	// If a record set of the same name+type exists, it must be deleted in the
+	// same change for the addition to be accepted (UPSERT semantics).
+	existing, err := svc.ResourceRecordSets.List(proj, rec.Zone).Name(name).Type(rec.Type).Context(ctx).Do()
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("gcp.ManageDNS: list record sets in %s: %w", rec.Zone, err)
+	}
+	if err == nil {
+		for _, rr := range existing.Rrsets {
+			if rr.Name == name && rr.Type == rec.Type {
+				change.Deletions = append(change.Deletions, rr)
+			}
+		}
+	}
+
+	if _, err := svc.Changes.Create(proj, rec.Zone, change).Context(ctx).Do(); err != nil {
+		return fmt.Errorf("gcp.ManageDNS: apply change in zone %s: %w", rec.Zone, err)
+	}
+	return nil
 }
 
 // addGCPDNSRecord is the Pulumi inline program helper that creates a Cloud DNS
@@ -277,34 +567,133 @@ func addGCPDNSRecord(ctx *pulumi.Context, name string, rec domain.Record, manage
 	return err
 }
 
-// Destroy — handled by Engine.Teardown. Idempotent (empty ProviderRef = no-op).
-// TODO(live): direct GCP SDK delete.
-func (p *provider) Destroy(_ context.Context, creds cloud.Credentials, node domain.Node) error {
+// Destroy deletes the node's GCE instance. Idempotent: an empty ProviderRef is a
+// no-op, and a 404/notFound from the API (instance already gone) is treated as
+// success. The delete Operation is not polled to completion (see package doc).
+//
+// node.ProviderRef holds the instance identifier exported by BuildProgram. GCP
+// instance IDs/self-links embed the zone (".../zones/<zone>/instances/<name>");
+// when the ref is a bare name we fall back to the node's zone (Spec.Region) and
+// the deterministic instance name.
+func (p *provider) Destroy(ctx context.Context, creds cloud.Credentials, node domain.Node) error {
 	if node.ProviderRef == "" {
 		return nil
 	}
 	if err := validateGCPCreds(creds); err != nil {
 		return err
 	}
-	return fmt.Errorf("gcp.Destroy: use Engine.Teardown for full stack destroy + sweep — TODO(live)")
+	svc, err := p.computeService(ctx, creds)
+	if err != nil {
+		return err
+	}
+	proj := project(creds)
+
+	zone, name := instanceZoneName(node)
+	if _, err := svc.Instances.Delete(proj, zone, name).Context(ctx).Do(); err != nil {
+		if isNotFound(err) {
+			return nil // already gone — idempotent
+		}
+		return fmt.Errorf("gcp.Destroy: delete instance %s in %s: %w", name, zone, err)
+	}
+	return nil
 }
 
-// SweepOrphans lists GCE instances/addresses labeled rinfra=<engagementID>
-// and deletes any found.
+// instanceZoneName resolves the (zone, instance-name) pair to delete from a
+// node. If ProviderRef is a self-link of the form ".../zones/<zone>/instances/
+// <name>" both are taken from it; otherwise the zone comes from Spec.Region (the
+// engine stores the zone there) and the name is the deterministic instance name.
+func instanceZoneName(node domain.Node) (zone, name string) {
+	ref := node.ProviderRef
+	if i := strings.Index(ref, "/zones/"); i >= 0 {
+		rest := ref[i+len("/zones/"):]
+		if j := strings.Index(rest, "/"); j >= 0 {
+			zone = rest[:j]
+		}
+		name = lastPathSegment(ref)
+		if zone != "" && name != "" {
+			return zone, name
+		}
+	}
+	zone = node.Spec.Region
+	if zone == "" {
+		zone = "us-central1-a"
+	}
+	name = lastPathSegment(ref)
+	return zone, name
+}
+
+// SweepOrphans deletes every resource labeled/named for the engagement,
+// providing the "no orphan" guarantee after a stack destroy:
 //
-// TODO(live): implement using GCP compute SDK:
-//  1. Create computeService client with GOOGLE_CREDENTIALS.
-//  2. instances.list with filter label.rinfra = engagementID.
-//  3. instances.delete for each found.
-//  4. addresses.list + delete for orphaned static IPs.
-//  5. firewalls.list + delete for orphaned firewall rules (by label).
-func (p *provider) SweepOrphans(_ context.Context, creds cloud.Credentials, engagementID string) error {
+//  1. GCE instances labeled rinfra=<engagementID> (found via aggregated list,
+//     which spans all zones) — deleted in their owning zone.
+//  2. Regional external addresses labeled rinfra=<engagementID> — deleted in
+//     their owning region.
+//  3. Firewall rules whose description carries the engagement tag
+//     (TagPrefix+engagementID) — deleted by name.
+//
+// Failures are collected with errors.Join and returned together; a notFound on
+// any delete is treated as already-swept. Delete operations are not polled to
+// completion (see package doc).
+func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, engagementID string) error {
 	if err := validateGCPCreds(creds); err != nil {
 		return err
 	}
-	// TODO(live): implement GCP resource sweep.
-	_ = engagementID
-	return nil
+	svc, err := p.computeService(ctx, creds)
+	if err != nil {
+		return err
+	}
+	proj := project(creds)
+	labelFilter := fmt.Sprintf("labels.rinfra=%s", engagementID)
+	engTag := TagPrefix + engagementID
+	var errs []error
+
+	// 1. Instances across all zones (aggregated list).
+	instList, err := svc.Instances.AggregatedList(proj).Filter(labelFilter).Context(ctx).Do()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("aggregated list instances: %w", err))
+	} else {
+		for _, scoped := range instList.Items {
+			for _, inst := range scoped.Instances {
+				zone := lastPathSegment(inst.Zone)
+				if _, err := svc.Instances.Delete(proj, zone, inst.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+					errs = append(errs, fmt.Errorf("delete instance %s in %s: %w", inst.Name, zone, err))
+				}
+			}
+		}
+	}
+
+	// 2. Regional addresses (aggregated list spans regions).
+	addrList, err := svc.Addresses.AggregatedList(proj).Filter(labelFilter).Context(ctx).Do()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("aggregated list addresses: %w", err))
+	} else {
+		for _, scoped := range addrList.Items {
+			for _, addr := range scoped.Addresses {
+				region := lastPathSegment(addr.Region)
+				if _, err := svc.Addresses.Delete(proj, region, addr.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+					errs = append(errs, fmt.Errorf("delete address %s in %s: %w", addr.Name, region, err))
+				}
+			}
+		}
+	}
+
+	// 3. Firewall rules tagged for the engagement (matched via description).
+	fwList, err := svc.Firewalls.List(proj).Context(ctx).Do()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list firewalls: %w", err))
+	} else {
+		for _, fw := range fwList.Items {
+			if fw.Description != engTag {
+				continue
+			}
+			if _, err := svc.Firewalls.Delete(proj, fw.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+				errs = append(errs, fmt.Errorf("delete firewall %s: %w", fw.Name, err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // validateGCPCreds checks minimum required credential keys.
