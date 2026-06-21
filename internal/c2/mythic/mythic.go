@@ -215,7 +215,7 @@ func (o *operator) Execute(ctx context.Context, callbackID string, t domain.Tech
 	if err != nil {
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecSkipped,
+			Status:            domain.ExecUnsupported,
 			Output:            err.Error(),
 			StartedAt:         start,
 			FinishedAt:        time.Now(),

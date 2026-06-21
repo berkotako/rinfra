@@ -74,6 +74,13 @@ export default function ReportingScreen() {
   const trm = coverage?.trm ?? 0;
   const trmTrend = coverage?.trmTrend ?? [];
   const trmColor = trm >= 80 ? "var(--ok)" : trm >= 50 ? "var(--warn)" : "var(--danger)";
+  // Non-attempt techniques (manual, unsupported, out-of-scope, policy-skipped)
+  // are reported separately so "exercised" / TRM are not inflated.
+  const manualOrSkipped =
+    (coverage?.manualCount ?? 0) +
+    (coverage?.unsupportedCount ?? 0) +
+    (coverage?.blockedScopeCount ?? 0) +
+    (coverage?.skippedPolicyCount ?? 0);
 
   const copyNavigator = () => {
     getClient()
@@ -210,6 +217,7 @@ export default function ReportingScreen() {
                   ["Techniques exercised", `${covered} / ${total}`, "var(--accent)"],
                   ["Executed (2+ coverage)", executed, "var(--ok)"],
                   ["Validated", validated, "var(--info)"],
+                  ["Manual / out-of-scope", manualOrSkipped, "var(--warn)"],
                   ["Coverage score", `${coveragePct}%`, "var(--text)"],
                 ] as [string, string | number, string][]
               ).map(([l, v, c], i) => (

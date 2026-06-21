@@ -2,7 +2,7 @@
 // open source with a scriptable Python server, but the API surface is less clean
 // than a modern gRPC or REST API. RInfra supports deploy + redirector and a
 // partial operator: only techniques that map reliably to PoshC2 implant commands
-// are executed; others return ExecSkipped.
+// are executed; others return ExecUnsupported.
 //
 // # Automation seam note
 //
@@ -108,7 +108,7 @@ func (p *provider) RedirectorConfig(prof domain.Profile) (string, error) {
 }
 
 // Control returns a scripted partial Operator. Techniques outside
-// supportedTechniques return ExecSkipped.
+// supportedTechniques return ExecUnsupported.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
 	client := newCLIPoshC2Client(deploy.NewNodeRunner(ts.Host))
 	return &operator{ts: ts, client: client}, true
@@ -165,7 +165,7 @@ func (o *operator) Execute(ctx context.Context, implantID string, t domain.Techn
 	if !supportedTechniques[t.AttackID] {
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecSkipped,
+			Status:            domain.ExecUnsupported,
 			Output: fmt.Sprintf("poshc2 (scripted-tier): technique %s is outside the supported subset; "+
 				"operator should execute manually via PoshC2 client", t.AttackID),
 			StartedAt:  start,

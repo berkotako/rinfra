@@ -347,13 +347,15 @@ func (s *EmulationService) Start(ctx context.Context, engagementID, scenarioID, 
 
 // runScenario resolves the Operator, executes the scenario, and persists results.
 func (s *EmulationService) runScenario(ctx context.Context, eng domain.Engagement, sc domain.Scenario, run domain.ScenarioRun, actor string) {
-	// Resolve the operator: may be nil for Fronted-tier (all techniques → Skipped).
+	// Resolve the operator: may be nil for Fronted-tier, in which case every
+	// technique is recorded as manual_required (a human runs it by hand).
 	op, sessionID, _ := s.resolver.Resolve(ctx, eng)
+	noOpStatus := domain.ExecManualRequired
 
 	// Find the right agent to execute against, enforcing scope: pick the first
 	// active session whose host is in the engagement scope. If sessions exist but
-	// none are in scope, refuse to execute (techniques are recorded Skipped) —
-	// scope is enforced at execution time, not just at deploy time.
+	// none are in scope, refuse to execute — the techniques are recorded
+	// blocked_by_scope (distinct from manual), enforcing scope at execution time.
 	if op != nil {
 		sid, ok := selectInScopeSession(ctx, &eng, op, sessionID)
 		if !ok {
@@ -366,6 +368,7 @@ func (s *EmulationService) runScenario(ctx context.Context, eng domain.Engagemen
 				At:           time.Now().UTC(),
 			})
 			op = nil
+			noOpStatus = domain.ExecBlockedByScope
 		} else {
 			sessionID = sid
 		}
@@ -374,7 +377,7 @@ func (s *EmulationService) runScenario(ctx context.Context, eng domain.Engagemen
 	// Publish per-technique SSE events as each technique completes by using a
 	// wrapping orchestrator approach. We drive the orchestrator but also hook
 	// into each technique result to publish SSE + persist incrementally.
-	result, err := s.orchRunWithHooks(ctx, &eng, sc, sessionID, op, run.ID)
+	result, err := s.orchRunWithHooks(ctx, &eng, sc, sessionID, op, run.ID, noOpStatus)
 	if err != nil {
 		run.Status = domain.ExecFailed
 		run.FinishedAt = time.Now().UTC()
@@ -420,6 +423,10 @@ func (s *EmulationService) orchRunWithHooks(
 		Execute(context.Context, string, domain.Technique) (domain.Result, error)
 	},
 	runID string,
+	// noOpStatus is the status recorded for every technique when op is nil. It
+	// distinguishes a Fronted-tier manual run (ExecManualRequired) from a
+	// scope-refused run (ExecBlockedByScope) so reporting can tell them apart.
+	noOpStatus domain.ExecutionStatus,
 ) (*domain.ScenarioRun, error) {
 	// Check authorization.
 	if err := eng.CanDeploy(time.Now()); err != nil {
@@ -446,11 +453,13 @@ func (s *EmulationService) orchRunWithHooks(
 	for _, t := range sc.Techniques {
 		var res domain.Result
 		if opExec == nil {
-			// Fronted tier: skip all techniques.
+			// No operator: record the specific reason (manual vs scope-blocked)
+			// rather than a generic skip, so coverage does not count it as an
+			// attempt.
 			res = domain.Result{
 				TechniqueAttackID: t.AttackID,
-				Status:            domain.ExecSkipped,
-				Output:            "no operator API (fronted-tier framework); run manually",
+				Status:            noOpStatus,
+				Output:            noOpMessage(noOpStatus),
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
 			}
@@ -524,9 +533,20 @@ func (s *EmulationService) ListRuns(ctx context.Context, engagementID string) ([
 }
 
 // summarizeResults rolls per-technique results up to a run-level status.
+// noOpMessage returns the per-technique Output explaining why a technique was
+// not executed by an operator.
+func noOpMessage(status domain.ExecutionStatus) string {
+	switch status {
+	case domain.ExecBlockedByScope:
+		return "no in-scope agent session; execution refused (run manually if in scope)"
+	default: // ExecManualRequired
+		return "no operator API (fronted-tier framework); run manually"
+	}
+}
+
 func summarizeResults(results []domain.Result) domain.ExecutionStatus {
 	if len(results) == 0 {
-		return domain.ExecSkipped
+		return domain.ExecNotRun
 	}
 	anyFailed, anySuccess := false, false
 	for _, r := range results {
@@ -543,7 +563,9 @@ func summarizeResults(results []domain.Result) domain.ExecutionStatus {
 	case anySuccess:
 		return domain.ExecSuccess
 	default:
-		return domain.ExecSkipped
+		// No genuine attempt in the run — surface the actual reason (manual,
+		// blocked, etc.) rather than a generic skip.
+		return results[0].Status
 	}
 }
 
@@ -560,12 +582,16 @@ const (
 	CoverageLevelValidated CoverageLevel = 3
 )
 
-// Techniquecoverage holds the coverage data for one technique.
+// Techniquecoverage holds the coverage data for one technique. Level drives the
+// heatmap (0-3); Disposition carries the finer BAS taxonomy so the UI can show
+// WHY a technique is at level 0 (manual vs blocked vs not-run) rather than
+// lumping them together.
 type Techniquecoverage struct {
-	AttackID string        `json:"attackID"`
-	Name     string        `json:"name"`
-	Tactic   string        `json:"tactic"`
-	Level    CoverageLevel `json:"level"`
+	AttackID    string        `json:"attackID"`
+	Name        string        `json:"name"`
+	Tactic      string        `json:"tactic"`
+	Level       CoverageLevel `json:"level"`
+	Disposition Disposition   `json:"disposition"`
 }
 
 // TacticCoverage holds all technique coverages for one tactic.
@@ -575,15 +601,31 @@ type TacticCoverage struct {
 }
 
 // Coverage is the full ATT&CK coverage rollup for an engagement.
+//
+// "Attempted/exercised" counts ONLY genuine execution attempts (executed +
+// attempted-failed). Manual, unsupported, scope-blocked, policy-skipped, and
+// not-run techniques are reported in their own buckets and excluded from both
+// the attempted total and the TRM denominator, so the dashboard cannot look
+// more complete than reality.
 type Coverage struct {
 	EngagementID string           `json:"engagementId"`
 	Tactics      []TacticCoverage `json:"tactics"`
 	// Summary fields for the dashboard cards.
 	TotalTechniques int `json:"totalTechniques"`
-	ExercisedCount  int `json:"exercisedCount"` // level >= 1
-	ExecutedCount   int `json:"executedCount"`  // level >= 2
-	ValidatedCount  int `json:"validatedCount"` // level == 3 (passed: block/detect/alert)
-	// TRM (Threat Resilience Metric): % of exercised techniques that passed.
+	ExercisedCount  int `json:"exercisedCount"` // genuine attempts (executed + attempted-failed)
+	ExecutedCount   int `json:"executedCount"`  // ran on an agent (>= level 2)
+	ValidatedCount  int `json:"validatedCount"` // executed AND blocked/detected/alerted
+	// Non-attempt buckets — reported separately, never folded into "attempted".
+	ManualCount        int `json:"manualCount"`        // manual_required (Fronted-tier)
+	UnsupportedCount   int `json:"unsupportedCount"`   // deployed framework can't translate
+	BlockedScopeCount  int `json:"blockedScopeCount"`  // refused: no in-scope agent
+	SkippedPolicyCount int `json:"skippedPolicyCount"` // skipped by policy
+	NotRunCount        int `json:"notRunCount"`        // never reached
+	// Validation breakdown (defender outcome on executed techniques).
+	ValidatedDetectedCount int `json:"validatedDetectedCount"` // detected/alerted
+	ValidatedBlockedCount  int `json:"validatedBlockedCount"`  // blocked outright
+	// TRM (Threat Resilience Metric): % of ATTEMPTED techniques the defenders
+	// passed. Denominator excludes manual/skipped/blocked/not-run.
 	TRM int `json:"trm"`
 }
 
@@ -595,9 +637,9 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 	}
 
 	// Collect full results: for each run, fetch from store to get technique_results.
-	// (RunsForEngagement may not load results — call GetRun for each.)
-	type techKey struct{ attackID string }
-	levels := make(map[string]CoverageLevel) // attackID → best level
+	// (RunsForEngagement may not load results — call GetRun for each.) Track the
+	// best (highest-ranked) disposition per technique across all runs.
+	dispos := make(map[string]Disposition) // attackID → best disposition
 	names := make(map[string]string)
 	tactics := make(map[string]string)
 
@@ -607,9 +649,9 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 			continue
 		}
 		for _, r := range full.Results {
-			lvl := resultLevel(r)
-			if existing, ok := levels[r.TechniqueAttackID]; !ok || lvl > existing {
-				levels[r.TechniqueAttackID] = lvl
+			d := dispositionFor(r)
+			if existing, ok := dispos[r.TechniqueAttackID]; !ok || dispositionRank(d) > dispositionRank(existing) {
+				dispos[r.TechniqueAttackID] = d
 			}
 		}
 	}
@@ -631,20 +673,26 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 	// Build technique coverage per tactic from catalog.
 	for _, sc := range catalog.List() {
 		for _, t := range sc.Techniques {
-			lvl := levels[t.AttackID] // default 0 = not exercised
+			disp, ok := dispos[t.AttackID]
+			if !ok {
+				disp = DispNotRun // default: never reached
+			}
+			lvl := levelFromDisposition(disp)
 			tc := Techniquecoverage{
-				AttackID: t.AttackID,
-				Name:     t.Name,
-				Tactic:   t.Tactic,
-				Level:    lvl,
+				AttackID:    t.AttackID,
+				Name:        t.Name,
+				Tactic:      t.Tactic,
+				Level:       lvl,
+				Disposition: disp,
 			}
 			// Deduplicate: if already added for this tactic with the same ID, keep best.
 			tacs := tacticTechs[t.Tactic]
 			found := false
 			for i, existing := range tacs {
 				if existing.AttackID == t.AttackID {
-					if lvl > existing.Level {
+					if dispositionRank(disp) > dispositionRank(existing.Disposition) {
 						tacs[i].Level = lvl
+						tacs[i].Disposition = disp
 					}
 					found = true
 					break
@@ -685,19 +733,40 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 		})
 	}
 
-	// Summary counts.
-	total, exercised, executed, validated := 0, 0, 0, 0
+	// Summary counts, bucketed by disposition. "exercised" counts ONLY genuine
+	// attempts so the TRM denominator and the dashboard cannot overstate reality.
+	var cov Coverage
+	cov.EngagementID = engagementID
+	cov.Tactics = tacticList
 	for _, tac := range tacticList {
 		for _, tc := range tac.Techniques {
-			total++
-			if tc.Level >= 1 {
-				exercised++
-			}
-			if tc.Level >= 2 {
-				executed++
-			}
-			if tc.Level == 3 {
-				validated++
+			cov.TotalTechniques++
+			switch tc.Disposition {
+			case DispValidatedBlocked:
+				cov.ExercisedCount++
+				cov.ExecutedCount++
+				cov.ValidatedCount++
+				cov.ValidatedBlockedCount++
+			case DispValidatedDetected:
+				cov.ExercisedCount++
+				cov.ExecutedCount++
+				cov.ValidatedCount++
+				cov.ValidatedDetectedCount++
+			case DispExecuted:
+				cov.ExercisedCount++
+				cov.ExecutedCount++
+			case DispAttemptedFailed:
+				cov.ExercisedCount++
+			case DispManualRequired:
+				cov.ManualCount++
+			case DispUnsupported:
+				cov.UnsupportedCount++
+			case DispBlockedByScope:
+				cov.BlockedScopeCount++
+			case DispSkippedPolicy:
+				cov.SkippedPolicyCount++
+			default: // DispNotRun
+				cov.NotRunCount++
 			}
 		}
 	}
@@ -705,36 +774,98 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 	_ = names
 	_ = tactics
 
-	trm := 0
-	if exercised > 0 {
-		trm = int(float64(validated) / float64(exercised) * 100)
+	if cov.ExercisedCount > 0 {
+		cov.TRM = int(float64(cov.ValidatedCount) / float64(cov.ExercisedCount) * 100)
 	}
-	return Coverage{
-		EngagementID:    engagementID,
-		Tactics:         tacticList,
-		TotalTechniques: total,
-		ExercisedCount:  exercised,
-		ExecutedCount:   executed,
-		ValidatedCount:  validated,
-		TRM:             trm,
-	}, nil
+	return cov, nil
 }
 
-// resultLevel converts a technique result to a coverage level, factoring in the
-// defender outcome:
-//
-//	0 = not exercised (never ran)
-//	1 = attempted (ran but failed/skipped)
-//	2 = executed (ran and succeeded, but defenders didn't catch it)
-//	3 = validated (executed AND blocked/detected/alerted — the defenders passed)
-func resultLevel(r domain.Result) CoverageLevel {
+// Disposition is the per-technique BAS outcome taxonomy. It keeps manual,
+// unsupported, scope-blocked, policy-skipped, and not-run techniques distinct
+// from genuine execution attempts so coverage reporting is honest. The
+// validated_* dispositions layer the defender outcome (DetectionOutcome) on top
+// of a successful execution; full detection validation is the deferred phase
+// (see CLAUDE.md) — these are the seam.
+type Disposition string
+
+const (
+	DispNotRun            Disposition = "not_run"
+	DispSkippedPolicy     Disposition = "skipped_policy"
+	DispBlockedByScope    Disposition = "blocked_by_scope"
+	DispUnsupported       Disposition = "unsupported"
+	DispManualRequired    Disposition = "manual_required"
+	DispAttemptedFailed   Disposition = "attempted_failed"
+	DispExecuted          Disposition = "executed"
+	DispValidatedDetected Disposition = "validated_detected"
+	DispValidatedBlocked  Disposition = "validated_blocked"
+)
+
+// dispositionRank orders dispositions so the best outcome across multiple runs
+// of the same technique wins the rollup (a later validated run outranks an
+// earlier manual/skipped one).
+func dispositionRank(d Disposition) int {
+	switch d {
+	case DispValidatedBlocked:
+		return 8
+	case DispValidatedDetected:
+		return 7
+	case DispExecuted:
+		return 6
+	case DispAttemptedFailed:
+		return 5
+	case DispManualRequired:
+		return 4
+	case DispUnsupported:
+		return 3
+	case DispBlockedByScope:
+		return 2
+	case DispSkippedPolicy:
+		return 1
+	default: // DispNotRun
+		return 0
+	}
+}
+
+// dispositionFor maps a stored Result to its Disposition.
+func dispositionFor(r domain.Result) Disposition {
 	switch r.Status {
 	case domain.ExecSuccess:
-		if r.Detection.Passed() {
-			return CoverageLevelValidated
+		switch r.Detection {
+		case domain.DetectBlocked:
+			return DispValidatedBlocked
+		case domain.DetectDetected, domain.DetectAlerted:
+			return DispValidatedDetected
+		default:
+			return DispExecuted
 		}
+	case domain.ExecFailed:
+		return DispAttemptedFailed
+	case domain.ExecManualRequired:
+		return DispManualRequired
+	case domain.ExecUnsupported:
+		return DispUnsupported
+	case domain.ExecBlockedByScope:
+		return DispBlockedByScope
+	case domain.ExecSkippedPolicy:
+		return DispSkippedPolicy
+	case domain.ExecSkipped:
+		// Legacy generic skip from older runs: a human likely must run it, but
+		// it is never counted as an attempt.
+		return DispManualRequired
+	default: // pending/running/unknown
+		return DispNotRun
+	}
+}
+
+// levelFromDisposition derives the heatmap coverage level (0-3) from a
+// disposition. Only real attempts reach level >= 1.
+func levelFromDisposition(d Disposition) CoverageLevel {
+	switch d {
+	case DispValidatedBlocked, DispValidatedDetected:
+		return CoverageLevelValidated
+	case DispExecuted:
 		return CoverageLevelExecuted
-	case domain.ExecFailed, domain.ExecSkipped:
+	case DispAttemptedFailed:
 		return CoverageLevelAttempted
 	default:
 		return CoverageLevelNone

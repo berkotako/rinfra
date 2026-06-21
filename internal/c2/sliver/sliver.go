@@ -241,7 +241,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 		// Technique is not supported by Sliver — should not reach Fronted/unsupported.
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecSkipped,
+			Status:            domain.ExecUnsupported,
 			Output:            err.Error(),
 			StartedAt:         start,
 			FinishedAt:        time.Now(),

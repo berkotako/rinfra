@@ -193,13 +193,14 @@ func TestEmulationStart_FrontedTier(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// All techniques should be Skipped; run status should be Skipped.
-	if run.Status != domain.ExecSkipped {
-		t.Errorf("fronted tier run status: want skipped, got %s", run.Status)
+	// Fronted-tier: every technique is manual_required (a human runs it), and the
+	// run summarizes to the same — NOT counted as an execution attempt.
+	if run.Status != domain.ExecManualRequired {
+		t.Errorf("fronted tier run status: want manual_required, got %s", run.Status)
 	}
 	for _, r := range run.Results {
-		if r.Status != domain.ExecSkipped {
-			t.Errorf("technique %s: want skipped, got %s", r.TechniqueAttackID, r.Status)
+		if r.Status != domain.ExecManualRequired {
+			t.Errorf("technique %s: want manual_required, got %s", r.TechniqueAttackID, r.Status)
 		}
 	}
 }
@@ -312,13 +313,13 @@ func TestGetCoverage_Rollup(t *testing.T) {
 		t.Fatalf("SaveRun: %v", err)
 	}
 
-	// T1566.002 → Success (level 2 Executed)
-	// T1059.001 → Failed (level 1 Attempted)
-	// T1055     → Skipped (level 1 Attempted)
+	// T1566.002 → Success            (level 2 Executed, an attempt)
+	// T1059.001 → Failed             (level 1 Attempted, an attempt)
+	// T1055     → ManualRequired     (level 0, NOT an attempt — reported separately)
 	seedResults := []domain.Result{
 		{TechniqueAttackID: "T1566.002", Status: domain.ExecSuccess, StartedAt: time.Now(), FinishedAt: time.Now()},
 		{TechniqueAttackID: "T1059.001", Status: domain.ExecFailed, StartedAt: time.Now(), FinishedAt: time.Now()},
-		{TechniqueAttackID: "T1055", Status: domain.ExecSkipped, StartedAt: time.Now(), FinishedAt: time.Now()},
+		{TechniqueAttackID: "T1055", Status: domain.ExecManualRequired, StartedAt: time.Now(), FinishedAt: time.Now()},
 	}
 	for _, r := range seedResults {
 		if err := s.scenario.SaveResult(ctx, runID, r); err != nil {
@@ -355,13 +356,21 @@ func TestGetCoverage_Rollup(t *testing.T) {
 	if levels["T1059.001"] != service.CoverageLevelAttempted {
 		t.Errorf("T1059.001: want attempted(1), got %d", levels["T1059.001"])
 	}
-	if levels["T1055"] != service.CoverageLevelAttempted {
-		t.Errorf("T1055: want attempted(1), got %d", levels["T1055"])
+	// Manual technique must NOT be counted as an attempt — level 0.
+	if levels["T1055"] != service.CoverageLevelNone {
+		t.Errorf("T1055 (manual): want none(0), got %d", levels["T1055"])
 	}
 
-	// Verify ExercisedCount >= number of techniques we exercised.
-	if coverage.ExercisedCount < 3 {
-		t.Errorf("ExercisedCount: want >= 3, got %d", coverage.ExercisedCount)
+	// Exercised counts only genuine attempts: the executed + the failed = 2.
+	// The manual technique is reported in its own bucket, not as exercised.
+	if coverage.ExercisedCount != 2 {
+		t.Errorf("ExercisedCount: want 2 (manual excluded), got %d", coverage.ExercisedCount)
+	}
+	if coverage.ManualCount < 1 {
+		t.Errorf("ManualCount: want >= 1, got %d", coverage.ManualCount)
+	}
+	if coverage.ExecutedCount != 1 {
+		t.Errorf("ExecutedCount: want 1, got %d", coverage.ExecutedCount)
 	}
 }
 
@@ -687,12 +696,12 @@ func TestEmulationScopeEnforcement(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if run.Status != domain.ExecSkipped {
-		t.Errorf("out-of-scope run status: want skipped, got %s", run.Status)
+	if run.Status != domain.ExecBlockedByScope {
+		t.Errorf("out-of-scope run status: want blocked_by_scope, got %s", run.Status)
 	}
 	for _, r := range run.Results {
-		if r.Status != domain.ExecSkipped {
-			t.Errorf("technique %s: want skipped (out of scope), got %s", r.TechniqueAttackID, r.Status)
+		if r.Status != domain.ExecBlockedByScope {
+			t.Errorf("technique %s: want blocked_by_scope (out of scope), got %s", r.TechniqueAttackID, r.Status)
 		}
 	}
 	if !hasAuditAction(s.audit, "emulation.scope_block", eng.ID) {
