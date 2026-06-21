@@ -24,9 +24,10 @@ export default function TopBar({ onAppearance }: { onAppearance?: () => void }) 
   const [cloudEnv, setCloudEnv] = React.useState("All providers");
 
   const title = TITLES[pathname] || "RInfra";
-  const activeList = engagements.filter(
-    (e) => e.status === "active" || e.status === "provisioning" || e.status === "authorized"
-  );
+  // The global selector drives every page, including Reporting — so it must
+  // also list completed/archived engagements (the ones operators most often
+  // open reports for). Only pre-authorization drafts are excluded.
+  const activeList = engagements.filter((e) => e.status !== "draft");
 
   return (
     <div
