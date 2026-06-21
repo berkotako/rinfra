@@ -265,7 +265,10 @@ export default function EmulationScreen() {
               "done";
             markStep(idx, st);
           }
-        } else if (status === "success" || status === "done" || status === "failed") {
+        } else if (status !== "running" && status !== "pending") {
+          // Any terminal run-level status completes the run — including
+          // manual_required / blocked_by_scope / unsupported, which otherwise
+          // leave the UI spinning until the polling fallback fires.
           setRunning(false);
           pushToast("Emulation complete — results captured", "ok");
           unsubscribe();

@@ -2,6 +2,8 @@ package service_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +11,59 @@ import (
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/service"
 )
+
+func unknownSession(id, host, user string) c2.Session {
+	// No os/platform metadata (as Metasploit/PoshC2 report).
+	return c2.Session{ID: id, Host: host, User: user}
+}
+
+func TestRoute_UnknownPlatformBlockedForSpecificTechnique(t *testing.T) {
+	eng := scopedEngagement()
+	tech := domain.Technique{AttackID: "T1547.001", Tactic: "persistence"} // windows-only
+	cands := []service.Candidate{{
+		Framework: "metasploit", Tier: c2.TierOrchestrated,
+		Caps:     c2.Capabilities{Platforms: []string{"windows", "linux", "macos"}},
+		Operator: idOperator{"msf"},
+		Sessions: []c2.Session{unknownSession("m1", "10.0.0.5", "bob")}, // unknown OS
+	}}
+	op, _, disp, _ := service.Route(eng, tech, cands)
+	if op != nil || disp != domain.ExecBlockedByScope {
+		t.Errorf("unknown-OS session for a Windows technique: op=%v disp=%q, want nil + blocked_by_scope", op, disp)
+	}
+}
+
+func TestRoute_InfersWindowsFromSystemUser(t *testing.T) {
+	eng := scopedEngagement()
+	tech := domain.Technique{AttackID: "T1547.001", Tactic: "persistence"} // windows-only
+	cands := []service.Candidate{{
+		Framework: "metasploit", Tier: c2.TierOrchestrated,
+		Caps:     c2.Capabilities{Platforms: []string{"windows"}},
+		Operator: idOperator{"msf"},
+		Sessions: []c2.Session{unknownSession("m1", "10.0.0.5", "NT AUTHORITY\\SYSTEM")},
+	}}
+	op, sid, disp, _ := service.Route(eng, tech, cands)
+	if disp != "" || op == nil || sid != "m1" {
+		t.Errorf("SYSTEM-user inference: op=%v sid=%q disp=%q, want execute on m1", op, sid, disp)
+	}
+}
+
+func TestRoute_SessionsErrorSurfacesAsFailure(t *testing.T) {
+	eng := scopedEngagement()
+	tech := domain.Technique{AttackID: "T1082", Tactic: "discovery"}
+	cands := []service.Candidate{{
+		Framework: "sliver", Tier: c2.TierOrchestrated,
+		Caps:     c2.Capabilities{Platforms: []string{"windows", "linux"}},
+		Operator: idOperator{"sliver"},
+		Err:      errors.New("sliver: operator config required"),
+	}}
+	op, _, disp, detail := service.Route(eng, tech, cands)
+	if op != nil || disp != domain.ExecFailed {
+		t.Fatalf("op=%v disp=%q, want nil + failed (infra error must not be masked as blocked)", op, disp)
+	}
+	if !strings.Contains(detail, "operator config") {
+		t.Errorf("detail = %q, want it to carry the operator error", detail)
+	}
+}
 
 // fakeCandidateResolver drives the routed orchestrator path with a fixed
 // candidate set. It also satisfies OperatorResolver (the legacy path) but
@@ -154,7 +209,7 @@ func TestRoute_PrefersOrchestratedOverScripted(t *testing.T) {
 			Sessions: []c2.Session{winSession("s1", "10.0.0.6", "user")},
 		},
 	}
-	op, sid, disp := service.Route(eng, tech, cands)
+	op, sid, disp, _ := service.Route(eng, tech, cands)
 	if disp != "" {
 		t.Fatalf("expected execute, got disposition %q", disp)
 	}
@@ -177,7 +232,7 @@ func TestRoute_PlatformMismatchBlocks(t *testing.T) {
 		Operator: idOperator{"sliver"},
 		Sessions: []c2.Session{linuxSession("l1", "10.0.0.7")},
 	}}
-	op, _, disp := service.Route(eng, tech, cands)
+	op, _, disp, _ := service.Route(eng, tech, cands)
 	if op != nil {
 		t.Fatalf("expected no operator for platform mismatch")
 	}
@@ -196,7 +251,7 @@ func TestRoute_OutOfScopeBlocks(t *testing.T) {
 		Operator: idOperator{"sliver"},
 		Sessions: []c2.Session{winSession("s1", "192.168.1.10", "user")}, // out of 10/8
 	}}
-	op, _, disp := service.Route(eng, tech, cands)
+	op, _, disp, _ := service.Route(eng, tech, cands)
 	if op != nil || disp != domain.ExecBlockedByScope {
 		t.Errorf("op=%v disp=%q, want nil + blocked_by_scope", op, disp)
 	}
@@ -211,7 +266,7 @@ func TestRoute_OnlyFrontedIsManual(t *testing.T) {
 		Caps:     c2.Capabilities{}, // broad default
 		Operator: nil,               // Fronted: no operator
 	}}
-	op, _, disp := service.Route(eng, tech, cands)
+	op, _, disp, _ := service.Route(eng, tech, cands)
 	if op != nil || disp != domain.ExecManualRequired {
 		t.Errorf("op=%v disp=%q, want nil + manual_required", op, disp)
 	}
@@ -227,14 +282,14 @@ func TestRoute_UnsupportedWhenNoFrameworkCan(t *testing.T) {
 		Operator: idOperator{"havoc"},
 		Sessions: []c2.Session{winSession("h1", "10.0.0.5", "user")},
 	}}
-	op, _, disp := service.Route(eng, tech, cands)
+	op, _, disp, _ := service.Route(eng, tech, cands)
 	if op != nil || disp != domain.ExecUnsupported {
 		t.Errorf("op=%v disp=%q, want nil + unsupported", op, disp)
 	}
 }
 
 func TestRoute_NoCandidatesUnsupported(t *testing.T) {
-	op, _, disp := service.Route(scopedEngagement(), domain.Technique{AttackID: "T1082"}, nil)
+	op, _, disp, _ := service.Route(scopedEngagement(), domain.Technique{AttackID: "T1082"}, nil)
 	if op != nil || disp != domain.ExecUnsupported {
 		t.Errorf("op=%v disp=%q, want nil + unsupported", op, disp)
 	}
@@ -253,13 +308,13 @@ func TestRoute_RequiresPrivilegePrefersAndFilters(t *testing.T) {
 		Operator: idOperator{"sliver"},
 		Sessions: []c2.Session{winSession("low", "10.0.0.5", "user")},
 	}}
-	if _, _, disp := service.Route(eng, tech, cands); disp != domain.ExecBlockedByScope {
+	if _, _, disp, _ := service.Route(eng, tech, cands); disp != domain.ExecBlockedByScope {
 		t.Errorf("unprivileged: disp = %q, want blocked_by_scope", disp)
 	}
 
 	// Add a SYSTEM session — now it routes.
 	cands[0].Sessions = append(cands[0].Sessions, winSession("high", "10.0.0.6", "NT AUTHORITY\\SYSTEM"))
-	op, sid, disp := service.Route(eng, tech, cands)
+	op, sid, disp, _ := service.Route(eng, tech, cands)
 	if disp != "" || op == nil {
 		t.Fatalf("privileged: expected execute, got disp %q", disp)
 	}

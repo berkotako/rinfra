@@ -32,6 +32,10 @@ type Candidate struct {
 	Caps      c2.Capabilities
 	Operator  c2.Operator
 	Sessions  []c2.Session
+	// Err records a failure to ready the operator (e.g. session enumeration
+	// failed due to missing operator config or bad RPC credentials). The router
+	// surfaces it as a real failure rather than hiding it as a scope refusal.
+	Err error
 }
 
 // CandidateResolver enumerates every deployed C2 framework (with its live
@@ -43,9 +47,12 @@ type CandidateResolver interface {
 }
 
 // Route selects the best (operator, sessionID) to run technique t against, or
-// returns a non-attempt ExecutionStatus explaining why none fit. An empty
-// status with a non-nil operator means "execute".
-func Route(eng *domain.Engagement, t domain.Technique, cands []Candidate) (c2.Operator, string, domain.ExecutionStatus) {
+// returns a non-attempt ExecutionStatus (with an optional detail message)
+// explaining why none fit. An empty status with a non-nil operator means
+// "execute". The detail is non-empty only for the ExecFailed case, where it
+// carries the underlying operator/infra error so it is not hidden as a scope
+// refusal.
+func Route(eng *domain.Engagement, t domain.Technique, cands []Candidate) (c2.Operator, string, domain.ExecutionStatus, string) {
 	plat := RequiredPlatform(t)
 	reqPriv := strings.EqualFold(t.Inputs["requires_privilege"], "true")
 
@@ -53,8 +60,9 @@ func Route(eng *domain.Engagement, t domain.Technique, cands []Candidate) (c2.Op
 		bestOp    c2.Operator
 		bestSID   string
 		bestScore = -1
-		blocked   bool // an automatable framework supports it, but no usable session
-		manual    bool // only a Fronted framework can host it
+		blocked   bool   // an automatable framework supports it, but no usable session
+		manual    bool   // only a Fronted framework can host it
+		infraErr  string // a supporting framework's operator could not be readied
 	)
 
 	for _, c := range cands {
@@ -69,6 +77,14 @@ func Route(eng *domain.Engagement, t domain.Technique, cands []Candidate) (c2.Op
 		if !supports {
 			continue
 		}
+		// A supporting operator that failed to ready (e.g. no operator config /
+		// bad RPC creds) is an infrastructure error, not a scope refusal.
+		if c.Err != nil && len(c.Sessions) == 0 {
+			if infraErr == "" {
+				infraErr = c.Err.Error()
+			}
+			continue
+		}
 		sid, score, ok := bestSession(eng, plat, reqPriv, c.Tier, c.Sessions)
 		if !ok {
 			blocked = true
@@ -80,15 +96,18 @@ func Route(eng *domain.Engagement, t domain.Technique, cands []Candidate) (c2.Op
 	}
 
 	if bestOp != nil {
-		return bestOp, bestSID, ""
+		return bestOp, bestSID, "", ""
 	}
 	switch {
+	case infraErr != "":
+		// Surface the real failure instead of masking it as blocked_by_scope.
+		return nil, "", domain.ExecFailed, infraErr
 	case blocked:
-		return nil, "", domain.ExecBlockedByScope
+		return nil, "", domain.ExecBlockedByScope, ""
 	case manual:
-		return nil, "", domain.ExecManualRequired
+		return nil, "", domain.ExecManualRequired, ""
 	default:
-		return nil, "", domain.ExecUnsupported
+		return nil, "", domain.ExecUnsupported, ""
 	}
 }
 
@@ -103,8 +122,12 @@ func bestSession(eng *domain.Engagement, plat string, reqPriv bool, tier c2.Supp
 			continue // out of engagement scope — never route here
 		}
 		sp := sessionPlatform(s)
-		if plat != "" && sp != "" && !strings.EqualFold(sp, plat) {
-			continue // wrong agent OS for this technique
+		if plat != "" && !strings.EqualFold(sp, plat) {
+			// Platform-specific technique: require a CONFIRMED matching agent OS.
+			// An unknown-OS session (sp == "") is not a confident match, so we
+			// refuse to attempt a Windows-only technique on it rather than risk
+			// running it on a Linux/macOS host.
+			continue
 		}
 		priv := sessionPrivileged(s)
 		if reqPriv && !priv {
@@ -155,12 +178,20 @@ func RequiredPlatform(t domain.Technique) string {
 	}
 }
 
-// sessionPlatform reads the agent OS from session metadata ("os"/"platform").
+// sessionPlatform determines the agent OS, preferring explicit session metadata
+// ("os"/"platform") and falling back to a clearly-Windows user account (service
+// or domain accounts) so frameworks that don't report OS (e.g. Metasploit,
+// PoshC2) are still recognized as Windows for the common SYSTEM/admin case.
+// Returns "" when the platform genuinely cannot be determined.
 func sessionPlatform(s c2.Session) string {
 	for _, k := range []string{"os", "platform"} {
 		if v := strings.ToLower(strings.TrimSpace(s.Metadata[k])); v != "" {
 			return normalizeOS(v)
 		}
+	}
+	u := strings.ToLower(s.User)
+	if strings.Contains(u, "nt authority") || strings.Contains(u, "system") || strings.Contains(s.User, "\\") {
+		return "windows"
 	}
 	return ""
 }
