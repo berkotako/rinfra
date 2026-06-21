@@ -11,7 +11,7 @@
 // # Control
 //
 // Control() returns (nil, false): no public automation API. The emulation
-// engine records every technique as ExecSkipped when Operator is nil.
+// engine records every technique as ExecManualRequired when Operator is nil.
 package bruteratel
 
 import (
@@ -121,7 +121,7 @@ func brcRedirectorConfig(prof domain.Profile) (string, error) {
 }
 
 // Control returns (nil, false): Brute Ratel is Fronted-tier. The emulation
-// engine records every technique as ExecSkipped when the Operator is nil.
+// engine records every technique as ExecManualRequired when the Operator is nil.
 func (p *provider) Control(_ c2.Teamserver) (c2.Operator, bool) {
 	return nil, false
 }

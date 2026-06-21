@@ -76,11 +76,11 @@ func TestOperator_Execute_Unsupported_Skipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if result.Status != domain.ExecSkipped {
-		t.Errorf("expected ExecSkipped, got %v", result.Status)
+	if result.Status != domain.ExecUnsupported {
+		t.Errorf("expected ExecUnsupported, got %v", result.Status)
 	}
 	if !strings.Contains(result.Output, "scripted-tier") {
-		t.Error("ExecSkipped output should explain scripted-tier limit")
+		t.Error("ExecUnsupported output should explain scripted-tier limit")
 	}
 }
 

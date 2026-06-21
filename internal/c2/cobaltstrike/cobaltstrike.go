@@ -12,7 +12,7 @@
 // # Control
 //
 // Control() returns (nil, false): Cobalt Strike has no clean public automation
-// API. The emulation engine records every technique as ExecSkipped when the
+// API. The emulation engine records every technique as ExecManualRequired when the
 // Operator is nil, and the operator drives the framework manually.
 package cobaltstrike
 
@@ -143,7 +143,7 @@ func csRedirectorConfig(prof domain.Profile) (string, error) {
 }
 
 // Control returns (nil, false): Cobalt Strike is Fronted-tier. The emulation
-// engine will record every technique as ExecSkipped when the Operator is nil.
+// engine will record every technique as ExecManualRequired when the Operator is nil.
 func (p *provider) Control(_ c2.Teamserver) (c2.Operator, bool) {
 	return nil, false
 }

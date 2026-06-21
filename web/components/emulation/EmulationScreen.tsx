@@ -13,6 +13,20 @@ import type { NodeStatus, Technique, DeployedC2, Scenario, OperatorSession } fro
 
 type StepStatus = "pending" | "running" | "done" | "detected" | "manual";
 
+// isManualDisposition reports whether a result status is a non-attempt that a
+// human must run (or that was skipped/blocked) — it must NOT render as "done",
+// which would imply the technique was actually executed.
+function isManualDisposition(status: string): boolean {
+  return (
+    status === "manual_required" ||
+    status === "blocked_by_scope" ||
+    status === "unsupported" ||
+    status === "skipped_policy" ||
+    status === "skipped" ||
+    status === "not_run"
+  );
+}
+
 // Sentinel target id: route each technique to the best live agent automatically.
 const AUTO = "auto";
 const TIER_RANK: Record<string, number> = { orchestrated: 0, scripted: 1, fronted: 2 };
@@ -247,6 +261,7 @@ export default function EmulationScreen() {
               status === "success" ? "done" :
               status === "detected" ? "detected" :
               status === "running" ? "running" :
+              isManualDisposition(status) ? "manual" :
               "done";
             markStep(idx, st);
           }
@@ -274,6 +289,7 @@ export default function EmulationScreen() {
                 r.status === "success" ? "done" :
                 r.status === "detected" ? "detected" :
                 r.status === "running" ? "running" :
+                isManualDisposition(r.status) ? "manual" :
                 "done";
               markStep(idx, st);
             }

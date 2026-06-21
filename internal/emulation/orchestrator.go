@@ -54,7 +54,7 @@ func (o *Orchestrator) Run(
 		if op == nil { // Fronted tier: no automation available.
 			run.Results = append(run.Results, domain.Result{
 				TechniqueAttackID: t.AttackID,
-				Status:            domain.ExecSkipped,
+				Status:            domain.ExecManualRequired,
 				Output:            "no operator API (fronted-tier framework); run manually",
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
@@ -100,7 +100,7 @@ func (o *Orchestrator) record(ctx context.Context, engID, action, target, detail
 // summarize rolls per-technique results up to a run-level status.
 func summarize(results []domain.Result) domain.ExecutionStatus {
 	if len(results) == 0 {
-		return domain.ExecSkipped
+		return domain.ExecNotRun
 	}
 	anyFailed, anySuccess := false, false
 	for _, r := range results {
@@ -117,6 +117,7 @@ func summarize(results []domain.Result) domain.ExecutionStatus {
 	case anySuccess:
 		return domain.ExecSuccess
 	default:
-		return domain.ExecSkipped
+		// No genuine attempt — surface the actual reason (manual/blocked/...).
+		return results[0].Status
 	}
 }

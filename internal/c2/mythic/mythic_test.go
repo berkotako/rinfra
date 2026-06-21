@@ -158,8 +158,8 @@ func TestOperator_Execute_UnknownTechnique_Skipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Status != domain.ExecSkipped {
-		t.Errorf("expected ExecSkipped, got %v", result.Status)
+	if result.Status != domain.ExecUnsupported {
+		t.Errorf("expected ExecUnsupported, got %v", result.Status)
 	}
 }
 

@@ -2,7 +2,7 @@
 // has a teamserver API and a Python scripting interface, but automating against
 // it is less stable than a first-class gRPC or REST API, so RInfra supports a
 // curated subset of techniques. Techniques outside that subset are returned with
-// ExecSkipped and an explanatory message.
+// ExecUnsupported and an explanatory message.
 //
 // # Posture
 //
@@ -21,7 +21,7 @@
 //
 // PoshC2 is also Scripted-tier and follows the same pattern (see
 // internal/c2/poshc2). PoshC2 does not expose a modern scripting API, so its
-// operator returns ExecSkipped for most techniques. See poshc2.go for the
+// operator returns ExecUnsupported for most techniques. See poshc2.go for the
 // lighter stub and its documented seams.
 package havoc
 
@@ -46,7 +46,7 @@ const (
 )
 
 // supportedTechniques lists the ATT&CK technique IDs that the Havoc scripting
-// API reliably exposes. Techniques outside this set return ExecSkipped.
+// API reliably exposes. Techniques outside this set return ExecUnsupported.
 var supportedTechniques = map[string]bool{
 	"T1059.001": true, // PowerShell
 	"T1059.003": true, // cmd.exe
@@ -138,7 +138,7 @@ func havocRedirectorConfig(prof domain.Profile) (string, error) {
 }
 
 // Control returns a scripted Operator for Havoc. The operator supports a
-// curated subset of techniques; others return ExecSkipped.
+// curated subset of techniques; others return ExecUnsupported.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
 	client := newCLIHavocClient(deploy.NewNodeRunner(ts.Host), ts.Host, ts.Port)
 	return &operator{ts: ts, client: client}, true
@@ -204,7 +204,7 @@ func (o *operator) Sessions(ctx context.Context) ([]c2.Session, error) {
 }
 
 // Execute translates a portable domain.Technique into a Havoc scripted command.
-// Techniques outside the supportedTechniques set return ExecSkipped with an
+// Techniques outside the supportedTechniques set return ExecUnsupported with an
 // explanatory message — this is the correct Scripted-tier behaviour.
 func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Technique) (domain.Result, error) {
 	start := time.Now()
@@ -212,7 +212,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	if !supportedTechniques[t.AttackID] {
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecSkipped,
+			Status:            domain.ExecUnsupported,
 			Output: fmt.Sprintf("havoc (scripted-tier): technique %s is outside the supported subset; "+
 				"operator should execute manually", t.AttackID),
 			StartedAt:  start,
@@ -224,7 +224,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	if err != nil {
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecSkipped,
+			Status:            domain.ExecUnsupported,
 			Output:            err.Error(),
 			StartedAt:         start,
 			FinishedAt:        time.Now(),

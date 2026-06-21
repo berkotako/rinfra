@@ -137,11 +137,11 @@ func TestOperator_Execute_UnsupportedTechnique_Skipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if result.Status != domain.ExecSkipped {
-		t.Errorf("expected ExecSkipped for out-of-subset technique, got %v", result.Status)
+	if result.Status != domain.ExecUnsupported {
+		t.Errorf("expected ExecUnsupported for out-of-subset technique, got %v", result.Status)
 	}
 	if !strings.Contains(result.Output, "scripted-tier") {
-		t.Errorf("ExecSkipped output should explain the scripted-tier limit, got: %q", result.Output)
+		t.Errorf("ExecUnsupported output should explain the scripted-tier limit, got: %q", result.Output)
 	}
 }
 

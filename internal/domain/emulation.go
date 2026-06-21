@@ -43,16 +43,55 @@ type Scenario struct {
 	CreatedAt        time.Time // set for operator-authored scenarios
 }
 
-// ExecutionStatus is the outcome of running a single technique.
+// ExecutionStatus is the outcome of attempting a single technique.
+//
+// For honest BAS/coverage reporting the non-execution outcomes are kept
+// distinct: a technique a human must run by hand (manual_required), one the
+// deployed framework cannot translate (unsupported), one refused by scope
+// (blocked_by_scope) or customer policy (skipped_policy), and one never reached
+// (not_run) are NOT the same as a technique we actually ran. Only success and
+// failed are genuine execution attempts; everything else is reported in its own
+// bucket and excluded from the "attempted" count and the TRM denominator.
+//
+// "success"/"failed" retain their wire values so persisted rows and the web
+// client keep working; the previously-overloaded "skipped" is split into the
+// specific reasons below (the bare ExecSkipped constant is retained for
+// backward compatibility and treated as a non-attempt).
 type ExecutionStatus string
 
 const (
 	ExecPending ExecutionStatus = "pending"
 	ExecRunning ExecutionStatus = "running"
-	ExecSuccess ExecutionStatus = "success"
-	ExecFailed  ExecutionStatus = "failed"
-	ExecSkipped ExecutionStatus = "skipped" // e.g. Fronted-tier C2: no Operator
+
+	// Genuine execution attempts (count toward "attempted" and the TRM).
+	ExecSuccess ExecutionStatus = "success" // executed on an agent
+	ExecFailed  ExecutionStatus = "failed"  // ran but errored (attempted-failed)
+
+	// Non-attempts — reported separately, never counted as attempted.
+	ExecManualRequired ExecutionStatus = "manual_required"  // Fronted-tier: no operator API; a human runs it
+	ExecUnsupported    ExecutionStatus = "unsupported"      // deployed framework can't translate this technique
+	ExecBlockedByScope ExecutionStatus = "blocked_by_scope" // no in-scope agent; refused at execution time
+	ExecSkippedPolicy  ExecutionStatus = "skipped_policy"   // skipped by customer/engagement policy
+	ExecNotRun         ExecutionStatus = "not_run"          // never reached (default for un-exercised techniques)
+
+	// Deprecated: generic skip, retained for backward compatibility with older
+	// persisted runs. New code emits one of the specific reasons above.
+	ExecSkipped ExecutionStatus = "skipped"
 )
+
+// IsAttempt reports whether the status represents a real execution attempt
+// against an agent (success or failure). Only attempts count toward coverage's
+// "attempted/exercised" total and the TRM denominator — manual, unsupported,
+// scope/policy-skipped, and not-run techniques are validation gaps, not attempts.
+func (s ExecutionStatus) IsAttempt() bool {
+	return s == ExecSuccess || s == ExecFailed
+}
+
+// IsManual reports whether the technique requires a human operator (Fronted-tier
+// or an unsupported translation) — surfaced as "manual" in reporting.
+func (s ExecutionStatus) IsManual() bool {
+	return s == ExecManualRequired || s == ExecUnsupported
+}
 
 // DetectionOutcome is the defender's response to an executed technique — the
 // SRA-style three-part evaluation. A technique "passes" when the defenders

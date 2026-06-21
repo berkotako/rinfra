@@ -196,11 +196,26 @@ export interface IaCConfig {
 }
 
 // ---------- Coverage (ATT&CK rollup) — mirrors service.Coverage ----------
+// Disposition is the per-technique BAS outcome taxonomy. Manual / unsupported /
+// scope-blocked / policy-skipped / not-run are kept distinct from genuine
+// attempts so coverage reporting stays honest.
+export type Disposition =
+  | "not_run"
+  | "skipped_policy"
+  | "blocked_by_scope"
+  | "unsupported"
+  | "manual_required"
+  | "attempted_failed"
+  | "executed"
+  | "validated_detected"
+  | "validated_blocked";
+
 export interface CoverageTechnique {
   attackID: string;
   name: string;
   tactic: string;
   level: number; // 0 none, 1 attempted, 2 executed, 3 validated
+  disposition?: Disposition;
 }
 
 export interface CoverageTactic {
@@ -212,11 +227,19 @@ export interface Coverage {
   engagementId: string;
   tactics: CoverageTactic[];
   totalTechniques: number;
-  exercisedCount: number;
+  exercisedCount: number; // genuine attempts only (executed + attempted-failed)
   executedCount: number;
   validatedCount: number;
-  // Threat Resilience Metric: % of exercised techniques that "passed" (were
-  // detected/blocked by the defenders). SRA-style benchmarked ATT&CK alignment.
+  // Non-attempt buckets — reported separately, never folded into "attempted".
+  manualCount?: number; // manual_required (Fronted-tier)
+  unsupportedCount?: number; // deployed framework can't translate
+  blockedScopeCount?: number; // refused: no in-scope agent
+  skippedPolicyCount?: number; // skipped by policy
+  notRunCount?: number; // never reached
+  validatedDetectedCount?: number;
+  validatedBlockedCount?: number;
+  // Threat Resilience Metric: % of ATTEMPTED techniques the defenders "passed".
+  // Denominator excludes manual/skipped/blocked/not-run.
   trm: number;
   // Historical TRM trend (e.g. quarterly purple-team runs), oldest → newest.
   trmTrend: { label: string; trm: number }[];
