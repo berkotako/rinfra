@@ -55,6 +55,17 @@ type provider struct{}
 func (p *provider) Name() string         { return "sliver" }
 func (p *provider) Tier() c2.SupportTier { return c2.TierOrchestrated }
 
+// Capabilities reports Sliver's routing metadata: cross-platform implants and
+// mTLS/HTTPS/DNS listeners. Tactics/Techniques are left open (Sliver's shell/
+// execute primitives cover a broad range); the per-technique command mapping in
+// techniqueToSliverCommand is the final arbiter at execution time.
+func (p *provider) Capabilities() c2.Capabilities {
+	return c2.Capabilities{
+		Platforms:         []string{"windows", "linux", "macos"},
+		ListenerProtocols: []string{"mtls", "https", "dns"},
+	}
+}
+
 // Deploy installs the upstream sliver-server release on the node via SSH.
 // It writes a multiplayer operator config and starts the sliver-server
 // systemd service.

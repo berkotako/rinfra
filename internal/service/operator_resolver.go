@@ -84,6 +84,41 @@ func (r *RegistryResolver) Resolve(ctx context.Context, eng domain.Engagement) (
 	return nil, "", false
 }
 
+// Candidates implements CandidateResolver: it enumerates every live C2-server
+// node for the engagement with its capability metadata and active sessions, so
+// the orchestrator can route each technique across frameworks. Fronted-tier
+// frameworks contribute a candidate with a nil Operator (a manual-only option).
+func (r *RegistryResolver) Candidates(ctx context.Context, eng domain.Engagement) []Candidate {
+	nodes, err := r.infra.NodesForEngagement(ctx, eng.ID)
+	if err != nil {
+		return nil
+	}
+	var cands []Candidate
+	for _, n := range nodes {
+		if n.Spec.Type != domain.NodeC2Server || n.Status != domain.NodeLive || n.Spec.C2Framework == "" {
+			continue
+		}
+		provider, err := c2.Get(n.Spec.C2Framework)
+		if err != nil {
+			continue
+		}
+		cand := Candidate{
+			Framework: n.Spec.C2Framework,
+			Tier:      provider.Tier(),
+			Caps:      c2.CapabilitiesFor(provider),
+		}
+		op, ok := provider.Control(c2.Teamserver{Host: n.PublicIP, Status: string(n.Status)})
+		if ok && op != nil {
+			cand.Operator = op
+			if sessions, err := op.Sessions(ctx); err == nil {
+				cand.Sessions = sessions
+			}
+		}
+		cands = append(cands, cand)
+	}
+	return cands
+}
+
 // FakeResolver returns a fake Operator that produces deterministic results.
 // Used in RINFRA_DEV mode and in tests. All techniques return ExecSuccess with
 // a fake output message. The fake is indistinguishable from the real path from

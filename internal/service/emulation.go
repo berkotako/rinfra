@@ -347,37 +347,46 @@ func (s *EmulationService) Start(ctx context.Context, engagementID, scenarioID, 
 
 // runScenario resolves the Operator, executes the scenario, and persists results.
 func (s *EmulationService) runScenario(ctx context.Context, eng domain.Engagement, sc domain.Scenario, run domain.ScenarioRun, actor string) {
-	// Resolve the operator: may be nil for Fronted-tier, in which case every
-	// technique is recorded as manual_required (a human runs it by hand).
-	op, sessionID, _ := s.resolver.Resolve(ctx, eng)
-	noOpStatus := domain.ExecManualRequired
+	var result *domain.ScenarioRun
+	var err error
 
-	// Find the right agent to execute against, enforcing scope: pick the first
-	// active session whose host is in the engagement scope. If sessions exist but
-	// none are in scope, refuse to execute — the techniques are recorded
-	// blocked_by_scope (distinct from manual), enforcing scope at execution time.
-	if op != nil {
-		sid, ok := selectInScopeSession(ctx, &eng, op, sessionID)
-		if !ok {
-			_ = s.audit.Record(ctx, audit.Event{
-				EngagementID: eng.ID,
-				Actor:        actor,
-				Action:       "emulation.scope_block",
-				Target:       sc.ID,
-				Detail:       "no in-scope agent session; execution refused",
-				At:           time.Now().UTC(),
-			})
-			op = nil
-			noOpStatus = domain.ExecBlockedByScope
-		} else {
-			sessionID = sid
+	// Capability routing: when the resolver can enumerate the engagement's
+	// deployed frameworks, route each technique to the best operator/session
+	// across them (platform/scope/privilege/capability aware) instead of pinning
+	// the whole run to "the first live C2 server".
+	if cr, ok := s.resolver.(CandidateResolver); ok {
+		if cands := cr.Candidates(ctx, eng); len(cands) > 0 {
+			result, err = s.orchRunRouted(ctx, &eng, sc, cands, run.ID)
 		}
 	}
 
-	// Publish per-technique SSE events as each technique completes by using a
-	// wrapping orchestrator approach. We drive the orchestrator but also hook
-	// into each technique result to publish SSE + persist incrementally.
-	result, err := s.orchRunWithHooks(ctx, &eng, sc, sessionID, op, run.ID, noOpStatus)
+	if result == nil && err == nil {
+		// Legacy single-operator path (dev/test resolvers, or no deployed
+		// frameworks to route across). Resolve one operator; nil → manual_required.
+		op, sessionID, _ := s.resolver.Resolve(ctx, eng)
+		noOpStatus := domain.ExecManualRequired
+
+		// Enforce scope at execution time: pick the first in-scope session. If
+		// sessions exist but none are in scope, refuse — record blocked_by_scope.
+		if op != nil {
+			sid, ok := selectInScopeSession(ctx, &eng, op, sessionID)
+			if !ok {
+				_ = s.audit.Record(ctx, audit.Event{
+					EngagementID: eng.ID,
+					Actor:        actor,
+					Action:       "emulation.scope_block",
+					Target:       sc.ID,
+					Detail:       "no in-scope agent session; execution refused",
+					At:           time.Now().UTC(),
+				})
+				op = nil
+				noOpStatus = domain.ExecBlockedByScope
+			} else {
+				sessionID = sid
+			}
+		}
+		result, err = s.orchRunWithHooks(ctx, &eng, sc, sessionID, op, run.ID, noOpStatus)
+	}
 	if err != nil {
 		run.Status = domain.ExecFailed
 		run.FinishedAt = time.Now().UTC()
@@ -477,17 +486,7 @@ func (s *EmulationService) orchRunWithHooks(
 			}
 		}
 
-		// Persist the result immediately.
-		_ = s.scenarios.SaveResult(ctx, runID, res)
-
-		// Publish SSE per-technique event.
-		s.hub.Publish(Event{Kind: EventRunStatus, EngagementID: eng.ID, Data: map[string]any{
-			"runId":       runID,
-			"techniqueId": res.TechniqueAttackID,
-			"status":      string(res.Status),
-		}})
-
-		run.Results = append(run.Results, res)
+		s.recordResult(ctx, run, res)
 	}
 
 	run.FinishedAt = time.Now()
@@ -539,9 +538,70 @@ func noOpMessage(status domain.ExecutionStatus) string {
 	switch status {
 	case domain.ExecBlockedByScope:
 		return "no in-scope agent session; execution refused (run manually if in scope)"
+	case domain.ExecUnsupported:
+		return "no deployed C2 framework can automate this technique on an available agent; run manually"
 	default: // ExecManualRequired
 		return "no operator API (fronted-tier framework); run manually"
 	}
+}
+
+// recordResult persists a technique result, publishes the per-technique SSE
+// event, and appends it to the run.
+func (s *EmulationService) recordResult(ctx context.Context, run *domain.ScenarioRun, res domain.Result) {
+	_ = s.scenarios.SaveResult(ctx, run.ID, res)
+	s.hub.Publish(Event{Kind: EventRunStatus, EngagementID: run.EngagementID, Data: map[string]any{
+		"runId":       run.ID,
+		"techniqueId": res.TechniqueAttackID,
+		"status":      string(res.Status),
+	}})
+	run.Results = append(run.Results, res)
+}
+
+// orchRunRouted drives the scenario with capability routing: each technique is
+// routed to the best operator/session across all deployed frameworks (matching
+// required platform, scope, privilege, and framework capability), or recorded
+// with the precise non-attempt status (unsupported / manual_required /
+// blocked_by_scope) when none fits.
+func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engagement, sc domain.Scenario, cands []Candidate, runID string) (*domain.ScenarioRun, error) {
+	if err := eng.CanDeploy(time.Now()); err != nil {
+		return nil, fmt.Errorf("emulation refused: %w", err)
+	}
+	run := &domain.ScenarioRun{
+		ID:           runID,
+		EngagementID: eng.ID,
+		ScenarioID:   sc.ID,
+		Status:       domain.ExecRunning,
+		StartedAt:    time.Now(),
+	}
+	for _, t := range sc.Techniques {
+		op, sid, disp := Route(eng, t, cands)
+		var res domain.Result
+		if op != nil {
+			var err error
+			res, err = op.Execute(ctx, sid, t)
+			if err != nil {
+				res = domain.Result{
+					TechniqueAttackID: t.AttackID,
+					Status:            domain.ExecFailed,
+					StartedAt:         time.Now(),
+					FinishedAt:        time.Now(),
+					Err:               err.Error(),
+				}
+			}
+		} else {
+			res = domain.Result{
+				TechniqueAttackID: t.AttackID,
+				Status:            disp,
+				Output:            noOpMessage(disp),
+				StartedAt:         time.Now(),
+				FinishedAt:        time.Now(),
+			}
+		}
+		s.recordResult(ctx, run, res)
+	}
+	run.FinishedAt = time.Now()
+	run.Status = summarizeResults(run.Results)
+	return run, nil
 }
 
 func summarizeResults(results []domain.Result) domain.ExecutionStatus {
