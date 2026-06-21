@@ -48,6 +48,15 @@ type provider struct{}
 func (p *provider) Name() string         { return "metasploit" }
 func (p *provider) Tier() c2.SupportTier { return c2.TierOrchestrated }
 
+// Capabilities reports Metasploit's routing metadata: cross-platform meterpreter
+// sessions over HTTPS/TCP.
+func (p *provider) Capabilities() c2.Capabilities {
+	return c2.Capabilities{
+		Platforms:         []string{"windows", "linux", "macos"},
+		ListenerProtocols: []string{"https", "tcp"},
+	}
+}
+
 // Deploy installs the upstream Metasploit Framework on the node via SSH, then
 // starts msfrpcd (the RPC daemon) as a systemd service.
 func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {

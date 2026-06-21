@@ -62,6 +62,20 @@ type provider struct{}
 func (p *provider) Name() string         { return "havoc" }
 func (p *provider) Tier() c2.SupportTier { return c2.TierScripted }
 
+// Capabilities reports Havoc's routing metadata: Windows demons over HTTPS, with
+// an explicit technique allowlist matching the Scripted-tier automated subset.
+func (p *provider) Capabilities() c2.Capabilities {
+	techs := make([]string, 0, len(supportedTechniques))
+	for id := range supportedTechniques {
+		techs = append(techs, id)
+	}
+	return c2.Capabilities{
+		Platforms:         []string{"windows"},
+		Techniques:        techs,
+		ListenerProtocols: []string{"https"},
+	}
+}
+
 // Deploy installs the upstream Havoc teamserver release on the node via SSH.
 func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
 	runner := runnerFromNode(node)

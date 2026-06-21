@@ -49,6 +49,20 @@ type provider struct{}
 func (p *provider) Name() string         { return "poshc2" }
 func (p *provider) Tier() c2.SupportTier { return c2.TierScripted }
 
+// Capabilities reports PoshC2's routing metadata: Windows/Linux implants over
+// HTTPS, with an explicit technique allowlist matching the automated subset.
+func (p *provider) Capabilities() c2.Capabilities {
+	techs := make([]string, 0, len(supportedTechniques))
+	for id := range supportedTechniques {
+		techs = append(techs, id)
+	}
+	return c2.Capabilities{
+		Platforms:         []string{"windows", "linux"},
+		Techniques:        techs,
+		ListenerProtocols: []string{"https"},
+	}
+}
+
 // Deploy installs PoshC2 on the node via SSH using the official release.
 func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
 	runner := runnerFromNode(node)

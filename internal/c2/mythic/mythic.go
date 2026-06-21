@@ -48,6 +48,15 @@ type provider struct{}
 func (p *provider) Name() string         { return "mythic" }
 func (p *provider) Tier() c2.SupportTier { return c2.TierOrchestrated }
 
+// Capabilities reports Mythic's routing metadata: cross-platform agents (Apollo,
+// Poseidon, etc.) over HTTP/HTTPS profiles.
+func (p *provider) Capabilities() c2.Capabilities {
+	return c2.Capabilities{
+		Platforms:         []string{"windows", "linux", "macos"},
+		ListenerProtocols: []string{"http", "https"},
+	}
+}
+
 // Deploy installs Mythic via docker-compose on the node. Mythic's official
 // install method is docker-compose; the install script fetches Mythic from the
 // official GitHub release.
