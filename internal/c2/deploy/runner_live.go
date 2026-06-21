@@ -13,10 +13,32 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+// syncBuffer is a goroutine-safe buffer. crypto/ssh copies a session's stdout
+// and stderr in two separate goroutines; when both target one combined buffer
+// (and the caller may read it after a context-cancelled Close), the writes and
+// the read must be synchronized or output is raced/dropped.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // SSHConfig configures a live SSHRunner.
 type SSHConfig struct {
@@ -133,7 +155,7 @@ func (r *SSHRunner) Run(ctx context.Context, cmd string) (string, error) {
 	}
 	defer session.Close()
 
-	var out bytes.Buffer
+	var out syncBuffer
 	session.Stdout = &out
 	session.Stderr = &out
 
@@ -160,7 +182,7 @@ func (r *SSHRunner) Upload(ctx context.Context, remotePath, content string) erro
 	defer session.Close()
 
 	session.Stdin = strings.NewReader(content)
-	var out bytes.Buffer
+	var out syncBuffer
 	session.Stderr = &out
 	cmd := fmt.Sprintf("cat > %s", shellQuote(remotePath))
 	if err := runSessionCtx(ctx, session, func() error { return session.Run(cmd) }); err != nil {
