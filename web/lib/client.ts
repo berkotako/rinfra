@@ -9,6 +9,7 @@ import type {
   Scenario,
   Technique,
   Coverage,
+  ProjectRunResult,
   Advisory,
   AdvisoryFeed,
   NewAdvisoryFeed,
@@ -350,6 +351,8 @@ export interface RInfraClient {
   updateScenario(scenario: Scenario): Promise<Scenario>;
   deleteScenario(id: string): Promise<void>;
   startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }>;
+  // Project-scope: launch a scenario across every engagement in the project.
+  startProjectRun(projectId: string, scenarioId: string): Promise<ProjectRunResult>;
   getRun(runId: string): Promise<ScenarioRun>;
   // Purple-team scoring: record the defender outcome for a technique in a run.
   recordDetection(runId: string, techniqueId: string, outcome: string): Promise<void>;
@@ -362,6 +365,7 @@ export interface RInfraClient {
 
   // Coverage & ATT&CK Navigator export
   getCoverage(engagementId: string): Promise<Coverage>;
+  getProjectCoverage(projectId: string): Promise<Coverage>;
   getNavigatorLayer(engagementId: string): Promise<unknown>;
 
   // Threat advisories (CISA KEV etc.) with suggested TTPs.
@@ -727,6 +731,22 @@ export class MockClient implements RInfraClient {
     return { runId: "mock-run-" + Date.now() };
   }
 
+  async startProjectRun(projectId: string, scenarioId: string): Promise<ProjectRunResult> {
+    // Fan out across the project's engagements; only authorized ones "run",
+    // mirroring the per-engagement CanDeploy gate.
+    const engs = ENGAGEMENTS.filter((e) => e.projectId === projectId);
+    const started: ProjectRunResult["started"] = [];
+    const skipped: ProjectRunResult["skipped"] = [];
+    for (const e of engs) {
+      if (e.auth === "authorized" && (e.status === "active" || e.status === "authorized")) {
+        started.push({ engagementId: e.id, runId: "mock-run-" + e.id + "-" + Date.now() });
+      } else {
+        skipped.push({ engagementId: e.id, reason: `not deployable (status=${e.status}, auth=${e.auth})` });
+      }
+    }
+    return { projectId, scenarioId, started, skipped };
+  }
+
   async getRun(runId: string): Promise<ScenarioRun> {
     return {
       id: runId,
@@ -761,6 +781,10 @@ export class MockClient implements RInfraClient {
 
   async getCoverage(engagementId: string): Promise<Coverage> {
     return buildMockCoverage(engagementId);
+  }
+
+  async getProjectCoverage(projectId: string): Promise<Coverage> {
+    return buildMockCoverage(projectId);
   }
 
   async getNavigatorLayer(engagementId: string): Promise<unknown> {
@@ -1470,6 +1494,13 @@ export class RestClient implements RInfraClient {
     return { runId: body.runId };
   }
 
+  async startProjectRun(projectId: string, scenarioId: string): Promise<ProjectRunResult> {
+    return this.fetch<ProjectRunResult>(
+      `/projects/${projectId}/runs`,
+      { method: "POST", body: JSON.stringify({ scenarioId }) }
+    );
+  }
+
   async getRun(runId: string): Promise<ScenarioRun> {
     const body = await this.fetch<{ run: Record<string, unknown> }>(`/runs/${runId}`);
     const run = body.run;
@@ -1543,6 +1574,12 @@ export class RestClient implements RInfraClient {
   async getCoverage(engagementId: string): Promise<Coverage> {
     const c = await this.fetch<Coverage>(`/engagements/${engagementId}/coverage`);
     // The backend rollup doesn't emit the TRM yet; derive it from the counts.
+    const trm = c.trm ?? trmFromCounts(c.exercisedCount ?? 0, c.validatedCount ?? 0);
+    return { ...c, trm, trmTrend: c.trmTrend ?? [{ label: "now", trm }] };
+  }
+
+  async getProjectCoverage(projectId: string): Promise<Coverage> {
+    const c = await this.fetch<Coverage>(`/projects/${projectId}/coverage`);
     const trm = c.trm ?? trmFromCounts(c.exercisedCount ?? 0, c.validatedCount ?? 0);
     return { ...c, trm, trmTrend: c.trmTrend ?? [{ label: "now", trm }] };
   }

@@ -193,6 +193,62 @@ func (h *handlers) removeProjectMember(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
+// startProjectRun launches a scenario across every engagement in the project
+// (each gated by its own CanDeploy). Returns the per-engagement run IDs plus any
+// skipped engagements with the reason.
+func (h *handlers) startProjectRun(w http.ResponseWriter, r *http.Request) {
+	if !h.projectsEnabled(w) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if !h.assertProjectAccess(w, r, id) {
+		return
+	}
+	var req startRunRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	res, err := h.svc.Emulation.StartProjectRun(r.Context(), id, req.ScenarioID, actorFrom(r.Context()))
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
+}
+
+// getProjectCoverage returns ATT&CK coverage aggregated across the project's
+// engagements.
+func (h *handlers) getProjectCoverage(w http.ResponseWriter, r *http.Request) {
+	if !h.projectsEnabled(w) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if !h.assertProjectAccess(w, r, id) {
+		return
+	}
+	coverage, err := h.svc.Emulation.GetProjectCoverage(r.Context(), id)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, coverage)
+}
+
+// assertProjectAccess checks the actor can access the project, writing the
+// appropriate error and returning false when not.
+func (h *handlers) assertProjectAccess(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	ok, err := h.svc.Projects.CanAccessProject(r.Context(), actorUser(r.Context()), projectID)
+	if err != nil {
+		writeError(w, h.log, err)
+		return false
+	}
+	if !ok {
+		writeErrorCode(w, http.StatusForbidden, "forbidden", "cannot access project")
+		return false
+	}
+	return true
+}
+
 func (h *handlers) listProjectEngagements(w http.ResponseWriter, r *http.Request) {
 	if !h.projectsEnabled(w) {
 		return

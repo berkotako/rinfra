@@ -310,18 +310,25 @@ func (s *EmulationService) Start(ctx context.Context, engagementID, scenarioID, 
 	if err != nil {
 		return "", err
 	}
-	if err := eng.CanDeploy(time.Now()); err != nil {
-		return "", fmt.Errorf("emulation start refused: %w", err)
-	}
-
 	sc, ok := s.lookupScenario(ctx, scenarioID)
 	if !ok {
 		return "", fmt.Errorf("scenario %q: %w", scenarioID, store.ErrNotFound)
 	}
+	return s.launchRun(ctx, eng, sc, actor)
+}
+
+// launchRun enforces the per-engagement authorization gate, persists a running
+// ScenarioRun, audits the start, and kicks off the async execution. It is the
+// shared core of both single-engagement (Start) and project-scope
+// (StartProjectRun) launches; the scenario is assumed already resolved.
+func (s *EmulationService) launchRun(ctx context.Context, eng domain.Engagement, sc domain.Scenario, actor string) (string, error) {
+	if err := eng.CanDeploy(time.Now()); err != nil {
+		return "", fmt.Errorf("emulation start refused: %w", err)
+	}
 
 	run := domain.ScenarioRun{
-		EngagementID: engagementID,
-		ScenarioID:   scenarioID,
+		EngagementID: eng.ID,
+		ScenarioID:   sc.ID,
 		Status:       domain.ExecRunning,
 		StartedAt:    time.Now().UTC(),
 	}
@@ -332,10 +339,10 @@ func (s *EmulationService) Start(ctx context.Context, engagementID, scenarioID, 
 	run.ID = runID
 
 	_ = s.audit.Record(ctx, audit.Event{
-		EngagementID: engagementID,
+		EngagementID: eng.ID,
 		Actor:        actor,
 		Action:       "emulation.start",
-		Target:       scenarioID,
+		Target:       sc.ID,
 		Detail:       fmt.Sprintf("run_id=%s", runID),
 		At:           time.Now().UTC(),
 	})
@@ -343,6 +350,63 @@ func (s *EmulationService) Start(ctx context.Context, engagementID, scenarioID, 
 	go s.runScenario(context.Background(), eng, sc, run, actor)
 
 	return runID, nil
+}
+
+// ProjectRunResult reports the outcome of launching a scenario across every
+// engagement in a project: which engagements started a run, and which were
+// skipped (with the reason — typically a failed authorization gate).
+type ProjectRunResult struct {
+	ProjectID  string                 `json:"projectId"`
+	ScenarioID string                 `json:"scenarioId"`
+	Started    []ProjectRunEngagement `json:"started"`
+	Skipped    []ProjectRunSkip       `json:"skipped"`
+}
+
+type ProjectRunEngagement struct {
+	EngagementID string `json:"engagementId"`
+	RunID        string `json:"runId"`
+}
+
+type ProjectRunSkip struct {
+	EngagementID string `json:"engagementId"`
+	Reason       string `json:"reason"`
+}
+
+// StartProjectRun launches a scenario at project scope: it fans the run out to
+// every engagement in the project, each gated independently by its own
+// CanDeploy. Engagements that fail the gate (not authorized, out of window, no
+// scope, …) are reported as skipped rather than failing the whole batch, so a
+// partially-authorized project still exercises the engagements that are ready.
+func (s *EmulationService) StartProjectRun(ctx context.Context, projectID, scenarioID, actor string) (ProjectRunResult, error) {
+	sc, ok := s.lookupScenario(ctx, scenarioID)
+	if !ok {
+		return ProjectRunResult{}, fmt.Errorf("scenario %q: %w", scenarioID, store.ErrNotFound)
+	}
+	engs, err := s.engagements.ListForProject(ctx, projectID)
+	if err != nil {
+		return ProjectRunResult{}, fmt.Errorf("list project engagements: %w", err)
+	}
+
+	res := ProjectRunResult{ProjectID: projectID, ScenarioID: scenarioID}
+	for _, eng := range engs {
+		runID, err := s.launchRun(ctx, eng, sc, actor)
+		if err != nil {
+			res.Skipped = append(res.Skipped, ProjectRunSkip{EngagementID: eng.ID, Reason: err.Error()})
+			continue
+		}
+		res.Started = append(res.Started, ProjectRunEngagement{EngagementID: eng.ID, RunID: runID})
+	}
+
+	_ = s.audit.Record(ctx, audit.Event{
+		EngagementID: "",
+		Actor:        actor,
+		Action:       "emulation.project_start",
+		Target:       scenarioID,
+		Detail:       fmt.Sprintf("project=%s started=%d skipped=%d", projectID, len(res.Started), len(res.Skipped)),
+		At:           time.Now().UTC(),
+	})
+
+	return res, nil
 }
 
 // runScenario resolves the Operator, executes the scenario, and persists results.
@@ -704,7 +768,31 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 	if err != nil {
 		return Coverage{}, fmt.Errorf("list runs: %w", err)
 	}
+	return s.coverageFromRuns(ctx, engagementID, runs)
+}
 
+// GetProjectCoverage rolls up ATT&CK coverage across every engagement in the
+// project — the project-scope counterpart to GetCoverage, so emulation results
+// can be viewed at both the engagement and project levels.
+func (s *EmulationService) GetProjectCoverage(ctx context.Context, projectID string) (Coverage, error) {
+	engs, err := s.engagements.ListForProject(ctx, projectID)
+	if err != nil {
+		return Coverage{}, fmt.Errorf("list project engagements: %w", err)
+	}
+	var runs []domain.ScenarioRun
+	for _, e := range engs {
+		rs, err := s.scenarios.RunsForEngagement(ctx, e.ID)
+		if err != nil {
+			continue
+		}
+		runs = append(runs, rs...)
+	}
+	return s.coverageFromRuns(ctx, projectID, runs)
+}
+
+// coverageFromRuns rolls a set of runs (engagement- or project-scoped) up into a
+// Coverage report. scopeID is echoed back as the report's identifier.
+func (s *EmulationService) coverageFromRuns(ctx context.Context, scopeID string, runs []domain.ScenarioRun) (Coverage, error) {
 	// Collect full results: for each run, fetch from store to get technique_results.
 	// (RunsForEngagement may not load results — call GetRun for each.) Track the
 	// best (highest-ranked) disposition per technique across all runs.
@@ -805,7 +893,7 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 	// Summary counts, bucketed by disposition. "exercised" counts ONLY genuine
 	// attempts so the TRM denominator and the dashboard cannot overstate reality.
 	var cov Coverage
-	cov.EngagementID = engagementID
+	cov.EngagementID = scopeID
 	cov.Tactics = tacticList
 	for _, tac := range tacticList {
 		for _, tc := range tac.Techniques {
