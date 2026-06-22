@@ -123,6 +123,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const activeEngagementIdRef = useRef(activeEngagementId);
   activeEngagementIdRef.current = activeEngagementId;
 
+  // Tracks which engagement the current nodes/edges belong to. Set only after a
+  // topology load completes, so the mock-snapshot effect below never persists
+  // the previous engagement's nodes under the newly-selected one mid-switch.
+  const loadedEngRef = useRef("");
+
   // ---- Toast helper ----
   const pushToast = useCallback((msg: string, kind: ToastKind = "info") => {
     const id = ++toastCounter.current;
@@ -232,12 +237,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     client.getTopology(activeEngagementId).then(({ nodes: n, edges: e }) => {
       setNodes(n);
       setEdges(e);
+      loadedEngRef.current = activeEngagementId;
     }).catch(() => {
       // Topology may not exist yet for new engagements — start empty.
       setNodes([]);
       setEdges([]);
+      loadedEngRef.current = activeEngagementId;
     });
   }, [client, activeEngagementId]);
+
+  // ---- Mock mode: snapshot the current topology back to the per-engagement
+  // store on every change, so post-deploy live state (the mock deploy timers
+  // flip nodes to live after apiSaveTopology runs) survives switching away and
+  // back. Guarded by loadedEngRef so a mid-switch render never writes the old
+  // engagement's nodes under the newly-selected engagement. ----
+  useEffect(() => {
+    if (rest) return;
+    if (loadedEngRef.current !== activeEngagementId) return;
+    void client.putTopology(activeEngagementId, nodes, edges);
+  }, [rest, client, activeEngagementId, nodes, edges]);
 
   // ---- REST mode: SSE subscription for node/job/run events ----
   useEffect(() => {
@@ -294,15 +312,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const apiSaveTopology = useCallback(
     async (engagementId: string, n: CanvasNode[], e: CanvasEdge[]) => {
-      if (!rest) {
-        // Mock mode: persist per-engagement so switching away and back keeps
-        // this engagement's topology.
-        void client.putTopology(engagementId, n, e);
-        return;
-      }
+      // Mock mode persistence is handled by the per-engagement snapshot effect
+      // above (which also captures post-deploy live state), so this is a no-op.
+      if (!rest) return;
       debouncedSaveTopology(engagementId, n, e);
     },
-    [rest, client, debouncedSaveTopology]
+    [rest, debouncedSaveTopology]
   );
 
   const apiCreateEngagement = useCallback(
