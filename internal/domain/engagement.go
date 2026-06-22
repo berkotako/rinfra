@@ -83,7 +83,74 @@ var (
 	ErrOutsideWindow    = errors.New("current time is outside the rules-of-engagement window")
 	ErrEmptyScope       = errors.New("engagement has no in-scope targets defined")
 	ErrTargetNotInScope = errors.New("target is not within the engagement scope")
+
+	// Approval-process errors.
+	ErrAuthIncomplete    = errors.New("authorization is incomplete or invalid")
+	ErrInvalidTransition = errors.New("invalid engagement status transition")
 )
+
+// Validate checks that an Authorization is complete and coherent at time `now`,
+// so an engagement cannot be marked authorized with a missing approver, missing
+// signed-authorization reference, or a non-future / inverted validity window.
+// GrantedAt is assumed already defaulted by the caller when zero.
+func (a Authorization) Validate(now time.Time) error {
+	if strings.TrimSpace(a.AuthorizedBy) == "" {
+		return fmt.Errorf("%w: authorizedBy is required", ErrAuthIncomplete)
+	}
+	if strings.TrimSpace(a.DocumentRef) == "" {
+		return fmt.Errorf("%w: documentRef (signed authorization artifact) is required", ErrAuthIncomplete)
+	}
+	if a.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: expiresAt is required", ErrAuthIncomplete)
+	}
+	if !a.ExpiresAt.After(a.GrantedAt) {
+		return fmt.Errorf("%w: expiresAt must be after grantedAt", ErrAuthIncomplete)
+	}
+	if !a.ExpiresAt.After(now) {
+		return fmt.Errorf("%w: expiresAt must be in the future", ErrAuthIncomplete)
+	}
+	return nil
+}
+
+// CanAuthorize reports whether the engagement may be (re)authorized from its
+// current status. Terminal states (completed/archived) cannot be revived by an
+// authorization; they must not silently become deployable again.
+func (e *Engagement) CanAuthorize() error {
+	switch e.Status {
+	case EngagementDraft, EngagementAuthorized, EngagementActive:
+		return nil
+	default:
+		return fmt.Errorf("%w: cannot authorize from status %q", ErrInvalidTransition, e.Status)
+	}
+}
+
+// statusTransitions is the allowed operator/API status moves. Authorization
+// itself is NOT reachable here — it must go through the validated Authorize
+// path — and terminal states are sinks. The engine sets active/completed
+// internally (deploy/teardown) and does not go through this table.
+var statusTransitions = map[EngagementStatus]map[EngagementStatus]bool{
+	EngagementDraft:      {EngagementArchived: true},
+	EngagementAuthorized: {EngagementActive: true, EngagementDraft: true, EngagementArchived: true},
+	EngagementActive:     {EngagementCompleted: true, EngagementArchived: true},
+	EngagementCompleted:  {EngagementArchived: true},
+	EngagementArchived:   {},
+}
+
+// CanTransitionTo validates an operator-initiated status change. Transitioning
+// to Authorized is rejected here on purpose: authorization must use Authorize
+// (which validates the approver, document, and validity window).
+func (e *Engagement) CanTransitionTo(next EngagementStatus) error {
+	if next == e.Status {
+		return nil
+	}
+	if next == EngagementAuthorized {
+		return fmt.Errorf("%w: use the authorize action to move to %q", ErrInvalidTransition, next)
+	}
+	if statusTransitions[e.Status][next] {
+		return nil
+	}
+	return fmt.Errorf("%w: %q -> %q", ErrInvalidTransition, e.Status, next)
+}
 
 // CanDeploy enforces the authorization gate. Call this before ANY provisioning
 // path. It returns nil only when the engagement may legitimately stand up

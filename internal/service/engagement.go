@@ -74,6 +74,12 @@ func (s *EngagementService) UpdateStatus(ctx context.Context, id string, newStat
 	}
 	old := eng.Status
 
+	// Guard the transition: terminal states are sinks, and the Authorized state
+	// is only reachable through the validated Authorize path.
+	if err := eng.CanTransitionTo(newStatus); err != nil {
+		return err
+	}
+
 	if err := s.engagements.UpdateStatus(ctx, id, newStatus); err != nil {
 		return fmt.Errorf("update engagement status: %w", err)
 	}
@@ -95,6 +101,20 @@ func (s *EngagementService) Authorize(ctx context.Context, id string, auth domai
 	eng, err := s.engagements.Get(ctx, id)
 	if err != nil {
 		return domain.Engagement{}, fmt.Errorf("authorize engagement: %w", err)
+	}
+
+	// Cannot authorize a completed/archived engagement back into a deployable state.
+	if err := eng.CanAuthorize(); err != nil {
+		return domain.Engagement{}, err
+	}
+
+	// Default the grant time to now when not supplied, then validate the
+	// authorization is complete and its validity window is coherent and future.
+	if auth.GrantedAt.IsZero() {
+		auth.GrantedAt = time.Now().UTC()
+	}
+	if err := auth.Validate(time.Now()); err != nil {
+		return domain.Engagement{}, err
 	}
 
 	eng.Authorization = auth
