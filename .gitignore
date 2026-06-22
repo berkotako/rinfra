@@ -33,3 +33,6 @@ Thumbs.db
 .env.local
 .env.*.local
 web/tsconfig.tsbuildinfo
+
+# C2 live-validation harness (keys, local state)
+.harness/

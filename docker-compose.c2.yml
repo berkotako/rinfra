@@ -1,0 +1,32 @@
+# RInfra C2 live-validation harness (OPT-IN — not part of the default stack).
+#
+# Stands up throwaway targets so the C2 layer can be validated against real
+# servers without touching a customer environment. CI does not run these; the
+# c2live-tagged tests are skipped unless the matching env vars are set.
+#
+# SSH deploy mechanics (shared by every C2 adapter):
+#   make c2-harness-up        # generates a keypair + starts the sshd target
+#   make test-c2live          # runs the c2live tests against it
+#   make c2-harness-down
+#
+# Per-framework smoke tests are env-gated — see docs/RUNBOOK_C2.md (e.g. point
+# RINFRA_SLIVER_OPERATOR_CONFIG at a sliver-server operator config to exercise
+# the real gRPC operator path).
+services:
+  # A real OpenSSH server: validates deploy.SSHRunner (Run/Upload) and the
+  # install-script execution path end-to-end, which is the mechanic every C2
+  # deploy relies on. Authenticates with the harness keypair (make c2-harness-up).
+  sshd:
+    image: lscr.io/linuxserver/openssh-server:latest
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+      USER_NAME: "rinfra"
+      PUBLIC_KEY_FILE: "/keys/harness.pub"
+      SUDO_ACCESS: "true"
+    volumes:
+      - ./.harness/keys:/keys:ro
+    ports:
+      - "2222:2222"
+    restart: "no"
