@@ -578,6 +578,7 @@ export class MockClient implements RInfraClient {
   async createEngagement(params: CreateEngagementParams): Promise<Engagement> {
     const e: Engagement = {
       id: "ENG-" + (2412 + Math.floor(Math.random() * 80)),
+      projectId: params.projectId ?? "",
       client: params.client,
       codename: params.codename,
       scope: params.scopeNotes || "External perimeter",
@@ -882,6 +883,7 @@ function mapEngagementFromApi(e: Record<string, unknown>): Engagement {
 
   return {
     id: String(e["id"] ?? ""),
+    projectId: String(e["projectId"] ?? ""),
     client: String(e["client"] ?? ""),
     codename: String(e["codename"] ?? ""),
     scope: String(scope?.notes ?? targets.join(", ") ?? ""),

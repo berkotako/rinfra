@@ -61,6 +61,7 @@ export type AuthStatus = "authorized" | "pending" | "expired";
 
 export interface Engagement {
   id: string;
+  projectId?: string; // owning project (empty = unassigned)
   client: string;
   codename: string;
   scope: string;

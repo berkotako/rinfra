@@ -8,7 +8,7 @@ import { getClient, ApiError } from "../../lib/client";
 import type { Project, User, ProjectMember } from "../../lib/types";
 
 export default function ProjectsScreen() {
-  const { pushToast } = useStore();
+  const { pushToast, refreshProjects } = useStore();
   const { role, user } = useAuth();
   const client = getClient();
 
@@ -34,12 +34,15 @@ export default function ProjectsScreen() {
       ]);
       setProjects(ps);
       setUsers(us);
+      // Keep the global store (and the top-bar project grouping) in sync after
+      // any create/update/delete here, which all funnel through reload().
+      void refreshProjects();
     } catch (e) {
       pushToast(e instanceof ApiError ? e.message : "Failed to load projects", "danger");
     } finally {
       setLoading(false);
     }
-  }, [client, pushToast]);
+  }, [client, pushToast, refreshProjects]);
 
   useEffect(() => {
     void reload();

@@ -118,6 +118,7 @@ export const C2_FRAMEWORKS: C2Framework[] = [
 export const ENGAGEMENTS: Engagement[] = [
   {
     id: "ENG-2411",
+    projectId: "p-acme",
     client: "Meridian Financial Group",
     codename: "Northwind",
     scope: "External perimeter + assumed-breach",
@@ -135,6 +136,7 @@ export const ENGAGEMENTS: Engagement[] = [
   },
   {
     id: "ENG-2409",
+    projectId: "p-globex",
     client: "Atlas Health Systems",
     codename: "Cedar",
     scope: "Internal AD adversary emulation",
