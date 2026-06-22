@@ -110,10 +110,16 @@ c2-harness-up:
 c2-harness-down:
 	docker compose -f $(C2_COMPOSE) down
 
-# Run the opt-in c2live tests. Defaults target the local sshd harness; the
-# per-framework smokes (e.g. Sliver) self-skip unless their env is also set.
+# Run the opt-in c2live tests. The local sshd-harness defaults are only filled
+# in when the harness key exists (i.e. you ran c2-harness-up); otherwise the SSH
+# vars are left untouched so the deploy harness self-skips and an env-gated
+# framework smoke (e.g. RINFRA_SLIVER_OPERATOR_CONFIG=... make test-c2live) runs
+# on its own. Any SSH vars you set yourself are always honoured.
 test-c2live:
-	RINFRA_C2LIVE_SSH_ADDR=$${RINFRA_C2LIVE_SSH_ADDR:-localhost:2222} \
-	RINFRA_C2LIVE_SSH_USER=$${RINFRA_C2LIVE_SSH_USER:-rinfra} \
-	RINFRA_C2LIVE_SSH_KEY=$${RINFRA_C2LIVE_SSH_KEY:-.harness/keys/harness} \
+	@if [ -f .harness/keys/harness ]; then \
+		: "$${RINFRA_C2LIVE_SSH_ADDR:=localhost:2222}"; \
+		: "$${RINFRA_C2LIVE_SSH_USER:=rinfra}"; \
+		: "$${RINFRA_C2LIVE_SSH_KEY:=.harness/keys/harness}"; \
+		export RINFRA_C2LIVE_SSH_ADDR RINFRA_C2LIVE_SSH_USER RINFRA_C2LIVE_SSH_KEY; \
+	fi; \
 	go test -tags c2live -count=1 -v ./internal/c2/...

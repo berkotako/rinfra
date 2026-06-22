@@ -37,11 +37,18 @@ user `rinfra`, your harness public key).
 
 `test-c2live` reads:
 
-| Env var | Default | Meaning |
+| Env var | Default (only when the harness is up) | Meaning |
 |---|---|---|
 | `RINFRA_C2LIVE_SSH_ADDR` | `localhost:2222` | SSH target `host:port` |
 | `RINFRA_C2LIVE_SSH_USER` | `rinfra` | login user |
 | `RINFRA_C2LIVE_SSH_KEY`  | `.harness/keys/harness` | PEM/OpenSSH private key |
+
+The localhost defaults are filled in **only when `.harness/keys/harness` exists**
+(i.e. you ran `make c2-harness-up`). If it doesn't, the SSH vars are left unset
+so `TestC2Live_*` in `internal/c2/deploy` self-skip — that's what lets you run an
+env-gated framework smoke (e.g. `RINFRA_SLIVER_OPERATOR_CONFIG=./operator.cfg
+make test-c2live`) on its own without standing up the sshd target. Any SSH vars
+you export yourself are always honoured.
 
 It exercises `TestC2Live_RunAndUpload` (command round-trip + upload read-back) and
 `TestC2Live_InstallScriptExec` (upload a script, run via bash, non-zero exit
