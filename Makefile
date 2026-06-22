@@ -1,5 +1,6 @@
 .PHONY: build vet test test-unit-light test-cloud run fmt tidy web-dev web-build web-lint \
-        db-up db-down migrate-up migrate-down test-integration dev
+        db-up db-down migrate-up migrate-down test-integration dev \
+        c2-harness-up c2-harness-down test-c2live
 
 build:
 	go build ./...
@@ -95,3 +96,24 @@ test-integration: db-up
 	@until docker compose exec postgres pg_isready -U rinfra >/dev/null 2>&1; do sleep 1; done
 	migrate -path migrations -database "$(DATABASE_URL)" up
 	DATABASE_URL="$(DATABASE_URL)" go test -tags integration ./...
+
+# ---- C2 live-validation harness (opt-in; see docs/RUNBOOK_C2.md) ----
+C2_COMPOSE := docker-compose.c2.yml
+
+# Generate the harness keypair (once) and start the throwaway sshd target.
+c2-harness-up:
+	@mkdir -p .harness/keys
+	@test -f .harness/keys/harness || ssh-keygen -t ed25519 -N "" -C rinfra-harness -f .harness/keys/harness
+	docker compose -f $(C2_COMPOSE) up -d sshd
+	@echo "sshd up on localhost:2222 — run 'make test-c2live'"
+
+c2-harness-down:
+	docker compose -f $(C2_COMPOSE) down
+
+# Run the opt-in c2live tests. Defaults target the local sshd harness; the
+# per-framework smokes (e.g. Sliver) self-skip unless their env is also set.
+test-c2live:
+	RINFRA_C2LIVE_SSH_ADDR=$${RINFRA_C2LIVE_SSH_ADDR:-localhost:2222} \
+	RINFRA_C2LIVE_SSH_USER=$${RINFRA_C2LIVE_SSH_USER:-rinfra} \
+	RINFRA_C2LIVE_SSH_KEY=$${RINFRA_C2LIVE_SSH_KEY:-.harness/keys/harness} \
+	go test -tags c2live -count=1 -v ./internal/c2/...
