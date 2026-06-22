@@ -135,6 +135,21 @@ Implement in this sequence; each step should compile and be testable.
 6. **Emulation engine** — run `domain.Scenario` via the `Operator` interface;
    wrap Atomic Red Team / Caldera abilities as the procedure source.
 
+**Status: steps 1–6 are delivered.** All four cloud providers' standalone
+methods are wired to their official SDKs (godo / aws-sdk-go-v2 /
+google.golang.org/api / azure-sdk-for-go) and unit-tested; all eight C2
+frameworks have real clients (Sliver gRPC, Mythic GraphQL, Metasploit
+msgpack-RPC, Havoc/PoshC2 SSH-CLI, Custom REST, Cobalt Strike / Brute Ratel
+fronted) over a shared live SSH runner; msfvenom generation is real. Built on
+top since: capability-based technique routing (`service.Route` —
+technique→capable in-scope agent), an honest BAS status taxonomy
+(executed/attempted-failed/manual/unsupported/blocked-by-scope/not-run, so
+coverage/TRM count only real attempts), a hardened engagement approval flow
+(admin/lead role gate + authorization validation + status-transition guards),
+and project- **and** engagement-scope emulation runs. Live validation against
+real cloud accounts / C2 teamservers is the remaining per-target work (see
+`docs/RUNBOOK_DO.md`, `docs/PROJECT_PLAN.md`).
+
 Explicitly **deferred** (design seams only, do not build): SIEM/EDR
 reconciliation, coverage heatmaps, detection-as-code export, QRadar and other
 SIEM connectors.

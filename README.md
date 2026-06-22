@@ -301,5 +301,8 @@ talks to this control plane over REST/JSON (`make web-dev`, or `make dev`).
 ## Build order
 
 See `CLAUDE.md` → "Build order". Summary: domain+store → audit → cloud
-(DigitalOcean first) → orchestration → C2 (Sliver/Mythic first) → emulation.
-Validation/reporting is deferred.
+(DigitalOcean first) → orchestration → C2 (Sliver/Mythic first) → emulation —
+all delivered, including coverage reporting (ATT&CK rollup / TRM / Navigator
+export), capability-based technique routing, and project- and engagement-scope
+emulation runs. Only the **detection-validation** phase (SIEM/EDR
+reconciliation, coverage heatmaps, detection-as-code) remains deferred.

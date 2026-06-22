@@ -120,5 +120,6 @@ the key `rinfra-prefs` and are applied via `data-theme` attribute and
 - This is a self-contained workspace inside the rinfra Go repo (`web/`).
   Moving it to a separate repo later is a `git mv`.
 - Static export can later be served from `cmd/rinfra-server` via `go:embed`.
-- Settings screen, SIEM/EDR validation, PDF export, and ATT&CK Navigator export
-  are stub buttons only (deferred per CLAUDE.md).
+- The Settings screen and ATT&CK Navigator export are implemented. Still
+  deferred per CLAUDE.md: the SIEM/EDR detection-validation phase and PDF export
+  of the engagement report (PDF button is a stub).

@@ -5,7 +5,7 @@ replaces the original build plan (a scaffold-to-MVP plan written when only the
 domain types and `/healthz` existed). That historical plan — now substantially
 delivered — is preserved in the **Archive** at the bottom as a changelog.
 
-_Last updated: 2026-06-15._
+_Last updated: 2026-06-22._
 
 > How to read this: **Completed** = implemented and covered by CI against
 > fakes/memstore. **Partially completed** = implemented but only exercised
@@ -29,8 +29,9 @@ _Last updated: 2026-06-15._
 **Persistence & audit**
 - Postgres stores via `pgx/v5` (`internal/store/postgres`) + in-memory fakes
   (`internal/store/memstore`) for tests and `--dev` mode.
-- Migrations `000001`–`000006` (init, engagement fields, credentials/jobs,
-  users/projects, user scenarios, user techniques).
+- Migrations `000001`–`000009` (init, engagement fields, credentials/jobs,
+  users/projects, user scenarios, user techniques, technique detection,
+  advisory feeds, server settings).
 - Append-only audit (`internal/audit`, Postgres + memstore); immutability
   enforced.
 - `internal/secrets`: AES-256-GCM envelope encryption; redacting types.
@@ -42,7 +43,10 @@ _Last updated: 2026-06-15._
   (admin → all; lead → led projects; operator → member projects).
 - Engagements (CRUD + status/authorization), topology get/put/validate,
   deploy/teardown (async jobs + boot reconciliation), credentials (write-only,
-  encrypted), SSE events, audit feed.
+  encrypted), SSE events, audit feed. **Approval hardened**: authorize is
+  admin/lead-only, validates the authorization (approver + signed-doc ref +
+  future window), and status transitions are guarded (no reviving terminal
+  engagements; Authorized only via the validated path).
 - C2: frameworks registry, manual-access descriptor, **teamservers list**,
   **SSH tunnel with bounded lifecycle** (ownership + idle/absolute TTL +
   shutdown), **in-browser web shell over WebSocket**.
@@ -55,7 +59,11 @@ _Last updated: 2026-06-15._
   engagement; resources tagged `rinfra:<engagement-id>`; teardown sweep
   (`cloud/sweeper.go`).
 - `internal/cloud`: `CloudProvider` impls for **DigitalOcean, AWS, GCP, Azure**
-  + `fake`; per-provider ingress divergence covered by tests.
+  + `fake`; per-provider ingress divergence covered by tests. Standalone API
+  methods (ingress / static IP / DNS / destroy / orphan-sweep) are wired to each
+  official SDK (godo, aws-sdk-go-v2, google.golang.org/api, azure-sdk-for-go)
+  and unit-tested against httptest servers / fake transports. Azure VMs are
+  SSH-key-only (no password).
 
 **C2 & payload**
 - `internal/c2`: registry + adapters — Sliver / Mythic / Metasploit / custom
@@ -64,8 +72,18 @@ _Last updated: 2026-06-15._
 - `internal/payload`: msfvenom generator.
 
 **Emulation**
-- Orchestrator + YAML catalog (`internal/emulation/catalog`); capability-aware
-  routing to a supporting, in-scope agent; coverage + Navigator export.
+- Orchestrator + YAML catalog (`internal/emulation/catalog`); **capability
+  routing** (`service.Route`: technique → required platform/privilege/scope →
+  best in-scope agent across the deployed frameworks); coverage + Navigator
+  export.
+- **Honest BAS status taxonomy**: per-technique disposition
+  (executed / attempted-failed / manual-required / unsupported /
+  blocked-by-scope / not-run); coverage's "exercised" count and the TRM count
+  only genuine attempts, with manual/skipped/blocked reported separately.
+- **Project- and engagement-scope runs**: launch a scenario against one
+  engagement, or fan out across every engagement in a project (each gated by
+  its own `CanDeploy`; skipped engagements reported, not failed). Coverage
+  rolls up at both scopes.
 
 **Frontend (`web/`)**
 - Next.js console wired to `RestClient` (live REST + SSE) with the mock client
@@ -184,12 +202,14 @@ cmd/rinfra-server (chi router)
 | Secrets never logged | `secrets` types redact via `LogValuer`/`Stringer`; audit details are allow-listed |
 
 ### Schema & API
-Schema is migrations `000001`–`000006` (engagements, nodes, edges,
+Schema is migrations `000001`–`000009` (engagements, nodes, edges,
 scenario_runs, technique_results, audit_events + immutability, credentials,
-jobs, users, projects + membership, sessions, user_scenarios, user_techniques).
-The API surface is enumerated in §1 and mirrored by `web/lib/types.ts` and
-`web/lib/client.ts`. Errors map the `CanDeploy` sentinels to
-`403 authorization_required|auth_expired|outside_window|empty_scope`.
+jobs, users, projects + membership, sessions, user_scenarios, user_techniques,
+technique detection, advisory feeds, server settings). The API surface is
+enumerated in §1 and mirrored by `web/lib/types.ts` and `web/lib/client.ts`.
+Errors map the `CanDeploy` sentinels to `403 authorization_required|auth_expired
+|outside_window|empty_scope`, plus `400 authorization_incomplete` and
+`409 invalid_transition` for the approval guards.
 
 ---
 
