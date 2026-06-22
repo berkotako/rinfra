@@ -106,6 +106,7 @@ export default function EmulationScreen() {
   // Run scope: a single engagement, or every engagement in its project.
   const [scope, setScope] = useState<"engagement" | "project">("engagement");
   const [projectRunResult, setProjectRunResult] = useState<ProjectRunResult | null>(null);
+  const [projectRunning, setProjectRunning] = useState(false);
   const runStartRef = useRef<number>(0);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const runIdRef = useRef<string | null>(null);
@@ -320,7 +321,8 @@ export default function EmulationScreen() {
   // project (each gated server-side by its own authorization). Shows which
   // engagements started and which were skipped.
   const runProject = () => {
-    if (!projectId) return;
+    if (!projectId || projectRunning) return; // guard against double-submit
+    setProjectRunning(true);
     setProjectRunResult(null);
     pushToast(`Launching ${scenario.name} across the project…`, "info");
     client.startProjectRun(projectId, scenarioId).then((res) => {
@@ -331,6 +333,8 @@ export default function EmulationScreen() {
       );
     }).catch((err: unknown) => {
       pushToast(err instanceof Error ? err.message : "Failed to start project run", "danger");
+    }).finally(() => {
+      setProjectRunning(false);
     });
   };
 
@@ -946,8 +950,9 @@ export default function EmulationScreen() {
                   className="btn primary"
                   style={{ width: "100%", justifyContent: "center" }}
                   onClick={run}
+                  disabled={projectRunning}
                 >
-                  <Icons.Play size={15} /> Run across project
+                  <Icons.Play size={15} /> {projectRunning ? "Launching…" : "Run across project"}
                 </button>
               ) : running ? (
                 <button

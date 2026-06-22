@@ -783,7 +783,8 @@ func (s *EmulationService) GetProjectCoverage(ctx context.Context, projectID str
 	for _, e := range engs {
 		rs, err := s.scenarios.RunsForEngagement(ctx, e.ID)
 		if err != nil {
-			continue
+			// Surface the failure rather than silently undercounting coverage.
+			return Coverage{}, fmt.Errorf("list runs for engagement %s: %w", e.ID, err)
 		}
 		runs = append(runs, rs...)
 	}
