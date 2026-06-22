@@ -59,6 +59,12 @@ func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
 	case errors.Is(err, domain.ErrEmptyScope):
 		status = http.StatusForbidden
 		code = "empty_scope"
+	case errors.Is(err, domain.ErrAuthIncomplete):
+		status = http.StatusBadRequest
+		code = "authorization_incomplete"
+	case errors.Is(err, domain.ErrInvalidTransition):
+		status = http.StatusConflict
+		code = "invalid_transition"
 	case errors.Is(err, service.ErrJobRunning):
 		status = http.StatusConflict
 		code = "job_running"

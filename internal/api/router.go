@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rinfra/rinfra/internal/audit"
+	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/service"
 	"github.com/rinfra/rinfra/internal/threatfeed"
 )
@@ -91,7 +92,11 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			// engagement-scoped route before any handler runs.
 			r.Use(h.requireEngagementAccess)
 			r.Get("/", h.getEngagement)
-			r.Patch("/", h.patchEngagement)
+			// Status changes and authorization (approval) are privileged: only
+			// admin/lead may approve an engagement or move its lifecycle. Project
+			// membership is still enforced by requireEngagementAccess above, so an
+			// admin/lead self-approving their own engagement is allowed.
+			r.With(RequireRole(domain.RoleAdmin, domain.RoleLead)).Patch("/", h.patchEngagement)
 			r.Get("/topology", h.getTopology)
 			r.Put("/topology", h.putTopology)
 			r.Post("/validate", h.validateTopology)

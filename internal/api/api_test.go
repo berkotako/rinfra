@@ -151,6 +151,7 @@ func authorizeEngagementViaAPI(t *testing.T, router http.Handler, engID string) 
 	resp := doRequest(t, router, "PATCH", "/api/v1/engagements/"+engID, map[string]any{
 		"authorization": map[string]any{
 			"authorizedBy": "test-approver",
+			"documentRef":  "auth-doc-1",
 			"grantedAt":    time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
 			"expiresAt":    time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		},

@@ -76,6 +76,7 @@ func authorizedEngagement(t *testing.T, ctx context.Context, engSvc *service.Eng
 	}
 	auth := domain.Authorization{
 		AuthorizedBy: "test-approver",
+		DocumentRef:  "auth-doc-1",
 		GrantedAt:    time.Now().Add(-30 * time.Minute),
 		ExpiresAt:    time.Now().Add(time.Hour),
 	}
