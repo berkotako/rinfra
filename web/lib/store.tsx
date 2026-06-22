@@ -223,9 +223,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     void refreshProjects();
   }, [refreshProjects]);
 
-  // ---- REST mode: load topology when active engagement changes ----
+  // ---- Load topology when the active engagement changes (both modes), so each
+  // engagement shows its OWN infrastructure / C2 targets / emulation plan rather
+  // than a single shared set. ----
   useEffect(() => {
-    if (!rest || !activeEngagementId) return;
+    if (!activeEngagementId) return;
 
     client.getTopology(activeEngagementId).then(({ nodes: n, edges: e }) => {
       setNodes(n);
@@ -235,7 +237,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setNodes([]);
       setEdges([]);
     });
-  }, [rest, client, activeEngagementId]);
+  }, [client, activeEngagementId]);
 
   // ---- REST mode: SSE subscription for node/job/run events ----
   useEffect(() => {
@@ -292,10 +294,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const apiSaveTopology = useCallback(
     async (engagementId: string, n: CanvasNode[], e: CanvasEdge[]) => {
-      if (!rest) return;
+      if (!rest) {
+        // Mock mode: persist per-engagement so switching away and back keeps
+        // this engagement's topology.
+        void client.putTopology(engagementId, n, e);
+        return;
+      }
       debouncedSaveTopology(engagementId, n, e);
     },
-    [rest, debouncedSaveTopology]
+    [rest, client, debouncedSaveTopology]
   );
 
   const apiCreateEngagement = useCallback(
