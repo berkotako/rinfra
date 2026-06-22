@@ -19,7 +19,7 @@ const CLOUDS = ["All providers", "AWS", "GCP", "Azure", "DigitalOcean"];
 export default function TopBar({ onAppearance }: { onAppearance?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { engagements, activeEngagement, setActiveEngagementId } = useStore();
+  const { engagements, projects, activeEngagement, setActiveEngagementId } = useStore();
   const { username, logout } = useAuth();
   const [cloudEnv, setCloudEnv] = React.useState("All providers");
 
@@ -28,6 +28,28 @@ export default function TopBar({ onAppearance }: { onAppearance?: () => void }) 
   // also list completed/archived engagements (the ones operators most often
   // open reports for). Only pre-authorization drafts are excluded.
   const activeList = engagements.filter((e) => e.status !== "draft");
+
+  const projectName = (id?: string) => projects.find((p) => p.id === id)?.name;
+  const activeProjectName = projectName(activeEngagement.projectId);
+
+  // Group the switchable engagements under their project for the dropdown, in
+  // declared project order, with any unassigned engagements last.
+  const contextGroups = (() => {
+    const byProject = new Map<string, typeof activeList>();
+    for (const e of activeList) {
+      const key = e.projectId && projects.some((p) => p.id === e.projectId) ? e.projectId : "";
+      byProject.set(key, [...(byProject.get(key) ?? []), e]);
+    }
+    const groups: { id: string; name: string; items: typeof activeList }[] = [];
+    for (const p of projects) {
+      const items = byProject.get(p.id);
+      if (items?.length) groups.push({ id: p.id, name: p.name, items });
+    }
+    const unassigned = byProject.get("");
+    if (unassigned?.length) groups.push({ id: "", name: "Unassigned", items: unassigned });
+    return groups;
+  })();
+  const showGroupHeaders = contextGroups.length > 1 || contextGroups[0]?.id !== "";
 
   return (
     <div
@@ -70,7 +92,7 @@ export default function TopBar({ onAppearance }: { onAppearance?: () => void }) 
                   letterSpacing: "0.03em",
                 }}
               >
-                ACTIVE ENGAGEMENT
+                {activeProjectName ?? "ACTIVE ENGAGEMENT"}
               </span>
               <span style={{ fontSize: 13, fontWeight: 600 }}>
                 {activeEngagement.codename} ·{" "}
@@ -101,15 +123,33 @@ export default function TopBar({ onAppearance }: { onAppearance?: () => void }) 
         >
           Switch context
         </div>
-        {activeList.map((e) => (
-          <MenuItem
-            key={e.id}
-            icon="Target"
-            label={`${e.codename} · ${e.client}`}
-            sub={`${e.id} · ${e.scope}`}
-            active={e.id === activeEngagement.id}
-            onClick={() => setActiveEngagementId(e.id)}
-          />
+        {contextGroups.map((g) => (
+          <React.Fragment key={g.id || "unassigned"}>
+            {showGroupHeaders && (
+              <div
+                style={{
+                  padding: "8px 10px 3px",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: "0.03em",
+                  color: "var(--text-3)",
+                  textTransform: "uppercase",
+                }}
+              >
+                {g.name}
+              </div>
+            )}
+            {g.items.map((e) => (
+              <MenuItem
+                key={e.id}
+                icon="Target"
+                label={`${e.codename} · ${e.client}`}
+                sub={`${e.id} · ${e.scope}`}
+                active={e.id === activeEngagement.id}
+                onClick={() => setActiveEngagementId(e.id)}
+              />
+            ))}
+          </React.Fragment>
         ))}
       </Dropdown>
 

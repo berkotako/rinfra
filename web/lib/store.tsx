@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import type {
   Engagement,
+  Project,
   CanvasNode,
   CanvasEdge,
   Toast,
@@ -47,6 +48,9 @@ const DEFAULT_PREFS: Preferences = {
 interface StoreState {
   engagements: Engagement[];
   setEngagements: React.Dispatch<React.SetStateAction<Engagement[]>>;
+  // Projects group engagements; loaded globally so the top-bar selector can
+  // present engagements under their project.
+  projects: Project[];
   activeEngagementId: string;
   setActiveEngagementId: (id: string) => void;
   activeEngagement: Engagement;
@@ -102,6 +106,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const client = getClient();
 
   const [engagements, setEngagements] = useState<Engagement[]>(rest ? [] : ENGAGEMENTS);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [activeEngagementId, setActiveEngagementId] = useState("ENG-2411");
   const [nodes, setNodes] = useState<CanvasNode[]>(rest ? [] : INITIAL_NODES);
   const [edges, setEdges] = useState<CanvasEdge[]>(rest ? [] : INITIAL_EDGES);
@@ -199,6 +204,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
     }).catch((err: unknown) => handleApiError(err, "Failed to load engagements"));
   }, [rest, client, handleApiError]);
+
+  // ---- Load projects (both modes) so the top-bar selector can group
+  // engagements under their project. ----
+  useEffect(() => {
+    let alive = true;
+    client
+      .listProjects()
+      .then((p) => alive && setProjects(p))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [client]);
 
   // ---- REST mode: load topology when active engagement changes ----
   useEffect(() => {
@@ -472,6 +490,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       value={{
         engagements,
         setEngagements,
+        projects,
         activeEngagementId,
         setActiveEngagementId,
         activeEngagement,
