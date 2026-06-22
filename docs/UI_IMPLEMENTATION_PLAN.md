@@ -247,10 +247,16 @@ Also: `web/README.md` (run/build instructions, mock-data note, API seam),
 root `Makefile` targets `web-dev`, `web-build`, `web-lint`; `.gitignore` for
 `node_modules/`, `.next/`, `out/`.
 
-## 8. Explicitly out of scope (seams only)
+## 8. Status / out of scope
 
-- Real REST wiring (the `RInfraClient` interface is the seam).
+Delivered since this plan was written: real REST wiring (`RestClient` + SSE,
+with `MockClient` as the offline fallback), auth/login, the Settings screen, the
+audit-log feed, and ATT&CK Navigator export. The top-bar engagement selector is
+grouped by project, and the Emulation screen supports both project- and
+engagement-scope runs.
+
+Still out of scope (genuine seams only):
 - Serving the static export from `cmd/rinfra-server` (`go:embed` later).
-- Settings screen, audit-log view, SIEM/EDR validation phase (deferred in
-  CLAUDE.md), PDF export, ATT&CK Navigator export (buttons are stubs).
-- Auth/login.
+- The **SIEM/EDR detection-validation** phase (deferred in CLAUDE.md): live
+  detection reconciliation, coverage heatmaps, detection-as-code export.
+- PDF export of the engagement report (button is a stub).

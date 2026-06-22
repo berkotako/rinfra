@@ -2,9 +2,11 @@
 
 This checklist documents how to verify the Phase 4 cloud provisioning on a
 throwaway DigitalOcean account. The same pattern (credential store → deploy
-→ verify → teardown) applies to AWS, GCP, and Azure once those providers have
-their standalone `TODO(live)` seams filled in (DigitalOcean's are wired via
-godo and unit-tested).
+→ verify → teardown) applies to AWS, GCP, and Azure — all four providers now
+have their standalone API methods wired against official SDKs (DigitalOcean →
+godo, AWS → aws-sdk-go-v2, GCP → google.golang.org/api, Azure →
+azure-sdk-for-go) and unit-tested against httptest servers / fake transports.
+What remains is per-provider live validation against real accounts.
 
 ## Prerequisites
 
@@ -198,9 +200,11 @@ The same flow applies to AWS, GCP, and Azure. The credential key names differ:
 | GCP | `GOOGLE_CREDENTIALS` (SA JSON), `GOOGLE_PROJECT` |
 | Azure | `ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`, `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET` |
 
-DigitalOcean's standalone API methods (ConfigureIngress, AssignStaticIP,
-ManageDNS, Destroy, SweepOrphans) are wired against the live DO API via `godo`
-and unit-tested against an httptest fake. AWS/GCP/Azure still have `TODO(live)`
-stubs for their standalone API calls but are structurally complete and
-compile-verified; fill those in and run through this checklist pattern on each
-cloud's throwaway account.
+All four providers' standalone API methods (ConfigureIngress, AssignStaticIP,
+ManageDNS, Destroy, SweepOrphans) are wired against their official SDKs
+(DigitalOcean → `godo`, AWS → `aws-sdk-go-v2`, GCP → `google.golang.org/api`,
+Azure → `azure-sdk-for-go`) and unit-tested against httptest servers / fake
+transports. What remains per provider is **live validation**: run through this
+checklist pattern on each cloud's throwaway account. (Azure provisions
+SSH-key-only Linux VMs — supply `RINFRA_SSH_PUBLIC_KEY` in the engagement
+credentials.)
