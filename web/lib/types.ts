@@ -224,6 +224,15 @@ export interface CoverageTactic {
   techniques: CoverageTechnique[];
 }
 
+// ProjectRunResult is the outcome of launching a scenario at project scope:
+// which engagements started a run and which were skipped (with the reason).
+export interface ProjectRunResult {
+  projectId: string;
+  scenarioId: string;
+  started: { engagementId: string; runId: string }[];
+  skipped: { engagementId: string; reason: string }[];
+}
+
 export interface Coverage {
   engagementId: string;
   tactics: CoverageTactic[];

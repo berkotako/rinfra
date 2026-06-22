@@ -82,6 +82,10 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			r.Post("/members", h.addProjectMember)
 			r.Delete("/members/{userId}", h.removeProjectMember)
 			r.Get("/engagements", h.listProjectEngagements)
+			// Project-scope emulation: run a scenario across all engagements,
+			// and read aggregated coverage.
+			r.Post("/runs", h.startProjectRun)
+			r.Get("/coverage", h.getProjectCoverage)
 		})
 
 		// Engagements.

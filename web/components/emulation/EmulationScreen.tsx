@@ -9,7 +9,7 @@ import { deployedC2FromNode, c2SupportsTactic, SCENARIOS, SAMPLE_INDEX_YAML } fr
 import TechniqueDetail from "./TechniqueDetail";
 import ScenarioBuilder from "./ScenarioBuilder";
 import RunGantt from "./RunGantt";
-import type { NodeStatus, Technique, DeployedC2, Scenario, OperatorSession } from "../../lib/types";
+import type { NodeStatus, Technique, DeployedC2, Scenario, OperatorSession, ProjectRunResult } from "../../lib/types";
 
 type StepStatus = "pending" | "running" | "done" | "detected" | "manual";
 
@@ -103,6 +103,10 @@ export default function EmulationScreen() {
   const [importText, setImportText] = useState(SAMPLE_INDEX_YAML);
   const [timeline, setTimeline] = useState<Record<number, { start: number; end?: number }>>({});
   const [nowTick, setNowTick] = useState(0);
+  // Run scope: a single engagement, or every engagement in its project.
+  const [scope, setScope] = useState<"engagement" | "project">("engagement");
+  const [projectRunResult, setProjectRunResult] = useState<ProjectRunResult | null>(null);
+  const [projectRunning, setProjectRunning] = useState(false);
   const runStartRef = useRef<number>(0);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const runIdRef = useRef<string | null>(null);
@@ -311,7 +315,34 @@ export default function EmulationScreen() {
     [client, pushToast, markStep]
   );
 
+  const projectId = activeEngagement.projectId ?? "";
+
+  // Project-scope run: fan the scenario out across every engagement in the
+  // project (each gated server-side by its own authorization). Shows which
+  // engagements started and which were skipped.
+  const runProject = () => {
+    if (!projectId || projectRunning) return; // guard against double-submit
+    setProjectRunning(true);
+    setProjectRunResult(null);
+    pushToast(`Launching ${scenario.name} across the project…`, "info");
+    client.startProjectRun(projectId, scenarioId).then((res) => {
+      setProjectRunResult(res);
+      pushToast(
+        `Project run: ${res.started.length} engagement(s) launched, ${res.skipped.length} skipped`,
+        res.started.length > 0 ? "ok" : "danger"
+      );
+    }).catch((err: unknown) => {
+      pushToast(err instanceof Error ? err.message : "Failed to start project run", "danger");
+    }).finally(() => {
+      setProjectRunning(false);
+    });
+  };
+
   const run = () => {
+    if (scope === "project") {
+      runProject();
+      return;
+    }
     if (runnableCount === 0) return;
     timers.current.forEach(clearTimeout);
     timers.current = [];
@@ -898,7 +929,32 @@ export default function EmulationScreen() {
                   </div>
                 </div>
               </div>
-              {running ? (
+              {projectId && (
+                <div className="seg" style={{ marginBottom: 10, width: "100%" }}>
+                  <button
+                    className={scope === "engagement" ? "active" : ""}
+                    onClick={() => setScope("engagement")}
+                  >
+                    This engagement
+                  </button>
+                  <button
+                    className={scope === "project" ? "active" : ""}
+                    onClick={() => setScope("project")}
+                  >
+                    Whole project
+                  </button>
+                </div>
+              )}
+              {scope === "project" ? (
+                <button
+                  className="btn primary"
+                  style={{ width: "100%", justifyContent: "center" }}
+                  onClick={run}
+                  disabled={projectRunning}
+                >
+                  <Icons.Play size={15} /> {projectRunning ? "Launching…" : "Run across project"}
+                </button>
+              ) : running ? (
                 <button
                   className="btn"
                   style={{ width: "100%", justifyContent: "center" }}
@@ -916,6 +972,27 @@ export default function EmulationScreen() {
                   <Icons.Play size={15} /> {done > 0 ? "Re-run scenario" : "Run scenario"}
                 </button>
               )}
+              {scope === "project" && projectRunResult && (
+                <div style={{ marginTop: 10, fontSize: 12 }}>
+                  <div style={{ color: "var(--text-2)", marginBottom: 6 }}>
+                    <b style={{ color: "var(--ok)" }}>{projectRunResult.started.length}</b> launched
+                    {", "}
+                    <b style={{ color: "var(--text-4)" }}>{projectRunResult.skipped.length}</b> skipped
+                  </div>
+                  {projectRunResult.started.map((s) => (
+                    <div key={s.engagementId} style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
+                      <span className="status-dot live" />
+                      <span style={{ color: "var(--text-2)" }}>{s.engagementId}</span>
+                    </div>
+                  ))}
+                  {projectRunResult.skipped.map((s) => (
+                    <div key={s.engagementId} style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2 }} title={s.reason}>
+                      <span className="status-dot" />
+                      <span style={{ color: "var(--text-4)" }}>{s.engagementId} — skipped</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div
                 style={{
                   fontSize: 11,
@@ -925,7 +1002,9 @@ export default function EmulationScreen() {
                   lineHeight: 1.5,
                 }}
               >
-                {liveC2s.length === 0
+                {scope === "project"
+                  ? "Runs the scenario against every engagement in the project — each gated by its own authorization."
+                  : liveC2s.length === 0
                   ? "No live C2 server — deploy a teamserver to run automated emulation."
                   : c2Id === AUTO
                   ? `Auto-routing each technique to a capable live agent. ${
