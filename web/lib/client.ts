@@ -450,6 +450,19 @@ const MOCK_MEMBERS: ProjectMember[] = [
   { projectId: "p-globex", userId: "u-op1" },
 ];
 
+// Per-engagement mock topology so switching engagements in the demo reflects the
+// selected one. Only the default engagement ships with deployed infrastructure;
+// others start empty until you build them (and edits persist per engagement for
+// the session). This mirrors how REST mode scopes topology by engagement.
+const MOCK_TOPOLOGIES: Record<string, { nodes: CanvasNode[]; edges: CanvasEdge[] }> = {
+  "ENG-2411": { nodes: INITIAL_NODES, edges: INITIAL_EDGES },
+};
+
+function mockTopology(engagementId: string): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  const t = MOCK_TOPOLOGIES[engagementId];
+  return t ? { nodes: [...t.nodes], edges: [...t.edges] } : { nodes: [], edges: [] };
+}
+
 let _mockSeq = 1;
 
 // ---------- MockClient ----------
@@ -612,8 +625,7 @@ export class MockClient implements RInfraClient {
   }
 
   async getTopology(engagementId: string): Promise<{ nodes: CanvasNode[]; edges: CanvasEdge[] }> {
-    void engagementId;
-    return { nodes: INITIAL_NODES, edges: INITIAL_EDGES };
+    return mockTopology(engagementId);
   }
 
   async putTopology(
@@ -621,7 +633,7 @@ export class MockClient implements RInfraClient {
     nodes: CanvasNode[],
     edges: CanvasEdge[]
   ): Promise<{ nodes: CanvasNode[]; edges: CanvasEdge[] }> {
-    void engagementId;
+    MOCK_TOPOLOGIES[engagementId] = { nodes, edges };
     return { nodes, edges };
   }
 
@@ -680,10 +692,9 @@ export class MockClient implements RInfraClient {
   }
 
   async listDeployedC2(engagementId?: string): Promise<DeployedC2[]> {
-    void engagementId;
-    return INITIAL_NODES.map(deployedC2FromNode).filter(
-      (d): d is DeployedC2 => d !== null
-    );
+    return mockTopology(engagementId ?? "").nodes
+      .map(deployedC2FromNode)
+      .filter((d): d is DeployedC2 => d !== null);
   }
 
   async listScenarios(): Promise<Scenario[]> {
