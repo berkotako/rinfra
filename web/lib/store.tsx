@@ -49,8 +49,11 @@ interface StoreState {
   engagements: Engagement[];
   setEngagements: React.Dispatch<React.SetStateAction<Engagement[]>>;
   // Projects group engagements; loaded globally so the top-bar selector can
-  // present engagements under their project.
+  // present engagements under their project. refreshProjects re-syncs after
+  // project CRUD elsewhere (e.g. the Projects screen) so the selector never
+  // shows a deleted/renamed project.
   projects: Project[];
+  refreshProjects: () => Promise<void>;
   activeEngagementId: string;
   setActiveEngagementId: (id: string) => void;
   activeEngagement: Engagement;
@@ -205,18 +208,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }).catch((err: unknown) => handleApiError(err, "Failed to load engagements"));
   }, [rest, client, handleApiError]);
 
-  // ---- Load projects (both modes) so the top-bar selector can group
-  // engagements under their project. ----
-  useEffect(() => {
-    let alive = true;
-    client
-      .listProjects()
-      .then((p) => alive && setProjects(p))
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
+  // ---- Projects (both modes) so the top-bar selector can group engagements
+  // under their project. refreshProjects is exposed so screens that mutate
+  // projects can re-sync the global list. ----
+  const refreshProjects = useCallback(async () => {
+    try {
+      setProjects(await client.listProjects());
+    } catch {
+      // Non-critical context; leave the previous list in place on failure.
+    }
   }, [client]);
+
+  useEffect(() => {
+    void refreshProjects();
+  }, [refreshProjects]);
 
   // ---- REST mode: load topology when active engagement changes ----
   useEffect(() => {
@@ -491,6 +496,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         engagements,
         setEngagements,
         projects,
+        refreshProjects,
         activeEngagementId,
         setActiveEngagementId,
         activeEngagement,
