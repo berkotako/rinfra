@@ -1,6 +1,6 @@
 .PHONY: build vet test test-unit-light test-cloud run fmt tidy web-dev web-build web-lint \
         db-up db-down migrate-up migrate-down test-integration dev \
-        c2-harness-up c2-harness-down test-c2live
+        c2-harness-up c2-harness-down test-c2live test-cloudlive
 
 build:
 	go build ./...
@@ -113,8 +113,9 @@ c2-harness-down:
 # Run the opt-in c2live tests. The local sshd-harness defaults are only filled
 # in when the harness key exists (i.e. you ran c2-harness-up); otherwise the SSH
 # vars are left untouched so the deploy harness self-skips and an env-gated
-# framework smoke (e.g. RINFRA_SLIVER_OPERATOR_CONFIG=... make test-c2live) runs
-# on its own. Any SSH vars you set yourself are always honoured.
+# framework smoke runs on its own. The per-framework operator smokes self-skip
+# unless their endpoint env is set (RINFRA_SLIVER_OPERATOR_CONFIG, RINFRA_MYTHIC_URL,
+# RINFRA_MSF_RPC_URL — see docs/RUNBOOK_C2.md). Any SSH vars you set are honoured.
 test-c2live:
 	@if [ -f .harness/keys/harness ]; then \
 		: "$${RINFRA_C2LIVE_SSH_ADDR:=localhost:2222}"; \
@@ -123,3 +124,9 @@ test-c2live:
 		export RINFRA_C2LIVE_SSH_ADDR RINFRA_C2LIVE_SSH_USER RINFRA_C2LIVE_SSH_KEY; \
 	fi; \
 	go test -tags c2live -count=1 -v ./internal/c2/...
+
+# Cloud-side credential smoke (read-only; no resources created). Self-skips
+# unless the provider's token env is set (e.g. DIGITALOCEAN_TOKEN). See
+# docs/RUNBOOK_C2.md.
+test-cloudlive:
+	go test -tags cloudlive -count=1 -v ./internal/cloud/...

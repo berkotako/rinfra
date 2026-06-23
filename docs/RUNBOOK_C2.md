@@ -80,10 +80,62 @@ RINFRA_SLIVER_OPERATOR_CONFIG=./operator.cfg make test-c2live
 proves auth + a real round-trip (an empty session list is fine). The smoke
 self-skips when the env var is unset.
 
+### Mythic operator smoke
+
+Validates the live GraphQL client against a deployed Mythic teamserver — it
+authenticates to `/auth` (or uses a pre-issued API token) and runs a GraphQL
+query, the path most exposed to schema drift.
+
+```sh
+RINFRA_MYTHIC_URL=https://<host>:7443 \
+RINFRA_MYTHIC_USER=mythic_admin RINFRA_MYTHIC_PASSWORD=... \
+RINFRA_MYTHIC_INSECURE_TLS=1 \
+make test-c2live
+```
+
+`TestC2Live_MythicCallbacks` authenticates and issues `Callbacks` (a
+no-side-effect read). Set `RINFRA_MYTHIC_API_TOKEN` instead of user/password to
+use a pre-issued token. Self-skips unless `RINFRA_MYTHIC_URL` is set.
+
+### Metasploit operator smoke
+
+Validates the live msgpack-RPC client against a deployed `msfrpcd` — it performs
+`auth.login` and a `session.list`, the path most exposed to RPC method/field
+drift.
+
+```sh
+RINFRA_MSF_RPC_URL=https://<host>:55553 \
+RINFRA_MSF_RPC_USER=msf RINFRA_MSF_RPC_PASSWORD=... \
+make test-c2live
+```
+
+`TestC2Live_MetasploitSessionList` logs in and lists sessions (no-side-effect).
+Self-skips unless `RINFRA_MSF_RPC_URL` is set.
+
 > Adding more frameworks: drop a `//go:build c2live` test in the framework's
-> package that reads its endpoint/credentials from env and skips otherwise
-> (e.g. Mythic → `/auth` + a GraphQL query; Metasploit → `auth.login` +
-> `session.list`). Keep them no-side-effect.
+> package that reads its endpoint/credentials from env and skips otherwise, and
+> calls a no-side-effect read (Sliver `Sessions`, Mythic `Callbacks`, Metasploit
+> `SessionList`). Keep them no-side-effect.
+
+---
+
+## 2b. Cloud-side credential smoke (read-only)
+
+The cloud-side counterpart to the C2 smokes: validates that a real engagement
+cloud token authenticates against the live provider API and round-trips, using a
+strictly **read-only** call (no resources created or destroyed) — so it never
+risks spend or orphaned infra. This is the seam the httptest-backed unit tests
+can't cover (real API surface + auth).
+
+DigitalOcean today (`TestCloudLive_DigitalOceanAccount` calls `Account.Get`):
+
+```sh
+DIGITALOCEAN_TOKEN=dop_v1_... make test-cloudlive
+```
+
+Self-skips unless `DIGITALOCEAN_TOKEN` is set. Add a sibling under another
+provider package (`//go:build cloudlive`) the same way — read its token from the
+provider's credential env and call a read-only endpoint.
 
 ---
 
