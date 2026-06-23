@@ -241,6 +241,35 @@ func TestRoute_PlatformMismatchBlocks(t *testing.T) {
 	}
 }
 
+// TestRequiredPlatform_DiscoveryPrimitivesAreWindows guards the routing fix for
+// the net.exe-backed discovery primitives: they must pin to Windows so a routed
+// engagement never dispatches `net view`/`net user` to a Linux/macOS agent.
+func TestRequiredPlatform_DiscoveryPrimitivesAreWindows(t *testing.T) {
+	for _, id := range []string{"T1018", "T1087.001", "T1069.001", "T1007", "T1135"} {
+		if got := service.RequiredPlatform(domain.Technique{AttackID: id}); got != "windows" {
+			t.Errorf("RequiredPlatform(%s) = %q, want windows", id, got)
+		}
+	}
+}
+
+// TestRoute_DiscoveryPrimitiveBlocksOnLinuxAgent confirms the pin takes effect
+// through Route: a Windows-only discovery technique is blocked when only a Linux
+// agent is available.
+func TestRoute_DiscoveryPrimitiveBlocksOnLinuxAgent(t *testing.T) {
+	eng := scopedEngagement()
+	tech := domain.Technique{AttackID: "T1018", Tactic: "discovery"} // net view → windows
+	cands := []service.Candidate{{
+		Framework: "sliver", Tier: c2.TierOrchestrated,
+		Caps:     c2.Capabilities{Platforms: []string{"windows", "linux", "macos"}},
+		Operator: idOperator{"sliver"},
+		Sessions: []c2.Session{linuxSession("l1", "10.0.0.7")},
+	}}
+	op, _, disp, _ := service.Route(eng, tech, cands)
+	if op != nil || disp != domain.ExecBlockedByScope {
+		t.Errorf("op=%v disp=%q, want nil + blocked_by_scope", op, disp)
+	}
+}
+
 func TestRoute_OutOfScopeBlocks(t *testing.T) {
 	eng := scopedEngagement()
 	tech := domain.Technique{AttackID: "T1082", Tactic: "discovery"}
