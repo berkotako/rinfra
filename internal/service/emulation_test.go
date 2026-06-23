@@ -374,6 +374,134 @@ func TestGetCoverage_Rollup(t *testing.T) {
 	}
 }
 
+// chainOperator is a fake Operator for the fact-chaining test: T1016 yields
+// output containing a routable IP (parsed into host.ip); any technique with a
+// "command" input echoes that input back so the test can observe ${fact}
+// substitution.
+type chainOperator struct{}
+
+func (chainOperator) StartListener(_ context.Context, _ c2.ListenerSpec) error { return nil }
+func (chainOperator) Sessions(_ context.Context) ([]c2.Session, error) {
+	return []c2.Session{{ID: "s1", Host: "10.10.10.10", User: "SYSTEM"}}, nil
+}
+func (chainOperator) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	out := "ran " + t.AttackID
+	if cmd := t.Inputs["command"]; cmd != "" {
+		out = cmd // echo the (substituted) command so the test sees the fact value
+	} else if t.AttackID == "T1016" {
+		out = "IPv4 Address. . . : 10.20.30.40"
+	}
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: out,
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+
+// chainResolver returns the chainOperator (legacy single-operator path).
+type chainResolver struct{}
+
+func (chainResolver) Resolve(_ context.Context, _ domain.Engagement) (c2.Operator, string, bool) {
+	return chainOperator{}, "s1", true
+}
+
+func resultByID(run domain.ScenarioRun, id string) (domain.Result, bool) {
+	for _, r := range run.Results {
+		if r.TechniqueAttackID == id {
+			return r, true
+		}
+	}
+	return domain.Result{}, false
+}
+
+// TestEmulation_FactChaining_ProduceConsume verifies that a discovery technique's
+// output is parsed into a fact and substituted into a later technique's input
+// (${host.ip}) — the core fact-chaining behaviour, exercised through the live
+// service run path.
+func TestEmulation_FactChaining_ProduceConsume(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	svcEmu.WithResolver(chainResolver{})
+
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "chain",
+		Techniques: []domain.Technique{
+			{AttackID: "T1016", Name: "Network Config"}, // produces host.ip
+			{AttackID: "T1059.001", Name: "PowerShell",
+				Inputs:   map[string]string{"command": "ping ${host.ip}"},
+				Requires: []string{"host.ip"}},
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	consumer, ok := resultByID(run, "T1059.001")
+	if !ok {
+		t.Fatal("consumer technique missing from results")
+	}
+	if consumer.Status != domain.ExecSuccess {
+		t.Errorf("consumer status: want success, got %s (%s)", consumer.Status, consumer.Output)
+	}
+	if consumer.Output != "ping 10.20.30.40" {
+		t.Errorf("expected ${host.ip} substituted to the discovered IP, got output %q", consumer.Output)
+	}
+}
+
+// TestEmulation_FactChaining_RequirementSkips verifies that a technique whose
+// required fact was never collected is honestly recorded not_run (not executed),
+// through the live run path.
+func TestEmulation_FactChaining_RequirementSkips(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	svcEmu.WithResolver(chainResolver{})
+
+	// Consumer first, with no producer before it → requirement unmet.
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "ungated",
+		Techniques: []domain.Technique{
+			{AttackID: "T1059.001", Name: "PowerShell", Requires: []string{"host.ip"}},
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	res, ok := resultByID(run, "T1059.001")
+	if !ok {
+		t.Fatal("technique missing from results")
+	}
+	if res.Status != domain.ExecNotRun {
+		t.Errorf("want not_run for unmet requirement, got %s", res.Status)
+	}
+	if res.Output == "" {
+		t.Error("expected a reason explaining the skipped requirement")
+	}
+}
+
 // TestGetCoverage_IncludesRanNonCatalogTechnique verifies that a technique
 // which ran but is NOT part of any built-in scenario still shows up in the
 // coverage rollup. Previously the heatmap universe was seeded only from the

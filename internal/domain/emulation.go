@@ -20,6 +20,12 @@ type Technique struct {
 	Inputs      map[string]string // parameter bindings for the procedure
 	Description string            // plain-language summary (operator-authored TTPs)
 	Commands    []string          // portable procedure commands (operator-authored TTPs)
+	// Requires lists fact keys (e.g. "host.ip") that must have been collected by
+	// an earlier technique in the same run before this one can execute. When a
+	// required fact is absent the technique is recorded not_run (an honest
+	// non-attempt) rather than executed against a missing target. Inputs may also
+	// reference collected facts with ${fact.key} tokens, resolved at run time.
+	Requires []string
 }
 
 // TechniqueSource identifies the public library a technique's procedure is

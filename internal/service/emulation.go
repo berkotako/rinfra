@@ -524,6 +524,7 @@ func (s *EmulationService) orchRunWithHooks(
 		opExec = op
 	}
 
+	planner := emulation.NewPlanner()
 	for _, t := range sc.Techniques {
 		var res domain.Result
 		if opExec == nil {
@@ -537,9 +538,19 @@ func (s *EmulationService) orchRunWithHooks(
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
 			}
+		} else if prepared, skip, reason := planner.Prepare(t); skip {
+			// A required fact / input reference was not collected by an earlier
+			// technique — an honest non-attempt, not a fabricated run.
+			res = domain.Result{
+				TechniqueAttackID: t.AttackID,
+				Status:            domain.ExecNotRun,
+				Output:            reason,
+				StartedAt:         time.Now(),
+				FinishedAt:        time.Now(),
+			}
 		} else {
 			var err error
-			res, err = opExec.Execute(ctx, sessionID, t)
+			res, err = opExec.Execute(ctx, sessionID, prepared)
 			if err != nil {
 				res = domain.Result{
 					TechniqueAttackID: t.AttackID,
@@ -549,6 +560,7 @@ func (s *EmulationService) orchRunWithHooks(
 					Err:               err.Error(),
 				}
 			}
+			planner.Observe(prepared, res)
 		}
 
 		s.recordResult(ctx, run, res)
@@ -638,12 +650,27 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 		Status:       domain.ExecRunning,
 		StartedAt:    time.Now(),
 	}
+	planner := emulation.NewPlanner()
 	for _, t := range sc.Techniques {
-		op, sid, disp, detail := Route(eng, t, cands)
+		// Fact-aware gating/substitution before routing: a technique whose
+		// requirement or ${fact} input was not collected by an earlier step is an
+		// honest not_run, not a fabricated attempt.
+		prepared, skip, reason := planner.Prepare(t)
+		if skip {
+			s.recordResult(ctx, run, domain.Result{
+				TechniqueAttackID: t.AttackID,
+				Status:            domain.ExecNotRun,
+				Output:            reason,
+				StartedAt:         time.Now(),
+				FinishedAt:        time.Now(),
+			})
+			continue
+		}
+		op, sid, disp, detail := Route(eng, prepared, cands)
 		var res domain.Result
 		if op != nil {
 			var err error
-			res, err = op.Execute(ctx, sid, t)
+			res, err = op.Execute(ctx, sid, prepared)
 			if err != nil {
 				res = domain.Result{
 					TechniqueAttackID: t.AttackID,
@@ -653,6 +680,7 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 					Err:               err.Error(),
 				}
 			}
+			planner.Observe(prepared, res)
 		} else {
 			// No operator selected — record the precise reason. For an infra
 			// failure (ExecFailed) the detail carries the operator error so it

@@ -120,6 +120,17 @@ per-adapter `switch t.AttackID` tables):
    A framework that doesn't implement a primitive returns `ExecUnsupported` (no
    fabricated attempt). Scripted-tier allowlists (Havoc/PoshC2) are **derived**
    from "catalog × renderer", not hand-maintained.
+3. **Fact-aware sequencing** (`internal/emulation` `FactStore`/`Planner`) — a run
+   is executed by an "atomic planner": techniques run in scenario order, but each
+   can consume facts an earlier one produced. After a successful technique its
+   output is parsed (per primitive kind) into a per-run `FactStore` (currently
+   routable IPv4 → `host.ip`; the parser switch is the extension point). A later
+   technique may reference collected facts in its `Inputs` with `${fact.key}`
+   tokens (resolved at run time) and declare `Requires []string` prerequisite
+   keys; an unmet requirement or unresolved token records the technique `not_run`
+   (an honest non-attempt), never a fabricated run. **Deferred (seams only):**
+   multi-value fan-out (run once per discovered value) and an autonomous
+   next-technique decision engine.
 
 ## Tech stack & conventions
 
