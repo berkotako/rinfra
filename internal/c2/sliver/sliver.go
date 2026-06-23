@@ -34,6 +34,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 func init() { c2.Register(&provider{}) }
@@ -249,7 +250,8 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 
 	cmd, err := techniqueToSliverCommand(t)
 	if err != nil {
-		// Technique is not supported by Sliver — should not reach Fronted/unsupported.
+		// Technique has no catalog mapping or Sliver can't render its primitive
+		// — record it unsupported (no fabricated attempt).
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecUnsupported,
@@ -280,80 +282,55 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	}, nil
 }
 
-// techniqueToSliverCommand maps a portable Technique to a Sliver shell command.
-// This is a REFERENCE translation: the SourceID points to an Atomic Red Team
-// test or Caldera ability; the mapping tells Sliver which execute/shell invocation
-// corresponds to that ATT&CK procedure. No payload content is authored — only
-// the command verb and the parameters supplied by the Technique are used.
+// techniqueToSliverCommand compiles a portable Technique to a Sliver operator
+// command. It is a two-step REFERENCE translation, authoring no payload content:
 //
-// In production this map is loaded from the technique catalog YAMLs
-// (see Phase 6 / internal/emulation/catalog). The inline table below is the
-// MVP seed for the most common ATT&CK tactics.
+//  1. ttp.Compile maps the ATT&CK technique to a portable c2.Primitive (the
+//     open-ended, data-driven catalog — see internal/emulation/ttp); and
+//  2. renderSliverPrimitive turns that primitive into Sliver's native
+//     execute/shell invocation (the small, framework-specific surface below).
+//
+// A technique with no catalog mapping, or a primitive Sliver can't render,
+// returns an error so the caller records it unsupported.
 func techniqueToSliverCommand(t domain.Technique) (string, error) {
-	// Mapping from ATT&CK technique ID → Sliver execute invocation.
-	// Parameters come from t.Inputs — no hardcoded payload content.
-	switch t.AttackID {
-	case "T1059.001": // Command and Scripting Interpreter: PowerShell
-		script := t.Inputs["command"]
-		if script == "" {
-			script = "whoami"
-		}
-		return fmt.Sprintf("execute -o powershell -c \"%s\"", escapeShell(script)), nil
-
-	case "T1059.003": // Command and Scripting Interpreter: Windows Command Shell
-		script := t.Inputs["command"]
-		if script == "" {
-			script = "whoami"
-		}
-		return fmt.Sprintf("shell %s", script), nil
-
-	case "T1082": // System Information Discovery
-		return "sysinfo", nil
-
-	case "T1057": // Process Discovery
-		return "ps", nil
-
-	case "T1049": // System Network Connections Discovery
-		return "netstat", nil
-
-	case "T1016": // System Network Configuration Discovery
-		return "ifconfig", nil
-
-	case "T1083": // File and Directory Discovery
-		path := t.Inputs["path"]
-		if path == "" {
-			path = "."
-		}
-		return fmt.Sprintf("ls %s", path), nil
-
-	case "T1005": // Data from Local System
-		path := t.Inputs["path"]
-		if path == "" {
-			return "", fmt.Errorf("T1005 requires inputs.path")
-		}
-		return fmt.Sprintf("download %s", path), nil
-
-	case "T1053.005": // Scheduled Task/Job: Scheduled Task
-		taskName := t.Inputs["task_name"]
-		if taskName == "" {
-			taskName = "RInfraTest"
-		}
-		return fmt.Sprintf("execute schtasks /create /tn \"%s\" /tr whoami /sc once /st 00:00", taskName), nil
-
-	case "T1547.001": // Boot or Logon Autostart: Registry Run Keys
-		key := t.Inputs["registry_key"]
-		if key == "" {
-			key = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-		}
-		value := t.Inputs["registry_value"]
-		if value == "" {
-			value = "RInfraTest"
-		}
-		return fmt.Sprintf("registry write --hive HKCU --path %q --v %q --d whoami", key, value), nil
-
-	default:
-		return "", fmt.Errorf("sliver: no command mapping for technique %s (source: %s id: %s)",
+	prim, ok, err := ttp.Compile(t)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("sliver: no catalog mapping for technique %s (source: %s id: %s)",
 			t.AttackID, t.Source, t.SourceID)
+	}
+	return renderSliverPrimitive(prim)
+}
+
+// renderSliverPrimitive renders a portable primitive into a Sliver operator
+// command. Parameters come from the resolved primitive args — no hardcoded
+// payload content. Primitives Sliver does not implement return an error.
+func renderSliverPrimitive(p c2.Primitive) (string, error) {
+	switch p.Kind {
+	case c2.PrimPowerShell:
+		return fmt.Sprintf("execute -o powershell -c \"%s\"", escapeShell(p.Arg("script"))), nil
+	case c2.PrimShell:
+		return fmt.Sprintf("shell %s", p.Arg("command")), nil
+	case c2.PrimSysInfo:
+		return "sysinfo", nil
+	case c2.PrimProcessList:
+		return "ps", nil
+	case c2.PrimNetConnections:
+		return "netstat", nil
+	case c2.PrimNetConfig:
+		return "ifconfig", nil
+	case c2.PrimFileList:
+		return fmt.Sprintf("ls %s", p.Arg("path")), nil
+	case c2.PrimDownload:
+		return fmt.Sprintf("download %s", p.Arg("path")), nil
+	case c2.PrimScheduledTask:
+		return fmt.Sprintf("execute schtasks /create /tn \"%s\" /tr whoami /sc once /st 00:00", p.Arg("task_name")), nil
+	case c2.PrimRegistryRunKey:
+		return fmt.Sprintf("registry write --hive HKCU --path %q --v %q --d whoami", p.Arg("registry_key"), p.Arg("registry_value")), nil
+	default:
+		return "", fmt.Errorf("sliver: unsupported primitive %q", p.Kind)
 	}
 }
 

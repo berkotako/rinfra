@@ -1,0 +1,99 @@
+# Portable technique → primitive catalog.
+#
+# This is the data-driven "add a TTP" surface. Each entry maps an ATT&CK
+# technique to one portable c2.Primitive plus argument bindings; every C2
+# framework knows how to render the (small, closed) set of primitives, so a
+# technique added here is automatically available on every framework that
+# supports its primitive — with NO Go changes. A framework that doesn't support
+# the primitive reports the technique unsupported (honest BAS taxonomy).
+#
+# Schema per entry:
+#   attack_id: "T1059.001"        # ATT&CK technique ID (dispatch key; required)
+#   name:      "..."              # human-readable (optional, documentation)
+#   tactic:    execution          # ATT&CK tactic slug (optional, documentation)
+#   primitive: powershell         # one of the c2.PrimitiveKind values (required)
+#   args:                         # optional; resolved into Primitive.Args
+#     <arg_name>:
+#       from:     <input_key>     # source key in technique.Inputs (optional)
+#       default:  <value>         # used when the input is absent/empty (optional)
+#       required: true            # error if unresolved (optional, default false)
+#
+# No payload content, shellcode, or exploit material belongs in this file — only
+# the portable verb + the parameters the technique supplies.
+techniques:
+  - attack_id: "T1059.001"
+    name: "Command and Scripting Interpreter: PowerShell"
+    tactic: execution
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: whoami
+
+  - attack_id: "T1059.003"
+    name: "Command and Scripting Interpreter: Windows Command Shell"
+    tactic: execution
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: whoami
+
+  - attack_id: "T1082"
+    name: "System Information Discovery"
+    tactic: discovery
+    primitive: sysinfo
+
+  - attack_id: "T1057"
+    name: "Process Discovery"
+    tactic: discovery
+    primitive: process_list
+
+  - attack_id: "T1049"
+    name: "System Network Connections Discovery"
+    tactic: discovery
+    primitive: net_connections
+
+  - attack_id: "T1016"
+    name: "System Network Configuration Discovery"
+    tactic: discovery
+    primitive: net_config
+
+  - attack_id: "T1083"
+    name: "File and Directory Discovery"
+    tactic: discovery
+    primitive: file_list
+    args:
+      path:
+        from: path
+        default: "."
+
+  - attack_id: "T1005"
+    name: "Data from Local System"
+    tactic: collection
+    primitive: download
+    args:
+      path:
+        from: path
+        required: true
+
+  - attack_id: "T1053.005"
+    name: "Scheduled Task/Job: Scheduled Task"
+    tactic: persistence
+    primitive: scheduled_task
+    args:
+      task_name:
+        from: task_name
+        default: RInfraTest
+
+  - attack_id: "T1547.001"
+    name: "Boot or Logon Autostart Execution: Registry Run Keys"
+    tactic: persistence
+    primitive: registry_run_key
+    args:
+      registry_key:
+        from: registry_key
+        default: 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+      registry_value:
+        from: registry_value
+        default: RInfraTest
