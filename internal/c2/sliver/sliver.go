@@ -282,6 +282,59 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	}, nil
 }
 
+// Revert undoes a persistence technique Sliver created (deletes the scheduled
+// task or Run-key). Techniques with no Sliver cleanup are reported unsupported
+// (no fabricated cleanup). Implements c2.Reverter.
+func (o *operator) Revert(ctx context.Context, sessionID string, t domain.Technique) (domain.Result, error) {
+	start := time.Now()
+	cmd, ok := sliverCleanupCommand(t)
+	if !ok {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecUnsupported,
+			Output:            "sliver: no cleanup defined for this technique",
+			StartedAt:         start,
+			FinishedAt:        time.Now(),
+		}, nil
+	}
+	output, err := o.client.Execute(ctx, sessionID, cmd)
+	fin := time.Now()
+	if err != nil {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecFailed,
+			Output:            sanitize(output),
+			StartedAt:         start,
+			FinishedAt:        fin,
+			Err:               err.Error(),
+		}, nil
+	}
+	return domain.Result{
+		TechniqueAttackID: t.AttackID,
+		Status:            domain.ExecSuccess,
+		Output:            sanitize(output),
+		StartedAt:         start,
+		FinishedAt:        fin,
+	}, nil
+}
+
+// sliverCleanupCommand renders the reverse of a persistence primitive. ok=false
+// when the technique has no catalog mapping or no defined cleanup.
+func sliverCleanupCommand(t domain.Technique) (string, bool) {
+	prim, ok, err := ttp.Compile(t)
+	if err != nil || !ok {
+		return "", false
+	}
+	switch prim.Kind {
+	case c2.PrimScheduledTask:
+		return fmt.Sprintf(`execute schtasks /delete /tn "%s" /f`, prim.Arg("task_name")), true
+	case c2.PrimRegistryRunKey:
+		return fmt.Sprintf("registry delete --hive HKCU --path %q --v %q", prim.Arg("registry_key"), prim.Arg("registry_value")), true
+	default:
+		return "", false
+	}
+}
+
 // techniqueToSliverCommand compiles a portable Technique to a Sliver operator
 // command. It is a two-step REFERENCE translation, authoring no payload content:
 //
@@ -334,6 +387,9 @@ func renderSliverPrimitive(p c2.Primitive) (string, error) {
 	case c2.PrimRegistryRunKey:
 		return fmt.Sprintf("registry write --hive HKCU --path %q --v %q --d whoami", p.Arg("registry_key"), p.Arg("registry_value")), nil
 	default:
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return "execute " + cmd, nil
+		}
 		return "", fmt.Errorf("sliver: unsupported primitive %q", p.Kind)
 	}
 }

@@ -374,6 +374,349 @@ func TestGetCoverage_Rollup(t *testing.T) {
 	}
 }
 
+// chainOperator is a fake Operator for the fact-chaining test: T1016 yields
+// output containing a routable IP (parsed into host.ip); any technique with a
+// "command" input echoes that input back so the test can observe ${fact}
+// substitution.
+type chainOperator struct{}
+
+func (chainOperator) StartListener(_ context.Context, _ c2.ListenerSpec) error { return nil }
+func (chainOperator) Sessions(_ context.Context) ([]c2.Session, error) {
+	return []c2.Session{{ID: "s1", Host: "10.10.10.10", User: "SYSTEM"}}, nil
+}
+func (chainOperator) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	out := "ran " + t.AttackID
+	if cmd := t.Inputs["command"]; cmd != "" {
+		out = cmd // echo the (substituted) command so the test sees the fact value
+	} else if t.AttackID == "T1016" {
+		out = "IPv4 Address. . . : 10.20.30.40"
+	}
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: out,
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+
+// chainResolver returns the chainOperator (legacy single-operator path).
+type chainResolver struct{}
+
+func (chainResolver) Resolve(_ context.Context, _ domain.Engagement) (c2.Operator, string, bool) {
+	return chainOperator{}, "s1", true
+}
+
+func resultByID(run domain.ScenarioRun, id string) (domain.Result, bool) {
+	for _, r := range run.Results {
+		if r.TechniqueAttackID == id {
+			return r, true
+		}
+	}
+	return domain.Result{}, false
+}
+
+// TestEmulation_FactChaining_ProduceConsume verifies that a discovery technique's
+// output is parsed into a fact and substituted into a later technique's input
+// (${host.ip}) — the core fact-chaining behaviour, exercised through the live
+// service run path.
+func TestEmulation_FactChaining_ProduceConsume(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	svcEmu.WithResolver(chainResolver{})
+
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "chain",
+		Techniques: []domain.Technique{
+			{AttackID: "T1016", Name: "Network Config"}, // produces host.ip
+			{AttackID: "T1059.001", Name: "PowerShell",
+				Inputs:   map[string]string{"command": "ping ${host.ip}"},
+				Requires: []string{"host.ip"}},
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	consumer, ok := resultByID(run, "T1059.001")
+	if !ok {
+		t.Fatal("consumer technique missing from results")
+	}
+	if consumer.Status != domain.ExecSuccess {
+		t.Errorf("consumer status: want success, got %s (%s)", consumer.Status, consumer.Output)
+	}
+	if consumer.Output != "ping 10.20.30.40" {
+		t.Errorf("expected ${host.ip} substituted to the discovered IP, got output %q", consumer.Output)
+	}
+}
+
+// captureReverter is an Operator that also implements c2.Reverter, recording
+// the AttackIDs it is asked to revert so the cleanup path can be asserted.
+type captureReverter struct{ reverted *[]string }
+
+func (captureReverter) StartListener(_ context.Context, _ c2.ListenerSpec) error { return nil }
+func (captureReverter) Sessions(_ context.Context) ([]c2.Session, error) {
+	return []c2.Session{{ID: "s1", Host: "10.10.10.10", User: "SYSTEM"}}, nil
+}
+func (captureReverter) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: "ok",
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+func (c captureReverter) Revert(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	*c.reverted = append(*c.reverted, t.AttackID)
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: "reverted",
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+
+type captureResolver struct{ op captureReverter }
+
+func (r captureResolver) Resolve(_ context.Context, _ domain.Engagement) (c2.Operator, string, bool) {
+	return r.op, "s1", true
+}
+
+// TestEmulation_Cleanup_RevertsPersistence verifies that a successfully-executed
+// persistence technique is reverted at the end of the run (via c2.Reverter),
+// that non-persistence techniques are not, and that cleanup is audited without
+// being recorded as a technique result (so coverage is not inflated).
+func TestEmulation_Cleanup_RevertsPersistence(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	var reverted []string
+	svcEmu.WithResolver(captureResolver{op: captureReverter{reverted: &reverted}})
+
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "persist",
+		Techniques: []domain.Technique{
+			{AttackID: "T1082", Name: "System Info"},        // not cleanable
+			{AttackID: "T1053.005", Name: "Scheduled Task"}, // cleanable
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	if len(reverted) != 1 || reverted[0] != "T1053.005" {
+		t.Fatalf("want exactly T1053.005 reverted, got %v", reverted)
+	}
+	if !hasAuditAction(s.audit, "emulation.cleanup", eng.ID) {
+		t.Error("expected an emulation.cleanup audit event")
+	}
+	// Cleanup must NOT appear as an extra technique result (coverage stays honest):
+	// exactly one result per executed technique.
+	n := 0
+	for _, r := range run.Results {
+		if r.TechniqueAttackID == "T1053.005" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("scheduled-task results: want 1 (cleanup not a result), got %d", n)
+	}
+}
+
+// fanoutOperator's T1016 reports two routable IPs; any technique with a
+// "command" input echoes it back so the test can count fan-out executions.
+type fanoutOperator struct{}
+
+func (fanoutOperator) StartListener(_ context.Context, _ c2.ListenerSpec) error { return nil }
+func (fanoutOperator) Sessions(_ context.Context) ([]c2.Session, error) {
+	return []c2.Session{{ID: "s1", Host: "10.10.10.10", User: "SYSTEM"}}, nil
+}
+func (fanoutOperator) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	out := "ran " + t.AttackID
+	if cmd := t.Inputs["command"]; cmd != "" {
+		out = cmd
+	} else if t.AttackID == "T1016" {
+		out = "Addr 10.20.30.40\nAddr 10.20.30.41"
+	}
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: out,
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+
+type fanoutResolver struct{}
+
+func (fanoutResolver) Resolve(_ context.Context, _ domain.Engagement) (c2.Operator, string, bool) {
+	return fanoutOperator{}, "s1", true
+}
+
+// TestEmulation_FactChaining_FanOut verifies that when a discovery technique
+// collects several values for a fact, a later technique that references it runs
+// once per value — the multi-value fan-out — through the live service path.
+func TestEmulation_FactChaining_FanOut(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	svcEmu.WithResolver(fanoutResolver{})
+
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "fanout",
+		Techniques: []domain.Technique{
+			{AttackID: "T1016", Name: "Network Config"}, // produces 2 host.ip facts
+			{AttackID: "T1059.001", Name: "PowerShell",
+				Inputs:   map[string]string{"command": "ping ${host.ip}"},
+				Requires: []string{"host.ip"}},
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	var pings []string
+	for _, r := range run.Results {
+		if r.TechniqueAttackID == "T1059.001" {
+			pings = append(pings, r.Output)
+		}
+	}
+	if len(pings) != 2 {
+		t.Fatalf("want 2 fan-out executions of the consumer, got %d (%v)", len(pings), pings)
+	}
+	want := map[string]bool{"ping 10.20.30.40": true, "ping 10.20.30.41": true}
+	for _, p := range pings {
+		if !want[p] {
+			t.Errorf("unexpected fan-out output %q", p)
+		}
+	}
+}
+
+// TestEmulation_FactChaining_RequirementSkips verifies that a technique whose
+// required fact was never collected is honestly recorded not_run (not executed),
+// through the live run path.
+func TestEmulation_FactChaining_RequirementSkips(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	svcEmu.WithResolver(chainResolver{})
+
+	// Consumer first, with no producer before it → requirement unmet.
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "ungated",
+		Techniques: []domain.Technique{
+			{AttackID: "T1059.001", Name: "PowerShell", Requires: []string{"host.ip"}},
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	res, ok := resultByID(run, "T1059.001")
+	if !ok {
+		t.Fatal("technique missing from results")
+	}
+	if res.Status != domain.ExecNotRun {
+		t.Errorf("want not_run for unmet requirement, got %s", res.Status)
+	}
+	if res.Output == "" {
+		t.Error("expected a reason explaining the skipped requirement")
+	}
+}
+
+// TestGetCoverage_IncludesRanNonCatalogTechnique verifies that a technique
+// which ran but is NOT part of any built-in scenario still shows up in the
+// coverage rollup. Previously the heatmap universe was seeded only from the
+// built-in catalog, so authored/imported techniques that were exercised were
+// silently dropped (undercounting the engagement's own coverage).
+func TestGetCoverage_IncludesRanNonCatalogTechnique(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+
+	runID, err := s.scenario.SaveRun(ctx, domain.ScenarioRun{
+		EngagementID: eng.ID,
+		ScenarioID:   "authored-x",
+		Status:       domain.ExecSuccess,
+		StartedAt:    time.Now().UTC(),
+		FinishedAt:   time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	// T1110.001 (Brute Force: Password Guessing) is in no built-in scenario and
+	// no TTP catalog entry — the exact case that used to vanish.
+	if err := s.scenario.SaveResult(ctx, runID, domain.Result{
+		TechniqueAttackID: "T1110.001", Status: domain.ExecSuccess,
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveResult: %v", err)
+	}
+
+	coverage, err := svcEmu.GetCoverage(ctx, eng.ID)
+	if err != nil {
+		t.Fatalf("GetCoverage: %v", err)
+	}
+
+	var found *service.Techniquecoverage
+	for _, tac := range coverage.Tactics {
+		for i, tc := range tac.Techniques {
+			if tc.AttackID == "T1110.001" {
+				found = &tac.Techniques[i]
+			}
+		}
+	}
+	if found == nil {
+		t.Fatal("ran technique T1110.001 missing from coverage (universe should include exercised techniques)")
+	}
+	if found.Level != service.CoverageLevelExecuted {
+		t.Errorf("T1110.001: want executed(2), got %d", found.Level)
+	}
+	if coverage.ExecutedCount < 1 {
+		t.Errorf("ExecutedCount: want >= 1, got %d", coverage.ExecutedCount)
+	}
+}
+
 // TestGetCoverage_Empty verifies that an engagement with no runs returns
 // a well-formed coverage with all levels at 0.
 func TestGetCoverage_Empty(t *testing.T) {

@@ -39,7 +39,11 @@ them as invariants; never weaken them to make a feature easier.
   audit log is immutable — no update/delete paths.
 - **Teardown must be reliable.** Orphaned infra = cost, exposure, and ToS risk.
   Provisioning is transactional where possible; every engagement supports a
-  guaranteed teardown that reconciles actual cloud state, not just our DB.
+  guaranteed teardown that reconciles actual cloud state, not just our DB. This
+  extends to **emulation artifacts**: a persistence technique (scheduled task,
+  Run key) is reverted at the end of its run via the optional `c2.Reverter`
+  capability (run in reverse order, audited as `emulation.cleanup`), so an
+  engagement leaves no orphaned persistence on the customer's host.
 
 ## Architecture
 
@@ -104,7 +108,11 @@ per-adapter `switch t.AttackID` tables):
 1. **Catalog** (`internal/emulation/ttp`, embedded `catalog.yaml`) maps an
    ATT&CK ID → a portable **`c2.Primitive`** (closed `PrimitiveKind` set:
    powershell, shell, sysinfo, process_list, net_connections, net_config,
-   file_list, download, scheduled_task, registry_run_key) plus argument bindings
+   file_list, download, scheduled_task, registry_run_key, plus the read-only
+   discovery primitives remote_system_discovery, account_discovery,
+   permission_group_discovery, service_discovery, network_share_discovery —
+   each backed by a safe Windows built-in via `c2.DiscoveryCommand`, rendered
+   uniformly by every framework with a shell) plus argument bindings
    (`from` input key, `default`, `required`). `ttp.Compile(t)` resolves a
    `Technique` to a primitive. **This is the "add a TTP" surface** — a technique
    that reuses an existing primitive is a one-entry YAML change, no Go edits.
@@ -116,6 +124,18 @@ per-adapter `switch t.AttackID` tables):
    A framework that doesn't implement a primitive returns `ExecUnsupported` (no
    fabricated attempt). Scripted-tier allowlists (Havoc/PoshC2) are **derived**
    from "catalog × renderer", not hand-maintained.
+3. **Fact-aware sequencing** (`internal/emulation` `FactStore`/`Planner`) — a run
+   is executed by an "atomic planner": techniques run in scenario order, but each
+   can consume facts an earlier one produced. After a successful technique its
+   output is parsed (per primitive kind) into a per-run `FactStore` (currently
+   routable IPv4 → `host.ip`; the parser switch is the extension point). A later
+   technique may reference collected facts in its `Inputs` with `${fact.key}`
+   tokens (resolved at run time) and declare `Requires []string` prerequisite
+   keys; an unmet requirement or unresolved token records the technique `not_run`
+   (an honest non-attempt), never a fabricated run. When a referenced fact has
+   several values the technique **fans out** — `Planner.PrepareAll` runs it once
+   per value (cartesian across referenced keys), one recorded result each.
+   **Deferred (seams only):** an autonomous next-technique decision engine.
 
 ## Tech stack & conventions
 

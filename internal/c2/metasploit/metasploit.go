@@ -312,6 +312,63 @@ func techniqueToMsfCommand(t domain.Technique) (string, error) {
 	return renderMsfPrimitive(prim)
 }
 
+// Revert undoes a persistence technique Metasploit created (deletes the
+// scheduled task via the session shell). Implements c2.Reverter.
+func (o *operator) Revert(ctx context.Context, sessionID string, t domain.Technique) (domain.Result, error) {
+	start := time.Now()
+	cmd, ok := msfCleanupCommand(t)
+	if !ok {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecUnsupported,
+			Output:            "metasploit: no cleanup defined for this technique",
+			StartedAt:         start,
+			FinishedAt:        time.Now(),
+		}, nil
+	}
+	if err := o.client.SessionShellWrite(ctx, sessionID, cmd+"\n"); err != nil {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecFailed,
+			StartedAt:         start,
+			FinishedAt:        time.Now(),
+			Err:               err.Error(),
+		}, nil
+	}
+	output, err := o.client.SessionShellRead(ctx, sessionID)
+	fin := time.Now()
+	if err != nil {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecFailed,
+			Output:            sanitize(output),
+			StartedAt:         start,
+			FinishedAt:        fin,
+			Err:               err.Error(),
+		}, nil
+	}
+	return domain.Result{
+		TechniqueAttackID: t.AttackID,
+		Status:            domain.ExecSuccess,
+		Output:            sanitize(output),
+		StartedAt:         start,
+		FinishedAt:        fin,
+	}, nil
+}
+
+// msfCleanupCommand renders the reverse of a persistence primitive Metasploit
+// supports. ok=false when the technique has no catalog mapping or no cleanup.
+func msfCleanupCommand(t domain.Technique) (string, bool) {
+	prim, ok, err := ttp.Compile(t)
+	if err != nil || !ok {
+		return "", false
+	}
+	if prim.Kind == c2.PrimScheduledTask {
+		return fmt.Sprintf(`shell schtasks /delete /tn "%s" /f`, prim.Arg("task_name")), true
+	}
+	return "", false
+}
+
 // renderMsfPrimitive renders a portable primitive into a meterpreter/shell
 // command. Primitives Metasploit does not implement (e.g. a registry Run-key
 // write) return an error so the caller records the technique unsupported.
@@ -340,6 +397,9 @@ func renderMsfPrimitive(p c2.Primitive) (string, error) {
 	case c2.PrimScheduledTask:
 		return fmt.Sprintf(`shell schtasks /create /tn "%s" /tr whoami /sc once /st 00:00`, p.Arg("task_name")), nil
 	default:
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return fmt.Sprintf("shell cmd /c \"%s\"", cmd), nil
+		}
 		return "", fmt.Errorf("metasploit: unsupported primitive %q", p.Kind)
 	}
 }

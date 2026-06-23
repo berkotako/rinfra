@@ -12,6 +12,7 @@ import (
 	"github.com/rinfra/rinfra/internal/emulation"
 	"github.com/rinfra/rinfra/internal/emulation/catalog"
 	"github.com/rinfra/rinfra/internal/emulation/index"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 	"github.com/rinfra/rinfra/internal/store"
 )
 
@@ -523,35 +524,53 @@ func (s *EmulationService) orchRunWithHooks(
 		opExec = op
 	}
 
+	planner := emulation.NewPlanner()
+	var cleanups []cleanupTarget
 	for _, t := range sc.Techniques {
-		var res domain.Result
 		if opExec == nil {
 			// No operator: record the specific reason (manual vs scope-blocked)
 			// rather than a generic skip, so coverage does not count it as an
 			// attempt.
-			res = domain.Result{
+			s.recordResult(ctx, run, domain.Result{
 				TechniqueAttackID: t.AttackID,
 				Status:            noOpStatus,
 				Output:            noOpMessage(noOpStatus),
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
-			}
-		} else {
-			var err error
-			res, err = opExec.Execute(ctx, sessionID, t)
+			})
+			continue
+		}
+		// Fact-aware preparation: fan out over collected fact values, or skip
+		// honestly (not_run) when a requirement / ${fact} input was not collected
+		// by an earlier technique — never a fabricated run.
+		prepared, skip, reason := planner.PrepareAll(t)
+		if skip {
+			s.recordResult(ctx, run, domain.Result{
+				TechniqueAttackID: t.AttackID,
+				Status:            domain.ExecNotRun,
+				Output:            reason,
+				StartedAt:         time.Now(),
+				FinishedAt:        time.Now(),
+			})
+			continue
+		}
+		for _, pt := range prepared {
+			res, err := opExec.Execute(ctx, sessionID, pt)
 			if err != nil {
 				res = domain.Result{
-					TechniqueAttackID: t.AttackID,
+					TechniqueAttackID: pt.AttackID,
 					Status:            domain.ExecFailed,
 					StartedAt:         time.Now(),
 					FinishedAt:        time.Now(),
 					Err:               err.Error(),
 				}
 			}
+			planner.Observe(pt, res)
+			s.recordResult(ctx, run, res)
+			cleanups = appendCleanup(cleanups, opExec, sessionID, pt, res)
 		}
-
-		s.recordResult(ctx, run, res)
 	}
+	s.runCleanups(ctx, run, cleanups)
 
 	run.FinishedAt = time.Now()
 	run.Status = summarizeResults(run.Results)
@@ -609,6 +628,61 @@ func noOpMessage(status domain.ExecutionStatus) string {
 	}
 }
 
+// cleanupTarget is a successfully-executed persistence technique queued to be
+// reverted at the end of the run, paired with the operator+session that created
+// it (so a routed run cleans up on the same agent it persisted to).
+type cleanupTarget struct {
+	rev c2.Reverter
+	sid string
+	t   domain.Technique
+}
+
+// appendCleanup queues a cleanup for a result iff the technique succeeded, its
+// primitive creates host-side persistence (c2.IsCleanable), and the operator can
+// undo it (implements c2.Reverter). Operators without the capability are simply
+// never queued.
+func appendCleanup(cs []cleanupTarget, op any, sid string, t domain.Technique, res domain.Result) []cleanupTarget {
+	if res.Status != domain.ExecSuccess {
+		return cs
+	}
+	prim, ok, err := ttp.Compile(t)
+	if !ok || err != nil || !c2.IsCleanable(prim.Kind) {
+		return cs
+	}
+	rev, ok := op.(c2.Reverter)
+	if !ok {
+		return cs
+	}
+	return append(cs, cleanupTarget{rev: rev, sid: sid, t: t})
+}
+
+// runCleanups reverts queued persistence in reverse order (last-created undone
+// first), auditing and publishing each outcome. Cleanups are NOT recorded as
+// technique results, so they never inflate coverage; the audit log is the
+// record that the engagement left no orphaned persistence behind.
+func (s *EmulationService) runCleanups(ctx context.Context, run *domain.ScenarioRun, targets []cleanupTarget) {
+	for i := len(targets) - 1; i >= 0; i-- {
+		tg := targets[i]
+		res, err := tg.rev.Revert(ctx, tg.sid, tg.t)
+		detail := string(res.Status)
+		if err != nil {
+			detail = "error: " + err.Error()
+		}
+		_ = s.audit.Record(ctx, audit.Event{
+			EngagementID: run.EngagementID,
+			Action:       "emulation.cleanup",
+			Target:       tg.t.AttackID,
+			Detail:       detail,
+			At:           time.Now().UTC(),
+		})
+		s.hub.Publish(Event{Kind: EventRunStatus, EngagementID: run.EngagementID, Data: map[string]any{
+			"runId":       run.ID,
+			"techniqueId": tg.t.AttackID,
+			"cleanup":     detail,
+		}})
+	}
+}
+
 // recordResult persists a technique result, publishes the per-technique SSE
 // event, and appends it to the run.
 func (s *EmulationService) recordResult(ctx context.Context, run *domain.ScenarioRun, res domain.Result) {
@@ -637,41 +711,63 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 		Status:       domain.ExecRunning,
 		StartedAt:    time.Now(),
 	}
+	planner := emulation.NewPlanner()
+	var cleanups []cleanupTarget
 	for _, t := range sc.Techniques {
-		op, sid, disp, detail := Route(eng, t, cands)
-		var res domain.Result
-		if op != nil {
-			var err error
-			res, err = op.Execute(ctx, sid, t)
-			if err != nil {
-				res = domain.Result{
-					TechniqueAttackID: t.AttackID,
-					Status:            domain.ExecFailed,
-					StartedAt:         time.Now(),
-					FinishedAt:        time.Now(),
-					Err:               err.Error(),
-				}
-			}
-		} else {
-			// No operator selected — record the precise reason. For an infra
-			// failure (ExecFailed) the detail carries the operator error so it
-			// surfaces instead of being masked as a scope refusal.
-			res = domain.Result{
+		// Fact-aware gating/substitution before routing: a technique whose
+		// requirement or ${fact} input was not collected by an earlier step is an
+		// honest not_run, not a fabricated attempt; one referencing a multi-value
+		// fact fans out to one routed execution per value.
+		prepared, skip, reason := planner.PrepareAll(t)
+		if skip {
+			s.recordResult(ctx, run, domain.Result{
 				TechniqueAttackID: t.AttackID,
-				Status:            disp,
-				Output:            noOpMessage(disp),
+				Status:            domain.ExecNotRun,
+				Output:            reason,
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
-			}
-			if detail != "" {
-				res.Output = detail
-				if disp == domain.ExecFailed {
-					res.Err = detail
+			})
+			continue
+		}
+		for _, pt := range prepared {
+			op, sid, disp, detail := Route(eng, pt, cands)
+			var res domain.Result
+			if op != nil {
+				var err error
+				res, err = op.Execute(ctx, sid, pt)
+				if err != nil {
+					res = domain.Result{
+						TechniqueAttackID: pt.AttackID,
+						Status:            domain.ExecFailed,
+						StartedAt:         time.Now(),
+						FinishedAt:        time.Now(),
+						Err:               err.Error(),
+					}
+				}
+				planner.Observe(pt, res)
+				cleanups = appendCleanup(cleanups, op, sid, pt, res)
+			} else {
+				// No operator selected — record the precise reason. For an infra
+				// failure (ExecFailed) the detail carries the operator error so it
+				// surfaces instead of being masked as a scope refusal.
+				res = domain.Result{
+					TechniqueAttackID: pt.AttackID,
+					Status:            disp,
+					Output:            noOpMessage(disp),
+					StartedAt:         time.Now(),
+					FinishedAt:        time.Now(),
+				}
+				if detail != "" {
+					res.Output = detail
+					if disp == domain.ExecFailed {
+						res.Err = detail
+					}
 				}
 			}
+			s.recordResult(ctx, run, res)
 		}
-		s.recordResult(ctx, run, res)
 	}
+	s.runCleanups(ctx, run, cleanups)
 	run.FinishedAt = time.Now()
 	run.Status = summarizeResults(run.Results)
 	return run, nil
@@ -832,46 +928,74 @@ func (s *EmulationService) coverageFromRuns(ctx context.Context, scopeID string,
 		"defense-evasion", "credential-access", "discovery", "lateral-movement",
 		"collection", "command-and-control", "exfiltration", "impact",
 	}
-	tacticTechs := make(map[string][]Techniquecoverage)
-	for _, sc := range catalog.List() {
+	// Technique display metadata (name, tactic) from every known scenario —
+	// built-in, operator-authored, and imported — so techniques that ran outside
+	// the built-in catalog are still labelled. ListScenarios() already unions all
+	// three sources.
+	for _, sc := range s.ListScenarios() {
 		for _, t := range sc.Techniques {
-			names[t.AttackID] = t.Name
-			tactics[t.AttackID] = t.Tactic
+			if t.Name != "" {
+				names[t.AttackID] = t.Name
+			}
+			if t.Tactic != "" {
+				tactics[t.AttackID] = t.Tactic
+			}
 		}
 	}
 
-	// Build technique coverage per tactic from catalog.
+	// The technique universe for the heatmap is the built-in catalog board
+	// (stable ATT&CK context, shown even when never reached) UNION every
+	// technique that actually ran in these runs. The latter is what fixes the
+	// undercount: previously authored/imported techniques that were exercised
+	// were dropped because only the built-in catalog seeded the board.
+	universe := make(map[string]bool)
 	for _, sc := range catalog.List() {
 		for _, t := range sc.Techniques {
-			disp, ok := dispos[t.AttackID]
-			if !ok {
-				disp = DispNotRun // default: never reached
-			}
-			lvl := levelFromDisposition(disp)
-			tc := Techniquecoverage{
-				AttackID:    t.AttackID,
-				Name:        t.Name,
-				Tactic:      t.Tactic,
-				Level:       lvl,
-				Disposition: disp,
-			}
-			// Deduplicate: if already added for this tactic with the same ID, keep best.
-			tacs := tacticTechs[t.Tactic]
-			found := false
-			for i, existing := range tacs {
-				if existing.AttackID == t.AttackID {
-					if dispositionRank(disp) > dispositionRank(existing.Disposition) {
-						tacs[i].Level = lvl
-						tacs[i].Disposition = disp
-					}
-					found = true
-					break
+			universe[t.AttackID] = true
+		}
+	}
+	for id := range dispos {
+		universe[id] = true
+	}
+
+	tacticTechs := make(map[string][]Techniquecoverage)
+	for id := range universe {
+		name, tactic := names[id], tactics[id]
+		// Fall back to the TTP catalog, then to the bare ID, so an exercised
+		// technique with no scenario metadata is still placed on the board.
+		if name == "" || tactic == "" {
+			if n, tac, ok := ttp.Default().Lookup(id); ok {
+				if name == "" {
+					name = n
+				}
+				if tactic == "" {
+					tactic = tac
 				}
 			}
-			if !found {
-				tacticTechs[t.Tactic] = append(tacticTechs[t.Tactic], tc)
-			}
 		}
+		if name == "" {
+			name = id
+		}
+		if tactic == "" {
+			tactic = "unknown"
+		}
+		disp, ok := dispos[id]
+		if !ok {
+			disp = DispNotRun // in the board but never reached in these runs
+		}
+		tacticTechs[tactic] = append(tacticTechs[tactic], Techniquecoverage{
+			AttackID:    id,
+			Name:        name,
+			Tactic:      tactic,
+			Level:       levelFromDisposition(disp),
+			Disposition: disp,
+		})
+	}
+	// Stable ordering within each tactic (map iteration above is unordered).
+	for tactic := range tacticTechs {
+		sort.Slice(tacticTechs[tactic], func(i, j int) bool {
+			return tacticTechs[tactic][i].AttackID < tacticTechs[tactic][j].AttackID
+		})
 	}
 
 	// Build ordered tactic list.

@@ -37,6 +37,44 @@ func (f *FakeSliverClient) Execute(_ context.Context, _, cmd string) (string, er
 	return f.executeResult, f.executeErr
 }
 
+func TestOperator_Revert_DeletesPersistence(t *testing.T) {
+	client := &FakeSliverClient{executeResult: "OK"}
+	op := sliverpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	rev, ok := op.(c2.Reverter)
+	if !ok {
+		t.Fatal("sliver operator should implement c2.Reverter")
+	}
+	ctx := context.Background()
+
+	// Scheduled task → schtasks /delete.
+	res, err := rev.Revert(ctx, "s1", domain.Technique{
+		AttackID: "T1053.005", Inputs: map[string]string{"task_name": "RInfraTest"},
+	})
+	if err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if res.Status != domain.ExecSuccess {
+		t.Errorf("status = %v, want success", res.Status)
+	}
+	if !strings.Contains(client.LastCmd, `schtasks /delete /tn "RInfraTest" /f`) {
+		t.Errorf("scheduled-task cleanup cmd = %q", client.LastCmd)
+	}
+
+	// Registry Run key → registry delete.
+	if _, err := rev.Revert(ctx, "s1", domain.Technique{AttackID: "T1547.001"}); err != nil {
+		t.Fatalf("Revert registry: %v", err)
+	}
+	if !strings.Contains(client.LastCmd, "registry delete") {
+		t.Errorf("registry cleanup cmd = %q", client.LastCmd)
+	}
+
+	// Non-persistence technique → unsupported (no fabricated cleanup).
+	res, _ = rev.Revert(ctx, "s1", domain.Technique{AttackID: "T1082"})
+	if res.Status != domain.ExecUnsupported {
+		t.Errorf("non-persistence Revert: want unsupported, got %v", res.Status)
+	}
+}
+
 func TestTier(t *testing.T) {
 	p, err := c2.Get("sliver")
 	if err != nil {

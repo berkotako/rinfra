@@ -169,7 +169,15 @@ func RequiredPlatform(t domain.Technique) string {
 		"T1547.001", // Registry Run Keys
 		"T1053.005", // Scheduled Task
 		"T1218",     // System Binary Proxy Execution (Windows)
-		"T1003.001": // LSASS Memory
+		"T1003.001", // LSASS Memory
+		// Discovery primitives backed by Windows net.exe / sc built-ins
+		// (c2.DiscoveryCommand) — must route to a Windows session, not a
+		// Linux/macOS agent where `net view`/`net user` would fail.
+		"T1018",     // Remote System Discovery (net view)
+		"T1087.001", // Account Discovery: Local Account (net user)
+		"T1069.001", // Permission Groups Discovery: Local Groups (net localgroup)
+		"T1007",     // System Service Discovery (net start)
+		"T1135":     // Network Share Discovery (net share)
 		return "windows"
 	case "T1059.004": // Unix Shell
 		return "linux"

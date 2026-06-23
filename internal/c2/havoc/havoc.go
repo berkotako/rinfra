@@ -303,6 +303,9 @@ func renderHavocPrimitive(p c2.Primitive) (string, bool) {
 		}
 		return fmt.Sprintf("dir %s", path), true
 	default:
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return "shell " + cmd, true
+		}
 		return "", false
 	}
 }

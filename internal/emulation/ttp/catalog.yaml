@@ -99,3 +99,30 @@ techniques:
       registry_value:
         from: registry_value
         default: RInfraTest
+
+  # Read-only discovery primitives (safe Windows built-ins; no args). Available
+  # on every framework with a shell — see c2.DiscoveryCommand.
+  - attack_id: "T1018"
+    name: "Remote System Discovery"
+    tactic: discovery
+    primitive: remote_system_discovery
+
+  - attack_id: "T1087.001"
+    name: "Account Discovery: Local Account"
+    tactic: discovery
+    primitive: account_discovery
+
+  - attack_id: "T1069.001"
+    name: "Permission Groups Discovery: Local Groups"
+    tactic: discovery
+    primitive: permission_group_discovery
+
+  - attack_id: "T1007"
+    name: "System Service Discovery"
+    tactic: discovery
+    primitive: service_discovery
+
+  - attack_id: "T1135"
+    name: "Network Share Discovery"
+    tactic: discovery
+    primitive: network_share_discovery

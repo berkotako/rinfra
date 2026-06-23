@@ -108,3 +108,18 @@ type Operator interface {
 	// the referenced public library (Atomic Red Team / Caldera).
 	Execute(ctx context.Context, sessionID string, t domain.Technique) (domain.Result, error)
 }
+
+// Reverter is an OPTIONAL Operator capability: it undoes the host-side side
+// effect of a previously-executed persistence technique (delete a scheduled
+// task or Run-key it created). At the end of a run the emulation engine calls
+// Revert in reverse order for every successfully-executed cleanable technique
+// (see IsCleanable) whose operator implements this interface — extending the
+// "reliable teardown" invariant from infrastructure to emulation artifacts, so
+// an engagement leaves no orphaned persistence on the customer's host.
+//
+// It is separate from Operator so the deploy-and-front (Fronted-tier) and
+// read-only frameworks are never forced to implement a no-op; an operator that
+// does not implement Reverter is simply never asked to clean up.
+type Reverter interface {
+	Revert(ctx context.Context, sessionID string, t domain.Technique) (domain.Result, error)
+}

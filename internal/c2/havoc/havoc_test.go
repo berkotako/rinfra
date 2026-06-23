@@ -127,6 +127,26 @@ func TestOperator_Execute_SupportedTechnique(t *testing.T) {
 	}
 }
 
+// TestOperator_Execute_DiscoveryPrimitive verifies the newly-added read-only
+// discovery techniques are picked up by Havoc's derived allowlist and render to
+// the expected shell command.
+func TestOperator_Execute_DiscoveryPrimitive(t *testing.T) {
+	client := &FakeHavocClient{execResult: "Server Name  Remark"}
+	op := havocpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+
+	tech := domain.Technique{AttackID: "T1018", Name: "Remote System Discovery"}
+	result, err := op.Execute(context.Background(), "demon-001", tech)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Status != domain.ExecSuccess {
+		t.Errorf("expected ExecSuccess, got %v", result.Status)
+	}
+	if client.lastCmd != "shell net view" {
+		t.Errorf("expected cmd 'shell net view', got %q", client.lastCmd)
+	}
+}
+
 func TestOperator_Execute_UnsupportedTechnique_Skipped(t *testing.T) {
 	client := &FakeHavocClient{}
 	op := havocpkg.NewOperatorWithClient(c2.Teamserver{}, client)
