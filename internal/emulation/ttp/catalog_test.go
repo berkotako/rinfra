@@ -8,6 +8,35 @@ import (
 	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
+// TestCompile_DiscoveryPrimitives checks the read-only discovery techniques
+// added to the catalog resolve to their discovery primitive kinds.
+func TestCompile_DiscoveryPrimitives(t *testing.T) {
+	cases := map[string]c2.PrimitiveKind{
+		"T1018":     c2.PrimRemoteSystemDiscovery,
+		"T1087.001": c2.PrimAccountDiscovery,
+		"T1069.001": c2.PrimPermissionGroupDiscovery,
+		"T1007":     c2.PrimServiceDiscovery,
+		"T1135":     c2.PrimShareDiscovery,
+	}
+	for id, want := range cases {
+		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
+		if err != nil {
+			t.Errorf("%s: Compile: %v", id, err)
+			continue
+		}
+		if !ok {
+			t.Errorf("%s: expected a catalog mapping", id)
+			continue
+		}
+		if prim.Kind != want {
+			t.Errorf("%s: kind = %q, want %q", id, prim.Kind, want)
+		}
+		if _, ok := c2.DiscoveryCommand(prim.Kind); !ok {
+			t.Errorf("%s: %q has no DiscoveryCommand", id, prim.Kind)
+		}
+	}
+}
+
 func TestCompile_NoArgsPrimitive(t *testing.T) {
 	prim, ok, err := ttp.Compile(domain.Technique{AttackID: "T1082"})
 	if err != nil {

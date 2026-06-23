@@ -340,6 +340,9 @@ func renderMsfPrimitive(p c2.Primitive) (string, error) {
 	case c2.PrimScheduledTask:
 		return fmt.Sprintf(`shell schtasks /create /tn "%s" /tr whoami /sc once /st 00:00`, p.Arg("task_name")), nil
 	default:
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return fmt.Sprintf("shell cmd /c \"%s\"", cmd), nil
+		}
 		return "", fmt.Errorf("metasploit: unsupported primitive %q", p.Kind)
 	}
 }

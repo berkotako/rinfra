@@ -104,7 +104,11 @@ per-adapter `switch t.AttackID` tables):
 1. **Catalog** (`internal/emulation/ttp`, embedded `catalog.yaml`) maps an
    ATT&CK ID → a portable **`c2.Primitive`** (closed `PrimitiveKind` set:
    powershell, shell, sysinfo, process_list, net_connections, net_config,
-   file_list, download, scheduled_task, registry_run_key) plus argument bindings
+   file_list, download, scheduled_task, registry_run_key, plus the read-only
+   discovery primitives remote_system_discovery, account_discovery,
+   permission_group_discovery, service_discovery, network_share_discovery —
+   each backed by a safe Windows built-in via `c2.DiscoveryCommand`, rendered
+   uniformly by every framework with a shell) plus argument bindings
    (`from` input key, `default`, `required`). `ttp.Compile(t)` resolves a
    `Technique` to a primitive. **This is the "add a TTP" surface** — a technique
    that reuses an existing primitive is a one-entry YAML change, no Go edits.

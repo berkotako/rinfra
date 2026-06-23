@@ -55,4 +55,42 @@ const (
 	// PrimRegistryRunKey writes a Run-key persistence entry.
 	// Args: "registry_key", "registry_value".
 	PrimRegistryRunKey PrimitiveKind = "registry_run_key"
+
+	// The following are read-only host/network discovery primitives. Each maps
+	// to a benign Windows built-in enumeration command (see DiscoveryCommand) —
+	// no payloads, no state change, no evasion — so every framework with a shell
+	// can render them uniformly. Args: none.
+
+	// PrimRemoteSystemDiscovery enumerates other hosts on the network (T1018).
+	PrimRemoteSystemDiscovery PrimitiveKind = "remote_system_discovery"
+	// PrimAccountDiscovery enumerates local user accounts (T1087.001).
+	PrimAccountDiscovery PrimitiveKind = "account_discovery"
+	// PrimPermissionGroupDiscovery enumerates local groups (T1069.001).
+	PrimPermissionGroupDiscovery PrimitiveKind = "permission_group_discovery"
+	// PrimServiceDiscovery enumerates running services (T1007).
+	PrimServiceDiscovery PrimitiveKind = "service_discovery"
+	// PrimShareDiscovery enumerates shared resources (T1135).
+	PrimShareDiscovery PrimitiveKind = "network_share_discovery"
 )
+
+// DiscoveryCommand maps a read-only discovery primitive to the Windows built-in
+// command that enumerates it. ok=false for any non-discovery kind. The commands
+// are safe, non-destructive enumeration (no payloads, no evasion) and run
+// verbatim from cmd.exe or PowerShell, so each framework renderer only needs to
+// wrap them in its own invocation convention rather than restate the command.
+func DiscoveryCommand(k PrimitiveKind) (string, bool) {
+	switch k {
+	case PrimRemoteSystemDiscovery:
+		return "net view", true
+	case PrimAccountDiscovery:
+		return "net user", true
+	case PrimPermissionGroupDiscovery:
+		return "net localgroup", true
+	case PrimServiceDiscovery:
+		return "net start", true
+	case PrimShareDiscovery:
+		return "net share", true
+	default:
+		return "", false
+	}
+}

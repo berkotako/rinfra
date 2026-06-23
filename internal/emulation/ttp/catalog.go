@@ -66,6 +66,12 @@ var validPrimitives = map[c2.PrimitiveKind]bool{
 	c2.PrimDownload:       true,
 	c2.PrimScheduledTask:  true,
 	c2.PrimRegistryRunKey: true,
+
+	c2.PrimRemoteSystemDiscovery:    true,
+	c2.PrimAccountDiscovery:         true,
+	c2.PrimPermissionGroupDiscovery: true,
+	c2.PrimServiceDiscovery:         true,
+	c2.PrimShareDiscovery:           true,
 }
 
 // builtin is the embedded catalog, loaded once at package init.

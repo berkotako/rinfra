@@ -249,6 +249,10 @@ func renderPoshPrimitive(p c2.Primitive) (string, bool) {
 		}
 		return fmt.Sprintf("Get-ChildItem '%s'", path), true
 	default:
+		// net.exe discovery built-ins run verbatim from the PowerShell implant.
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return cmd, true
+		}
 		return "", false
 	}
 }

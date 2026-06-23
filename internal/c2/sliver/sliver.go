@@ -334,6 +334,9 @@ func renderSliverPrimitive(p c2.Primitive) (string, error) {
 	case c2.PrimRegistryRunKey:
 		return fmt.Sprintf("registry write --hive HKCU --path %q --v %q --d whoami", p.Arg("registry_key"), p.Arg("registry_value")), nil
 	default:
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return "execute " + cmd, nil
+		}
 		return "", fmt.Errorf("sliver: unsupported primitive %q", p.Kind)
 	}
 }

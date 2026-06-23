@@ -312,6 +312,9 @@ func renderMythicPrimitive(p c2.Primitive) (string, map[string]string, error) {
 	case c2.PrimScheduledTask:
 		return "schtasks", map[string]string{"task_name": p.Arg("task_name"), "action": "create"}, nil
 	default:
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return "shell", map[string]string{"command": cmd}, nil
+		}
 		return "", nil, fmt.Errorf("mythic: unsupported primitive %q", p.Kind)
 	}
 }
