@@ -117,6 +117,95 @@ func (p *Planner) Prepare(t domain.Technique) (prepared domain.Technique, skip b
 	return t, false, ""
 }
 
+// PrepareAll is the multi-value fan-out form of Prepare. When a technique's
+// inputs reference a fact that has several collected values, it returns one
+// prepared technique per value — the cartesian product across all referenced
+// fact keys — so the technique runs once per discovered target (e.g. once per
+// host.ip enumerated by an earlier step). With no fact references it returns a
+// single technique, so the caller can always range over the result.
+//
+// skip/reason mirror Prepare: an unmet requirement, or a referenced fact with
+// no values yet, yields skip=true and no techniques (recorded not_run upstream).
+func (p *Planner) PrepareAll(t domain.Technique) (prepared []domain.Technique, skip bool, reason string) {
+	for _, req := range t.Requires {
+		if !p.Facts.Has(req) {
+			return nil, true, fmt.Sprintf("required fact %q not collected by an earlier technique", req)
+		}
+	}
+	keys := referencedKeys(t.Inputs)
+	if len(keys) == 0 {
+		return []domain.Technique{t}, false, ""
+	}
+	valuesByKey := make(map[string][]string, len(keys))
+	for _, k := range keys {
+		vals := p.Facts.Values(k)
+		if len(vals) == 0 {
+			return nil, true, fmt.Sprintf("input references uncollected fact %q", k)
+		}
+		valuesByKey[k] = vals
+	}
+	for _, assignment := range cartesian(keys, valuesByKey) {
+		clone := t
+		newInputs := make(map[string]string, len(t.Inputs))
+		for ik, iv := range t.Inputs {
+			newInputs[ik] = substituteAssignment(iv, assignment)
+		}
+		clone.Inputs = newInputs
+		prepared = append(prepared, clone)
+	}
+	return prepared, false, ""
+}
+
+// referencedKeys returns the unique fact keys referenced by ${...} tokens across
+// all input values, sorted for deterministic fan-out ordering.
+func referencedKeys(inputs map[string]string) []string {
+	set := map[string]bool{}
+	for _, v := range inputs {
+		for _, m := range factTokenRe.FindAllStringSubmatch(v, -1) {
+			set[m[1]] = true
+		}
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// cartesian returns every assignment of one value to each key — the product of
+// the per-key value lists. keys is iterated in order so the output is stable.
+func cartesian(keys []string, valuesByKey map[string][]string) []map[string]string {
+	combos := []map[string]string{{}}
+	for _, k := range keys {
+		var next []map[string]string
+		for _, base := range combos {
+			for _, v := range valuesByKey[k] {
+				m := make(map[string]string, len(base)+1)
+				for bk, bv := range base {
+					m[bk] = bv
+				}
+				m[k] = v
+				next = append(next, m)
+			}
+		}
+		combos = next
+	}
+	return combos
+}
+
+// substituteAssignment replaces ${key} tokens using the given key→value
+// assignment (every referenced key is present by construction).
+func substituteAssignment(s string, assignment map[string]string) string {
+	return factTokenRe.ReplaceAllStringFunc(s, func(tok string) string {
+		key := factTokenRe.FindStringSubmatch(tok)[1]
+		if v, ok := assignment[key]; ok {
+			return v
+		}
+		return tok
+	})
+}
+
 // Observe parses facts out of a successful technique's output and adds them to
 // the store, so subsequent techniques can reference them. Non-success results
 // and techniques with no catalog primitive contribute nothing.

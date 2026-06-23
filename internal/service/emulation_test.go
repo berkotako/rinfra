@@ -459,6 +459,83 @@ func TestEmulation_FactChaining_ProduceConsume(t *testing.T) {
 	}
 }
 
+// fanoutOperator's T1016 reports two routable IPs; any technique with a
+// "command" input echoes it back so the test can count fan-out executions.
+type fanoutOperator struct{}
+
+func (fanoutOperator) StartListener(_ context.Context, _ c2.ListenerSpec) error { return nil }
+func (fanoutOperator) Sessions(_ context.Context) ([]c2.Session, error) {
+	return []c2.Session{{ID: "s1", Host: "10.10.10.10", User: "SYSTEM"}}, nil
+}
+func (fanoutOperator) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	out := "ran " + t.AttackID
+	if cmd := t.Inputs["command"]; cmd != "" {
+		out = cmd
+	} else if t.AttackID == "T1016" {
+		out = "Addr 10.20.30.40\nAddr 10.20.30.41"
+	}
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: out,
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+
+type fanoutResolver struct{}
+
+func (fanoutResolver) Resolve(_ context.Context, _ domain.Engagement) (c2.Operator, string, bool) {
+	return fanoutOperator{}, "s1", true
+}
+
+// TestEmulation_FactChaining_FanOut verifies that when a discovery technique
+// collects several values for a fact, a later technique that references it runs
+// once per value — the multi-value fan-out — through the live service path.
+func TestEmulation_FactChaining_FanOut(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	svcEmu.WithResolver(fanoutResolver{})
+
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "fanout",
+		Techniques: []domain.Technique{
+			{AttackID: "T1016", Name: "Network Config"}, // produces 2 host.ip facts
+			{AttackID: "T1059.001", Name: "PowerShell",
+				Inputs:   map[string]string{"command": "ping ${host.ip}"},
+				Requires: []string{"host.ip"}},
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	var pings []string
+	for _, r := range run.Results {
+		if r.TechniqueAttackID == "T1059.001" {
+			pings = append(pings, r.Output)
+		}
+	}
+	if len(pings) != 2 {
+		t.Fatalf("want 2 fan-out executions of the consumer, got %d (%v)", len(pings), pings)
+	}
+	want := map[string]bool{"ping 10.20.30.40": true, "ping 10.20.30.41": true}
+	for _, p := range pings {
+		if !want[p] {
+			t.Errorf("unexpected fan-out output %q", p)
+		}
+	}
+}
+
 // TestEmulation_FactChaining_RequirementSkips verifies that a technique whose
 // required fact was never collected is honestly recorded not_run (not executed),
 // through the live run path.

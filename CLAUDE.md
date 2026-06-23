@@ -128,9 +128,10 @@ per-adapter `switch t.AttackID` tables):
    technique may reference collected facts in its `Inputs` with `${fact.key}`
    tokens (resolved at run time) and declare `Requires []string` prerequisite
    keys; an unmet requirement or unresolved token records the technique `not_run`
-   (an honest non-attempt), never a fabricated run. **Deferred (seams only):**
-   multi-value fan-out (run once per discovered value) and an autonomous
-   next-technique decision engine.
+   (an honest non-attempt), never a fabricated run. When a referenced fact has
+   several values the technique **fans out** — `Planner.PrepareAll` runs it once
+   per value (cartesian across referenced keys), one recorded result each.
+   **Deferred (seams only):** an autonomous next-technique decision engine.
 
 ## Tech stack & conventions
 

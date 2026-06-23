@@ -94,8 +94,9 @@ _Last updated: 2026-06-22._
   an atomic planner — a technique's output is parsed into a per-run fact store
   (routable IPs → `host.ip`), later techniques substitute `${fact.key}` into
   their inputs and declare `Requires` prerequisite facts; an unmet requirement
-  is recorded `not_run`. Multi-value fan-out and an autonomous decision engine
-  are deferred (seams only).
+  is recorded `not_run`. A technique referencing a multi-value fact **fans out**
+  (`Planner.PrepareAll`), running once per discovered value. An autonomous
+  next-technique decision engine is deferred (seam only).
 - **Honest BAS status taxonomy**: per-technique disposition
   (executed / attempted-failed / manual-required / unsupported /
   blocked-by-scope / not-run); coverage's "exercised" count and the TRM count

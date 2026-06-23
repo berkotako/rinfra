@@ -526,44 +526,47 @@ func (s *EmulationService) orchRunWithHooks(
 
 	planner := emulation.NewPlanner()
 	for _, t := range sc.Techniques {
-		var res domain.Result
 		if opExec == nil {
 			// No operator: record the specific reason (manual vs scope-blocked)
 			// rather than a generic skip, so coverage does not count it as an
 			// attempt.
-			res = domain.Result{
+			s.recordResult(ctx, run, domain.Result{
 				TechniqueAttackID: t.AttackID,
 				Status:            noOpStatus,
 				Output:            noOpMessage(noOpStatus),
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
-			}
-		} else if prepared, skip, reason := planner.Prepare(t); skip {
-			// A required fact / input reference was not collected by an earlier
-			// technique — an honest non-attempt, not a fabricated run.
-			res = domain.Result{
+			})
+			continue
+		}
+		// Fact-aware preparation: fan out over collected fact values, or skip
+		// honestly (not_run) when a requirement / ${fact} input was not collected
+		// by an earlier technique — never a fabricated run.
+		prepared, skip, reason := planner.PrepareAll(t)
+		if skip {
+			s.recordResult(ctx, run, domain.Result{
 				TechniqueAttackID: t.AttackID,
 				Status:            domain.ExecNotRun,
 				Output:            reason,
 				StartedAt:         time.Now(),
 				FinishedAt:        time.Now(),
-			}
-		} else {
-			var err error
-			res, err = opExec.Execute(ctx, sessionID, prepared)
+			})
+			continue
+		}
+		for _, pt := range prepared {
+			res, err := opExec.Execute(ctx, sessionID, pt)
 			if err != nil {
 				res = domain.Result{
-					TechniqueAttackID: t.AttackID,
+					TechniqueAttackID: pt.AttackID,
 					Status:            domain.ExecFailed,
 					StartedAt:         time.Now(),
 					FinishedAt:        time.Now(),
 					Err:               err.Error(),
 				}
 			}
-			planner.Observe(prepared, res)
+			planner.Observe(pt, res)
+			s.recordResult(ctx, run, res)
 		}
-
-		s.recordResult(ctx, run, res)
 	}
 
 	run.FinishedAt = time.Now()
@@ -654,8 +657,9 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 	for _, t := range sc.Techniques {
 		// Fact-aware gating/substitution before routing: a technique whose
 		// requirement or ${fact} input was not collected by an earlier step is an
-		// honest not_run, not a fabricated attempt.
-		prepared, skip, reason := planner.Prepare(t)
+		// honest not_run, not a fabricated attempt; one referencing a multi-value
+		// fact fans out to one routed execution per value.
+		prepared, skip, reason := planner.PrepareAll(t)
 		if skip {
 			s.recordResult(ctx, run, domain.Result{
 				TechniqueAttackID: t.AttackID,
@@ -666,40 +670,42 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 			})
 			continue
 		}
-		op, sid, disp, detail := Route(eng, prepared, cands)
-		var res domain.Result
-		if op != nil {
-			var err error
-			res, err = op.Execute(ctx, sid, prepared)
-			if err != nil {
+		for _, pt := range prepared {
+			op, sid, disp, detail := Route(eng, pt, cands)
+			var res domain.Result
+			if op != nil {
+				var err error
+				res, err = op.Execute(ctx, sid, pt)
+				if err != nil {
+					res = domain.Result{
+						TechniqueAttackID: pt.AttackID,
+						Status:            domain.ExecFailed,
+						StartedAt:         time.Now(),
+						FinishedAt:        time.Now(),
+						Err:               err.Error(),
+					}
+				}
+				planner.Observe(pt, res)
+			} else {
+				// No operator selected — record the precise reason. For an infra
+				// failure (ExecFailed) the detail carries the operator error so it
+				// surfaces instead of being masked as a scope refusal.
 				res = domain.Result{
-					TechniqueAttackID: t.AttackID,
-					Status:            domain.ExecFailed,
+					TechniqueAttackID: pt.AttackID,
+					Status:            disp,
+					Output:            noOpMessage(disp),
 					StartedAt:         time.Now(),
 					FinishedAt:        time.Now(),
-					Err:               err.Error(),
+				}
+				if detail != "" {
+					res.Output = detail
+					if disp == domain.ExecFailed {
+						res.Err = detail
+					}
 				}
 			}
-			planner.Observe(prepared, res)
-		} else {
-			// No operator selected — record the precise reason. For an infra
-			// failure (ExecFailed) the detail carries the operator error so it
-			// surfaces instead of being masked as a scope refusal.
-			res = domain.Result{
-				TechniqueAttackID: t.AttackID,
-				Status:            disp,
-				Output:            noOpMessage(disp),
-				StartedAt:         time.Now(),
-				FinishedAt:        time.Now(),
-			}
-			if detail != "" {
-				res.Output = detail
-				if disp == domain.ExecFailed {
-					res.Err = detail
-				}
-			}
+			s.recordResult(ctx, run, res)
 		}
-		s.recordResult(ctx, run, res)
 	}
 	run.FinishedAt = time.Now()
 	run.Status = summarizeResults(run.Results)

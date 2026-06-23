@@ -102,6 +102,65 @@ func TestPlanner_Observe_ParsesIPsFromNetConfig(t *testing.T) {
 	}
 }
 
+func TestPlanner_PrepareAll_FanOut(t *testing.T) {
+	p := NewPlanner()
+	p.Facts.Add("host.ip", "10.0.0.1")
+	p.Facts.Add("host.ip", "10.0.0.2")
+	tech := domain.Technique{
+		AttackID: "T1059.001",
+		Inputs:   map[string]string{"command": "ping ${host.ip}"},
+		Requires: []string{"host.ip"},
+	}
+	prepared, skip, _ := p.PrepareAll(tech)
+	if skip {
+		t.Fatal("should not skip when the fact is present")
+	}
+	if len(prepared) != 2 {
+		t.Fatalf("want 2 fan-out techniques (one per value), got %d", len(prepared))
+	}
+	got := map[string]bool{}
+	for _, pt := range prepared {
+		got[pt.Inputs["command"]] = true
+	}
+	for _, want := range []string{"ping 10.0.0.1", "ping 10.0.0.2"} {
+		if !got[want] {
+			t.Errorf("missing fan-out variant %q (got %v)", want, got)
+		}
+	}
+}
+
+func TestPlanner_PrepareAll_NoReferenceRunsOnce(t *testing.T) {
+	p := NewPlanner()
+	prepared, skip, _ := p.PrepareAll(domain.Technique{AttackID: "T1082"})
+	if skip || len(prepared) != 1 {
+		t.Fatalf("a technique with no fact references should run once, got skip=%v n=%d", skip, len(prepared))
+	}
+}
+
+func TestPlanner_PrepareAll_MissingFactSkips(t *testing.T) {
+	p := NewPlanner()
+	tech := domain.Technique{AttackID: "T1059.001", Inputs: map[string]string{"command": "ping ${host.ip}"}}
+	prepared, skip, reason := p.PrepareAll(tech)
+	if !skip || reason == "" || len(prepared) != 0 {
+		t.Fatalf("uncollected fact should skip with no techniques, got skip=%v n=%d", skip, len(prepared))
+	}
+}
+
+func TestPlanner_PrepareAll_CartesianAcrossKeys(t *testing.T) {
+	p := NewPlanner()
+	p.Facts.Add("host.ip", "10.0.0.1")
+	p.Facts.Add("host.ip", "10.0.0.2")
+	p.Facts.Add("host.port", "80")
+	tech := domain.Technique{
+		AttackID: "T1059.001",
+		Inputs:   map[string]string{"command": "connect ${host.ip}:${host.port}"},
+	}
+	prepared, _, _ := p.PrepareAll(tech)
+	if len(prepared) != 2 { // 2 ips × 1 port
+		t.Fatalf("want 2 combinations, got %d", len(prepared))
+	}
+}
+
 func TestPlanner_Observe_IgnoresNonSuccess(t *testing.T) {
 	p := NewPlanner()
 	p.Observe(domain.Technique{AttackID: "T1016"}, domain.Result{
