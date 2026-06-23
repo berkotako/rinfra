@@ -111,6 +111,7 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			r.Get("/events", h.sseEvents)
 			r.Get("/audit", h.listAuditEvents)
 			r.Post("/runs", h.startRun)
+			r.Get("/runs", h.listRuns)
 			r.Get("/coverage", h.getCoverage)
 			r.Get("/navigator", h.getNavigator)
 			// Manual access: drive the deployed C2 by hand instead of auto-run.
@@ -153,6 +154,7 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 
 		// Runs — fetch by ID (cross-engagement) + purple-team detection scoring.
 		r.Get("/runs/{id}", h.getRun)
+		r.Get("/runs/{id}/coverage", h.getRunCoverage)
 		r.Post("/runs/{id}/detection", h.recordDetection)
 	})
 

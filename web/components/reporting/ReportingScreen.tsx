@@ -4,7 +4,39 @@ import { Icons } from "../icons";
 import { PageHead } from "../ui";
 import { useStore } from "../../lib/store";
 import { getClient } from "../../lib/client";
+import type { RunSummary, TechniqueResult } from "../../lib/client";
 import type { Coverage } from "../../lib/types";
+
+// Status / detection presentation for the per-run results table.
+const RESULT_STATUS: Record<string, { label: string; cls: string }> = {
+  success: { label: "Executed", cls: "ok" },
+  attempted_failed: { label: "Attempted (failed)", cls: "warn" },
+  unsupported: { label: "Unsupported", cls: "" },
+  manual_required: { label: "Manual", cls: "" },
+  blocked_by_scope: { label: "Out of scope", cls: "warn" },
+  skipped_policy: { label: "Skipped", cls: "" },
+  not_run: { label: "Not run", cls: "" },
+  running: { label: "Running", cls: "info" },
+  pending: { label: "Queued", cls: "" },
+};
+const DETECTION_LABEL: Record<string, { label: string; cls: string }> = {
+  none: { label: "missed", cls: "danger" },
+  alerted: { label: "alerted", cls: "info" },
+  detected: { label: "detected", cls: "ok" },
+  blocked: { label: "blocked", cls: "ok" },
+};
+
+function fmtRunTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 // Format a tactic label, accepting both backend ("initial-access") and demo
 // ("Initial Access") forms.
@@ -29,22 +61,58 @@ const LVL_TEXT = ["var(--text-4)", "var(--text-2)", "#fff", "#fff"];
 export default function ReportingScreen() {
   // The active engagement is chosen once in the top bar; this page follows that
   // selection rather than offering its own engagement picker.
-  const { activeEngagement, activeEngagementId, pushToast } = useStore();
+  const { activeEngagement, activeEngagementId, pushToast, scenarios } = useStore();
   const [tab, setTab] = useState<"coverage" | "report">("coverage");
 
-  // Coverage rollup from the data layer — real backend in REST mode, demo data
-  // in mock mode (same render path either way).
-  const [coverage, setCoverage] = useState<Coverage | null>(null);
+  // Run scope: "" = engagement-wide aggregate (default); otherwise a single run.
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string>("");
+  const [runResults, setRunResults] = useState<TechniqueResult[] | null>(null);
+
+  const scenarioName = (id: string) =>
+    scenarios.find((s) => s.id === id)?.name ?? id;
+  const runLabel = (r: RunSummary) =>
+    `${scenarioName(r.scenarioId)} · ${fmtRunTime(r.startedAt)}`;
+
+  // Load the engagement's runs for the picker; reset to the aggregate view when
+  // the active engagement changes.
   useEffect(() => {
     let alive = true;
     getClient()
-      .getCoverage(activeEngagementId)
-      .then((c) => alive && setCoverage(c))
-      .catch(() => alive && setCoverage(null));
+      .listRuns(activeEngagementId)
+      .then((rs) => alive && setRuns(rs))
+      .catch(() => alive && setRuns([]));
+    setSelectedRunId("");
     return () => {
       alive = false;
     };
   }, [activeEngagementId]);
+
+  // Coverage rollup from the data layer — engagement-wide, or scoped to one run
+  // when selected. Real backend in REST mode, demo data in mock mode (same
+  // render path either way).
+  const [coverage, setCoverage] = useState<Coverage | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const client = getClient();
+    const cov = selectedRunId
+      ? client.getRunCoverage(selectedRunId)
+      : client.getCoverage(activeEngagementId);
+    cov.then((c) => alive && setCoverage(c)).catch(() => alive && setCoverage(null));
+
+    // The per-technique results table is only shown for a specific run.
+    if (selectedRunId) {
+      client
+        .getRun(selectedRunId)
+        .then((r) => alive && setRunResults(r.results))
+        .catch(() => alive && setRunResults(null));
+    } else {
+      setRunResults(null);
+    }
+    return () => {
+      alive = false;
+    };
+  }, [activeEngagementId, selectedRunId]);
 
   const total = coverage?.totalTechniques ?? 0;
   const covered = coverage?.exercisedCount ?? 0;
@@ -101,6 +169,34 @@ export default function ReportingScreen() {
 
         {tab === "coverage" && (
           <div className="fade-in">
+            {/* Run scope picker — engagement aggregate (default) or a single run */}
+            <div
+              className="card"
+              style={{ padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}
+            >
+              <div className="eyebrow" style={{ flex: "none" }}>Run scope</div>
+              <select
+                className="input"
+                style={{ flex: "none", minWidth: 320, maxWidth: 480 }}
+                value={selectedRunId}
+                onChange={(e) => setSelectedRunId(e.target.value)}
+              >
+                <option value="">All runs · engagement aggregate</option>
+                {runs.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {runLabel(r)}
+                  </option>
+                ))}
+              </select>
+              <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+                {selectedRunId
+                  ? "Coverage, TRM and the results below reflect this single emulation run."
+                  : runs.length === 0
+                  ? "No runs recorded for this engagement yet — launch one from the Emulation page."
+                  : `${runs.length} run${runs.length === 1 ? "" : "s"} recorded · showing the engagement-wide rollup.`}
+              </span>
+            </div>
+
             {/* Threat Resilience Metric — benchmarked ATT&CK alignment */}
             <div
               className="card"
@@ -283,6 +379,59 @@ export default function ReportingScreen() {
                 ))}
               </div>
             </div>
+
+            {/* Per-technique results for the selected run */}
+            {selectedRunId && (
+              <div className="card" style={{ padding: 18, marginTop: 14 }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>Run results</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+                    {runResults ? `${runResults.length} technique${runResults.length === 1 ? "" : "s"}` : "loading…"}
+                  </div>
+                </div>
+                {runResults && runResults.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {runResults.map((res, i) => {
+                      const st = RESULT_STATUS[res.status] ?? { label: res.status, cls: "" };
+                      const det = DETECTION_LABEL[res.detection] ?? null;
+                      return (
+                        <div
+                          key={res.techniqueId + i}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 12,
+                            padding: "8px 10px",
+                            borderRadius: 6,
+                            background: "var(--surface-2)",
+                            border: "1px solid var(--border)",
+                          }}
+                        >
+                          <span className="mono" style={{ fontSize: 11.5, color: "var(--text-3)", flex: "none", width: 92 }}>
+                            {res.techniqueId}
+                          </span>
+                          <span className={"pill " + st.cls} style={{ flex: "none" }}>{st.label}</span>
+                          {det && (
+                            <span className={"pill " + det.cls} style={{ flex: "none" }} title="Defender outcome">
+                              {det.label}
+                            </span>
+                          )}
+                          {res.err && (
+                            <span style={{ fontSize: 11, color: "var(--text-3)" }} title="Error">
+                              {res.err}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: "var(--text-3)", padding: "8px 0" }}>
+                    {runResults ? "This run recorded no technique results." : "Loading run results…"}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

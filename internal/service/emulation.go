@@ -771,6 +771,18 @@ func (s *EmulationService) GetCoverage(ctx context.Context, engagementID string)
 	return s.coverageFromRuns(ctx, engagementID, runs)
 }
 
+// GetRunCoverage rolls a single run up into a Coverage report — the per-run
+// counterpart to GetCoverage, so the dashboard can show how one emulation run
+// affected coverage rather than only the engagement-wide aggregate. The report
+// is identified by the run's ID; coverageFromRuns reloads the run's results.
+func (s *EmulationService) GetRunCoverage(ctx context.Context, runID string) (Coverage, error) {
+	run, err := s.scenarios.GetRun(ctx, runID)
+	if err != nil {
+		return Coverage{}, fmt.Errorf("get run: %w", err)
+	}
+	return s.coverageFromRuns(ctx, run.ID, []domain.ScenarioRun{run})
+}
+
 // GetProjectCoverage rolls up ATT&CK coverage across every engagement in the
 // project — the project-scope counterpart to GetCoverage, so emulation results
 // can be viewed at both the engagement and project levels.

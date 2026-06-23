@@ -260,6 +260,7 @@ export interface TechniqueResult {
   techniqueId: string;
   status: string;
   output: string;
+  detection: string; // defender outcome: none | alerted | detected | blocked
   startedAt: string | null;
   finishedAt: string | null;
   err: string;
@@ -271,6 +272,17 @@ export interface ScenarioRun {
   scenarioId: string;
   status: string;
   results: TechniqueResult[];
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+// RunSummary is the lightweight run shape for the run picker (no per-technique
+// results — see GET /engagements/{id}/runs).
+export interface RunSummary {
+  id: string;
+  engagementId: string;
+  scenarioId: string;
+  status: string;
   startedAt: string | null;
   finishedAt: string | null;
 }
@@ -354,6 +366,8 @@ export interface RInfraClient {
   // Project-scope: launch a scenario across every engagement in the project.
   startProjectRun(projectId: string, scenarioId: string): Promise<ProjectRunResult>;
   getRun(runId: string): Promise<ScenarioRun>;
+  // List an engagement's runs (newest-relevant first) for the run picker.
+  listRuns(engagementId: string): Promise<RunSummary[]>;
   // Purple-team scoring: record the defender outcome for a technique in a run.
   recordDetection(runId: string, techniqueId: string, outcome: string): Promise<void>;
 
@@ -365,6 +379,8 @@ export interface RInfraClient {
 
   // Coverage & ATT&CK Navigator export
   getCoverage(engagementId: string): Promise<Coverage>;
+  // Coverage scoped to a single run — how one emulation affected coverage.
+  getRunCoverage(runId: string): Promise<Coverage>;
   getProjectCoverage(projectId: string): Promise<Coverage>;
   getNavigatorLayer(engagementId: string): Promise<unknown>;
 
@@ -468,6 +484,73 @@ function mockTopology(engagementId: string): { nodes: CanvasNode[]; edges: Canva
 }
 
 let _mockSeq = 1;
+
+// ---------- Mock run history (demo mode) ----------
+// A session-local registry so the run picker + per-run coverage have content
+// without a backend: seeded with two completed runs per engagement; startRun
+// appends a new one. Real history comes from the backend in REST mode.
+const _mockRuns: Record<string, RunSummary[]> = {};
+
+// seededInt is a small deterministic hash → [0,n), so a given seed always maps
+// to the same value (stable demo data across renders).
+function seededInt(seed: string, n: number): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h) % n;
+}
+
+function ensureMockRuns(engagementId: string): RunSummary[] {
+  if (!_mockRuns[engagementId]) {
+    const now = Date.now();
+    _mockRuns[engagementId] = [0, 1].map((k) => {
+      const s = SCENARIOS[seededInt(engagementId + ":" + k, SCENARIOS.length)];
+      const startMs = now - (k + 1) * 24 * 3600 * 1000;
+      return {
+        id: `mock-run-${engagementId}-seed${k}`,
+        engagementId,
+        scenarioId: s.id,
+        status: "success",
+        startedAt: new Date(startMs).toISOString(),
+        finishedAt: new Date(startMs + 30 * 60 * 1000).toISOString(),
+      };
+    });
+  }
+  return _mockRuns[engagementId];
+}
+
+function findMockRun(runId: string): RunSummary | undefined {
+  for (const list of Object.values(_mockRuns)) {
+    const hit = list.find((r) => r.id === runId);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+// mockRunResults synthesizes plausible per-technique results for a run, seeded
+// by runId so they're stable: ~70% executed, the rest attempted-failed or
+// unsupported, with a defender outcome on the executed ones.
+function mockRunResults(run: RunSummary): TechniqueResult[] {
+  const scen = SCENARIOS.find((s) => s.id === run.scenarioId);
+  if (!scen) return [];
+  const dets = ["none", "alerted", "detected", "blocked"];
+  return scen.techniques.map((t) => {
+    const roll = seededInt(run.id + ":" + t.id, 100);
+    const status = roll < 70 ? "success" : roll < 86 ? "attempted_failed" : "unsupported";
+    const detection = status === "success" ? dets[seededInt(run.id + t.id + "d", dets.length)] : "none";
+    return {
+      techniqueId: t.id,
+      status,
+      output: "",
+      detection,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      err: status === "attempted_failed" ? "simulated failure" : "",
+    };
+  });
+}
 
 // ---------- MockClient ----------
 
@@ -726,9 +809,17 @@ export class MockClient implements RInfraClient {
   }
 
   async startRun(engagementId: string, scenarioId: string): Promise<{ runId: string }> {
-    void engagementId;
-    void scenarioId;
-    return { runId: "mock-run-" + Date.now() };
+    const now = Date.now();
+    const runId = "mock-run-" + engagementId + "-" + now;
+    ensureMockRuns(engagementId).push({
+      id: runId,
+      engagementId,
+      scenarioId,
+      status: "success",
+      startedAt: new Date(now).toISOString(),
+      finishedAt: new Date(now + 5 * 60 * 1000).toISOString(),
+    });
+    return { runId };
   }
 
   async startProjectRun(projectId: string, scenarioId: string): Promise<ProjectRunResult> {
@@ -748,6 +839,10 @@ export class MockClient implements RInfraClient {
   }
 
   async getRun(runId: string): Promise<ScenarioRun> {
+    const sum = findMockRun(runId);
+    if (sum) {
+      return { ...sum, results: mockRunResults(sum) };
+    }
     return {
       id: runId,
       engagementId: "",
@@ -757,6 +852,12 @@ export class MockClient implements RInfraClient {
       startedAt: null,
       finishedAt: null,
     };
+  }
+
+  async listRuns(engagementId: string): Promise<RunSummary[]> {
+    return [...ensureMockRuns(engagementId)].sort((a, b) =>
+      (b.startedAt ?? "").localeCompare(a.startedAt ?? "")
+    );
   }
 
   async recordDetection(runId: string, techniqueId: string, outcome: string): Promise<void> {
@@ -781,6 +882,10 @@ export class MockClient implements RInfraClient {
 
   async getCoverage(engagementId: string): Promise<Coverage> {
     return buildMockCoverage(engagementId);
+  }
+
+  async getRunCoverage(runId: string): Promise<Coverage> {
+    return buildMockCoverage(runId);
   }
 
   async getProjectCoverage(projectId: string): Promise<Coverage> {
@@ -1509,6 +1614,7 @@ export class RestClient implements RInfraClient {
           techniqueId: String(r["techniqueId"] ?? ""),
           status: String(r["status"] ?? ""),
           output: String(r["output"] ?? ""),
+          detection: String(r["detection"] ?? "none"),
           startedAt: r["startedAt"] ? String(r["startedAt"]) : null,
           finishedAt: r["finishedAt"] ? String(r["finishedAt"]) : null,
           err: String(r["err"] ?? ""),
@@ -1523,6 +1629,20 @@ export class RestClient implements RInfraClient {
       startedAt: run["startedAt"] ? String(run["startedAt"]) : null,
       finishedAt: run["finishedAt"] ? String(run["finishedAt"]) : null,
     };
+  }
+
+  async listRuns(engagementId: string): Promise<RunSummary[]> {
+    const body = await this.fetch<{ runs: Record<string, unknown>[] }>(
+      `/engagements/${engagementId}/runs`
+    );
+    return (body.runs ?? []).map((r) => ({
+      id: String(r["id"] ?? ""),
+      engagementId: String(r["engagementId"] ?? engagementId),
+      scenarioId: String(r["scenarioId"] ?? ""),
+      status: String(r["status"] ?? ""),
+      startedAt: r["startedAt"] ? String(r["startedAt"]) : null,
+      finishedAt: r["finishedAt"] ? String(r["finishedAt"]) : null,
+    }));
   }
 
   async recordDetection(runId: string, techniqueId: string, outcome: string): Promise<void> {
@@ -1574,6 +1694,12 @@ export class RestClient implements RInfraClient {
   async getCoverage(engagementId: string): Promise<Coverage> {
     const c = await this.fetch<Coverage>(`/engagements/${engagementId}/coverage`);
     // The backend rollup doesn't emit the TRM yet; derive it from the counts.
+    const trm = c.trm ?? trmFromCounts(c.exercisedCount ?? 0, c.validatedCount ?? 0);
+    return { ...c, trm, trmTrend: c.trmTrend ?? [{ label: "now", trm }] };
+  }
+
+  async getRunCoverage(runId: string): Promise<Coverage> {
+    const c = await this.fetch<Coverage>(`/runs/${runId}/coverage`);
     const trm = c.trm ?? trmFromCounts(c.exercisedCount ?? 0, c.validatedCount ?? 0);
     return { ...c, trm, trmTrend: c.trmTrend ?? [{ label: "now", trm }] };
   }
