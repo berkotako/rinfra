@@ -768,6 +768,24 @@ func (h *handlers) startRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"runId": runID})
 }
 
+// listRuns returns the runs for an engagement (newest-relevant first as the
+// store orders them) as lightweight summaries — enough to populate the run
+// picker on the Coverage & Reporting page. The engagement-scoped route is
+// already access-gated by middleware.
+func (h *handlers) listRuns(w http.ResponseWriter, r *http.Request) {
+	engagementID := chi.URLParam(r, "id")
+	runs, err := h.svc.Emulation.ListRuns(r.Context(), engagementID)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, runSummaryToJSON(run))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+}
+
 func (h *handlers) getRun(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	run, err := h.svc.Emulation.GetRun(r.Context(), id)
@@ -784,6 +802,30 @@ func (h *handlers) getRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": runToJSON(run)})
+}
+
+// getRunCoverage returns the Coverage report scoped to a single run, so the
+// dashboard can show how one emulation affected coverage. Authorized against the
+// owning engagement's project membership, like getRun.
+func (h *handlers) getRunCoverage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	run, err := h.svc.Emulation.GetRun(r.Context(), id)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	if eng, err := h.svc.Engagement.Get(r.Context(), run.EngagementID); err == nil {
+		if !h.canAccessEngagement(r.Context(), actorUser(r.Context()), eng) {
+			writeErrorCode(w, http.StatusForbidden, "forbidden", "you do not have access to this run")
+			return
+		}
+	}
+	coverage, err := h.svc.Emulation.GetRunCoverage(r.Context(), id)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, coverage)
 }
 
 type recordDetectionRequest struct {

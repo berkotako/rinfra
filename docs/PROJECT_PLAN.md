@@ -51,7 +51,9 @@ _Last updated: 2026-06-22._
   **SSH tunnel with bounded lifecycle** (ownership + idle/absolute TTL +
   shutdown), **in-browser web shell over WebSocket**.
 - Emulation: scenarios **full CRUD** + runs; **TTPs full CRUD**; coverage
-  rollup; ATT&CK **Navigator JSON export**.
+  rollup (engagement-wide **and per-run** — a run picker on Coverage & Reporting
+  re-scopes the TRM/matrix and shows that run's per-technique results); ATT&CK
+  **Navigator JSON export**.
 - Users & projects (+ membership) administration.
 
 **Orchestration & cloud**
@@ -75,7 +77,11 @@ _Last updated: 2026-06-22._
 - Orchestrator + YAML scenario catalog (`internal/emulation/catalog`);
   **capability routing** (`service.Route`: technique → required
   platform/privilege/scope → best in-scope agent across the deployed
-  frameworks); coverage + Navigator export.
+  frameworks); coverage + Navigator export. Coverage is available at
+  engagement, project **and single-run** scope (`GET /engagements/{id}/runs`
+  lists runs; `GET /runs/{id}/coverage` rolls one run up via the same
+  `coverageFromRuns`), so the dashboard can show how one emulation affected
+  coverage, not just the aggregate.
 - **Portable technique→primitive catalog** (`internal/emulation/ttp`,
   embedded `catalog.yaml`): maps each ATT&CK ID to a closed-set `c2.Primitive`;
   every `Operator.Execute` adapter renders the primitive natively. Adding a TTP

@@ -368,6 +368,20 @@ func runToJSON(r domain.ScenarioRun) map[string]any {
 	}
 }
 
+// runSummaryToJSON is the lightweight run shape used by the run picker — no
+// per-technique results (RunsForEngagement does not load them), just the fields
+// needed to label and order a run in the list.
+func runSummaryToJSON(r domain.ScenarioRun) map[string]any {
+	return map[string]any{
+		"id":           r.ID,
+		"engagementId": r.EngagementID,
+		"scenarioId":   r.ScenarioID,
+		"status":       string(r.Status),
+		"startedAt":    r.StartedAt,
+		"finishedAt":   r.FinishedAt,
+	}
+}
+
 func nullableTime(t time.Time) any {
 	if t.IsZero() {
 		return nil
