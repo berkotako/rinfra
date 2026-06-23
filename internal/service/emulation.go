@@ -12,6 +12,7 @@ import (
 	"github.com/rinfra/rinfra/internal/emulation"
 	"github.com/rinfra/rinfra/internal/emulation/catalog"
 	"github.com/rinfra/rinfra/internal/emulation/index"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 	"github.com/rinfra/rinfra/internal/store"
 )
 
@@ -832,46 +833,74 @@ func (s *EmulationService) coverageFromRuns(ctx context.Context, scopeID string,
 		"defense-evasion", "credential-access", "discovery", "lateral-movement",
 		"collection", "command-and-control", "exfiltration", "impact",
 	}
-	tacticTechs := make(map[string][]Techniquecoverage)
-	for _, sc := range catalog.List() {
+	// Technique display metadata (name, tactic) from every known scenario —
+	// built-in, operator-authored, and imported — so techniques that ran outside
+	// the built-in catalog are still labelled. ListScenarios() already unions all
+	// three sources.
+	for _, sc := range s.ListScenarios() {
 		for _, t := range sc.Techniques {
-			names[t.AttackID] = t.Name
-			tactics[t.AttackID] = t.Tactic
+			if t.Name != "" {
+				names[t.AttackID] = t.Name
+			}
+			if t.Tactic != "" {
+				tactics[t.AttackID] = t.Tactic
+			}
 		}
 	}
 
-	// Build technique coverage per tactic from catalog.
+	// The technique universe for the heatmap is the built-in catalog board
+	// (stable ATT&CK context, shown even when never reached) UNION every
+	// technique that actually ran in these runs. The latter is what fixes the
+	// undercount: previously authored/imported techniques that were exercised
+	// were dropped because only the built-in catalog seeded the board.
+	universe := make(map[string]bool)
 	for _, sc := range catalog.List() {
 		for _, t := range sc.Techniques {
-			disp, ok := dispos[t.AttackID]
-			if !ok {
-				disp = DispNotRun // default: never reached
-			}
-			lvl := levelFromDisposition(disp)
-			tc := Techniquecoverage{
-				AttackID:    t.AttackID,
-				Name:        t.Name,
-				Tactic:      t.Tactic,
-				Level:       lvl,
-				Disposition: disp,
-			}
-			// Deduplicate: if already added for this tactic with the same ID, keep best.
-			tacs := tacticTechs[t.Tactic]
-			found := false
-			for i, existing := range tacs {
-				if existing.AttackID == t.AttackID {
-					if dispositionRank(disp) > dispositionRank(existing.Disposition) {
-						tacs[i].Level = lvl
-						tacs[i].Disposition = disp
-					}
-					found = true
-					break
+			universe[t.AttackID] = true
+		}
+	}
+	for id := range dispos {
+		universe[id] = true
+	}
+
+	tacticTechs := make(map[string][]Techniquecoverage)
+	for id := range universe {
+		name, tactic := names[id], tactics[id]
+		// Fall back to the TTP catalog, then to the bare ID, so an exercised
+		// technique with no scenario metadata is still placed on the board.
+		if name == "" || tactic == "" {
+			if n, tac, ok := ttp.Default().Lookup(id); ok {
+				if name == "" {
+					name = n
+				}
+				if tactic == "" {
+					tactic = tac
 				}
 			}
-			if !found {
-				tacticTechs[t.Tactic] = append(tacticTechs[t.Tactic], tc)
-			}
 		}
+		if name == "" {
+			name = id
+		}
+		if tactic == "" {
+			tactic = "unknown"
+		}
+		disp, ok := dispos[id]
+		if !ok {
+			disp = DispNotRun // in the board but never reached in these runs
+		}
+		tacticTechs[tactic] = append(tacticTechs[tactic], Techniquecoverage{
+			AttackID:    id,
+			Name:        name,
+			Tactic:      tactic,
+			Level:       levelFromDisposition(disp),
+			Disposition: disp,
+		})
+	}
+	// Stable ordering within each tactic (map iteration above is unordered).
+	for tactic := range tacticTechs {
+		sort.Slice(tacticTechs[tactic], func(i, j int) bool {
+			return tacticTechs[tactic][i].AttackID < tacticTechs[tactic][j].AttackID
+		})
 	}
 
 	// Build ordered tactic list.

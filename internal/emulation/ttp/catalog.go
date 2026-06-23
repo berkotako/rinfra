@@ -148,6 +148,17 @@ func (c *Catalog) Has(attackID string) bool {
 	return ok
 }
 
+// Lookup returns the catalog's display metadata (name, tactic) for an ATT&CK
+// ID. ok is false when the ID is not mapped. Used by coverage rollups to label
+// techniques that ran but are not part of a built-in scenario.
+func (c *Catalog) Lookup(attackID string) (name, tactic string, ok bool) {
+	e, ok := c.entries[attackID]
+	if !ok {
+		return "", "", false
+	}
+	return e.Name, e.Tactic, true
+}
+
 // AttackIDs returns the ATT&CK IDs the catalog maps, unsorted.
 func (c *Catalog) AttackIDs() []string {
 	ids := make([]string, 0, len(c.entries))

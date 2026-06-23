@@ -374,6 +374,64 @@ func TestGetCoverage_Rollup(t *testing.T) {
 	}
 }
 
+// TestGetCoverage_IncludesRanNonCatalogTechnique verifies that a technique
+// which ran but is NOT part of any built-in scenario still shows up in the
+// coverage rollup. Previously the heatmap universe was seeded only from the
+// built-in catalog, so authored/imported techniques that were exercised were
+// silently dropped (undercounting the engagement's own coverage).
+func TestGetCoverage_IncludesRanNonCatalogTechnique(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+
+	runID, err := s.scenario.SaveRun(ctx, domain.ScenarioRun{
+		EngagementID: eng.ID,
+		ScenarioID:   "authored-x",
+		Status:       domain.ExecSuccess,
+		StartedAt:    time.Now().UTC(),
+		FinishedAt:   time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	// T1110.001 (Brute Force: Password Guessing) is in no built-in scenario and
+	// no TTP catalog entry — the exact case that used to vanish.
+	if err := s.scenario.SaveResult(ctx, runID, domain.Result{
+		TechniqueAttackID: "T1110.001", Status: domain.ExecSuccess,
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveResult: %v", err)
+	}
+
+	coverage, err := svcEmu.GetCoverage(ctx, eng.ID)
+	if err != nil {
+		t.Fatalf("GetCoverage: %v", err)
+	}
+
+	var found *service.Techniquecoverage
+	for _, tac := range coverage.Tactics {
+		for i, tc := range tac.Techniques {
+			if tc.AttackID == "T1110.001" {
+				found = &tac.Techniques[i]
+			}
+		}
+	}
+	if found == nil {
+		t.Fatal("ran technique T1110.001 missing from coverage (universe should include exercised techniques)")
+	}
+	if found.Level != service.CoverageLevelExecuted {
+		t.Errorf("T1110.001: want executed(2), got %d", found.Level)
+	}
+	if coverage.ExecutedCount < 1 {
+		t.Errorf("ExecutedCount: want >= 1, got %d", coverage.ExecutedCount)
+	}
+}
+
 // TestGetCoverage_Empty verifies that an engagement with no runs returns
 // a well-formed coverage with all levels at 0.
 func TestGetCoverage_Empty(t *testing.T) {
