@@ -459,6 +459,86 @@ func TestEmulation_FactChaining_ProduceConsume(t *testing.T) {
 	}
 }
 
+// captureReverter is an Operator that also implements c2.Reverter, recording
+// the AttackIDs it is asked to revert so the cleanup path can be asserted.
+type captureReverter struct{ reverted *[]string }
+
+func (captureReverter) StartListener(_ context.Context, _ c2.ListenerSpec) error { return nil }
+func (captureReverter) Sessions(_ context.Context) ([]c2.Session, error) {
+	return []c2.Session{{ID: "s1", Host: "10.10.10.10", User: "SYSTEM"}}, nil
+}
+func (captureReverter) Execute(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: "ok",
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+func (c captureReverter) Revert(_ context.Context, _ string, t domain.Technique) (domain.Result, error) {
+	*c.reverted = append(*c.reverted, t.AttackID)
+	return domain.Result{
+		TechniqueAttackID: t.AttackID, Status: domain.ExecSuccess, Output: "reverted",
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+	}, nil
+}
+
+type captureResolver struct{ op captureReverter }
+
+func (r captureResolver) Resolve(_ context.Context, _ domain.Engagement) (c2.Operator, string, bool) {
+	return r.op, "s1", true
+}
+
+// TestEmulation_Cleanup_RevertsPersistence verifies that a successfully-executed
+// persistence technique is reverted at the end of the run (via c2.Reverter),
+// that non-persistence techniques are not, and that cleanup is audited without
+// being recorded as a technique result (so coverage is not inflated).
+func TestEmulation_Cleanup_RevertsPersistence(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+
+	svcEmu := service.NewEmulationService(s.eng, s.scenario, s.audit, hub)
+	svcEmu.WithUserScenarios(memstore.NewUserScenarioStore())
+	var reverted []string
+	svcEmu.WithResolver(captureResolver{op: captureReverter{reverted: &reverted}})
+
+	sc, err := svcEmu.CreateScenario(ctx, domain.Scenario{
+		Name: "persist",
+		Techniques: []domain.Technique{
+			{AttackID: "T1082", Name: "System Info"},        // not cleanable
+			{AttackID: "T1053.005", Name: "Scheduled Task"}, // cleanable
+		},
+	}, "op")
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	runID, err := svcEmu.Start(ctx, eng.ID, sc.ID, "op")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run := waitForRun(t, svcEmu, runID)
+
+	if len(reverted) != 1 || reverted[0] != "T1053.005" {
+		t.Fatalf("want exactly T1053.005 reverted, got %v", reverted)
+	}
+	if !hasAuditAction(s.audit, "emulation.cleanup", eng.ID) {
+		t.Error("expected an emulation.cleanup audit event")
+	}
+	// Cleanup must NOT appear as an extra technique result (coverage stays honest):
+	// exactly one result per executed technique.
+	n := 0
+	for _, r := range run.Results {
+		if r.TechniqueAttackID == "T1053.005" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("scheduled-task results: want 1 (cleanup not a result), got %d", n)
+	}
+}
+
 // fanoutOperator's T1016 reports two routable IPs; any technique with a
 // "command" input echoes it back so the test can count fan-out executions.
 type fanoutOperator struct{}

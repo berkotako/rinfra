@@ -97,6 +97,12 @@ _Last updated: 2026-06-22._
   is recorded `not_run`. A technique referencing a multi-value fact **fans out**
   (`Planner.PrepareAll`), running once per discovered value. An autonomous
   next-technique decision engine is deferred (seam only).
+- **Emulation-artifact cleanup**: persistence techniques (scheduled task, Run
+  key) are reverted at the end of a run via the optional `c2.Reverter` operator
+  capability (Sliver/Mythic/Metasploit), in reverse order, audited as
+  `emulation.cleanup` — the reliable-teardown invariant applied to host
+  artifacts, not just infrastructure. Cleanups are not recorded as technique
+  results, so coverage stays honest.
 - **Honest BAS status taxonomy**: per-technique disposition
   (executed / attempted-failed / manual-required / unsupported /
   blocked-by-scope / not-run); coverage's "exercised" count and the TRM count

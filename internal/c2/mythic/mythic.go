@@ -283,6 +283,64 @@ func techniqueToMythicTasking(t domain.Technique) (cmd string, params map[string
 	return renderMythicPrimitive(prim)
 }
 
+// Revert undoes a persistence technique Mythic created (deletes the scheduled
+// task via a schtasks tasking). Implements c2.Reverter.
+func (o *operator) Revert(ctx context.Context, callbackID string, t domain.Technique) (domain.Result, error) {
+	start := time.Now()
+	cmd, params, ok := mythicCleanupTasking(t)
+	if !ok {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecUnsupported,
+			Output:            "mythic: no cleanup defined for this technique",
+			StartedAt:         start,
+			FinishedAt:        time.Now(),
+		}, nil
+	}
+	taskID, err := o.client.IssueTasking(ctx, callbackID, cmd, params)
+	if err != nil {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecFailed,
+			StartedAt:         start,
+			FinishedAt:        time.Now(),
+			Err:               err.Error(),
+		}, nil
+	}
+	output, err := o.client.TaskOutput(ctx, taskID)
+	fin := time.Now()
+	if err != nil {
+		return domain.Result{
+			TechniqueAttackID: t.AttackID,
+			Status:            domain.ExecFailed,
+			Output:            sanitize(output),
+			StartedAt:         start,
+			FinishedAt:        fin,
+			Err:               err.Error(),
+		}, nil
+	}
+	return domain.Result{
+		TechniqueAttackID: t.AttackID,
+		Status:            domain.ExecSuccess,
+		Output:            sanitize(output),
+		StartedAt:         start,
+		FinishedAt:        fin,
+	}, nil
+}
+
+// mythicCleanupTasking renders the reverse of a persistence primitive Mythic
+// supports. ok=false when the technique has no catalog mapping or no cleanup.
+func mythicCleanupTasking(t domain.Technique) (string, map[string]string, bool) {
+	prim, ok, err := ttp.Compile(t)
+	if err != nil || !ok {
+		return "", nil, false
+	}
+	if prim.Kind == c2.PrimScheduledTask {
+		return "schtasks", map[string]string{"task_name": prim.Arg("task_name"), "action": "delete"}, true
+	}
+	return "", nil, false
+}
+
 // renderMythicPrimitive renders a portable primitive into a Mythic tasking
 // command and parameter map. Primitives Mythic does not implement (e.g. a
 // registry Run-key write) return an error so the caller records the technique

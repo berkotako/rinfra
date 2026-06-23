@@ -39,7 +39,11 @@ them as invariants; never weaken them to make a feature easier.
   audit log is immutable — no update/delete paths.
 - **Teardown must be reliable.** Orphaned infra = cost, exposure, and ToS risk.
   Provisioning is transactional where possible; every engagement supports a
-  guaranteed teardown that reconciles actual cloud state, not just our DB.
+  guaranteed teardown that reconciles actual cloud state, not just our DB. This
+  extends to **emulation artifacts**: a persistence technique (scheduled task,
+  Run key) is reverted at the end of its run via the optional `c2.Reverter`
+  capability (run in reverse order, audited as `emulation.cleanup`), so an
+  engagement leaves no orphaned persistence on the customer's host.
 
 ## Architecture
 

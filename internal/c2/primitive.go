@@ -73,6 +73,14 @@ const (
 	PrimShareDiscovery PrimitiveKind = "network_share_discovery"
 )
 
+// IsCleanable reports whether a primitive creates host-side state that should be
+// reverted at the end of a run (a persistence artifact). The emulation engine
+// asks the operator to undo these via the optional Reverter capability, so an
+// engagement leaves no orphaned persistence on the customer's host.
+func IsCleanable(k PrimitiveKind) bool {
+	return k == PrimScheduledTask || k == PrimRegistryRunKey
+}
+
 // DiscoveryCommand maps a read-only discovery primitive to the Windows built-in
 // command that enumerates it. ok=false for any non-discovery kind. The commands
 // are safe, non-destructive enumeration (no payloads, no evasion) and run

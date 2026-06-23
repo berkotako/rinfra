@@ -525,6 +525,7 @@ func (s *EmulationService) orchRunWithHooks(
 	}
 
 	planner := emulation.NewPlanner()
+	var cleanups []cleanupTarget
 	for _, t := range sc.Techniques {
 		if opExec == nil {
 			// No operator: record the specific reason (manual vs scope-blocked)
@@ -566,8 +567,10 @@ func (s *EmulationService) orchRunWithHooks(
 			}
 			planner.Observe(pt, res)
 			s.recordResult(ctx, run, res)
+			cleanups = appendCleanup(cleanups, opExec, sessionID, pt, res)
 		}
 	}
+	s.runCleanups(ctx, run, cleanups)
 
 	run.FinishedAt = time.Now()
 	run.Status = summarizeResults(run.Results)
@@ -625,6 +628,61 @@ func noOpMessage(status domain.ExecutionStatus) string {
 	}
 }
 
+// cleanupTarget is a successfully-executed persistence technique queued to be
+// reverted at the end of the run, paired with the operator+session that created
+// it (so a routed run cleans up on the same agent it persisted to).
+type cleanupTarget struct {
+	rev c2.Reverter
+	sid string
+	t   domain.Technique
+}
+
+// appendCleanup queues a cleanup for a result iff the technique succeeded, its
+// primitive creates host-side persistence (c2.IsCleanable), and the operator can
+// undo it (implements c2.Reverter). Operators without the capability are simply
+// never queued.
+func appendCleanup(cs []cleanupTarget, op any, sid string, t domain.Technique, res domain.Result) []cleanupTarget {
+	if res.Status != domain.ExecSuccess {
+		return cs
+	}
+	prim, ok, err := ttp.Compile(t)
+	if !ok || err != nil || !c2.IsCleanable(prim.Kind) {
+		return cs
+	}
+	rev, ok := op.(c2.Reverter)
+	if !ok {
+		return cs
+	}
+	return append(cs, cleanupTarget{rev: rev, sid: sid, t: t})
+}
+
+// runCleanups reverts queued persistence in reverse order (last-created undone
+// first), auditing and publishing each outcome. Cleanups are NOT recorded as
+// technique results, so they never inflate coverage; the audit log is the
+// record that the engagement left no orphaned persistence behind.
+func (s *EmulationService) runCleanups(ctx context.Context, run *domain.ScenarioRun, targets []cleanupTarget) {
+	for i := len(targets) - 1; i >= 0; i-- {
+		tg := targets[i]
+		res, err := tg.rev.Revert(ctx, tg.sid, tg.t)
+		detail := string(res.Status)
+		if err != nil {
+			detail = "error: " + err.Error()
+		}
+		_ = s.audit.Record(ctx, audit.Event{
+			EngagementID: run.EngagementID,
+			Action:       "emulation.cleanup",
+			Target:       tg.t.AttackID,
+			Detail:       detail,
+			At:           time.Now().UTC(),
+		})
+		s.hub.Publish(Event{Kind: EventRunStatus, EngagementID: run.EngagementID, Data: map[string]any{
+			"runId":       run.ID,
+			"techniqueId": tg.t.AttackID,
+			"cleanup":     detail,
+		}})
+	}
+}
+
 // recordResult persists a technique result, publishes the per-technique SSE
 // event, and appends it to the run.
 func (s *EmulationService) recordResult(ctx context.Context, run *domain.ScenarioRun, res domain.Result) {
@@ -654,6 +712,7 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 		StartedAt:    time.Now(),
 	}
 	planner := emulation.NewPlanner()
+	var cleanups []cleanupTarget
 	for _, t := range sc.Techniques {
 		// Fact-aware gating/substitution before routing: a technique whose
 		// requirement or ${fact} input was not collected by an earlier step is an
@@ -686,6 +745,7 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 					}
 				}
 				planner.Observe(pt, res)
+				cleanups = appendCleanup(cleanups, op, sid, pt, res)
 			} else {
 				// No operator selected — record the precise reason. For an infra
 				// failure (ExecFailed) the detail carries the operator error so it
@@ -707,6 +767,7 @@ func (s *EmulationService) orchRunRouted(ctx context.Context, eng *domain.Engage
 			s.recordResult(ctx, run, res)
 		}
 	}
+	s.runCleanups(ctx, run, cleanups)
 	run.FinishedAt = time.Now()
 	run.Status = summarizeResults(run.Results)
 	return run, nil
