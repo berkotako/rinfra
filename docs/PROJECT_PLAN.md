@@ -72,10 +72,16 @@ _Last updated: 2026-06-22._
 - `internal/payload`: msfvenom generator.
 
 **Emulation**
-- Orchestrator + YAML catalog (`internal/emulation/catalog`); **capability
-  routing** (`service.Route`: technique → required platform/privilege/scope →
-  best in-scope agent across the deployed frameworks); coverage + Navigator
-  export.
+- Orchestrator + YAML scenario catalog (`internal/emulation/catalog`);
+  **capability routing** (`service.Route`: technique → required
+  platform/privilege/scope → best in-scope agent across the deployed
+  frameworks); coverage + Navigator export.
+- **Portable technique→primitive catalog** (`internal/emulation/ttp`,
+  embedded `catalog.yaml`): maps each ATT&CK ID to a closed-set `c2.Primitive`;
+  every `Operator.Execute` adapter renders the primitive natively. Adding a TTP
+  that reuses a primitive is a one-entry YAML change (no per-adapter
+  `switch t.AttackID`); Scripted-tier allowlists are derived from
+  catalog × renderer.
 - **Honest BAS status taxonomy**: per-technique disposition
   (executed / attempted-failed / manual-required / unsupported /
   blocked-by-scope / not-run); coverage's "exercised" count and the TRM count

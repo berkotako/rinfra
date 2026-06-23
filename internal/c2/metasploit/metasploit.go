@@ -28,6 +28,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 	"github.com/rinfra/rinfra/internal/secrets"
 )
 
@@ -294,61 +295,52 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	}, nil
 }
 
-// techniqueToMsfCommand maps a portable Technique to a meterpreter/shell command.
-// The SourceID references the Atomic Red Team test or Caldera ability — no
-// payload content is authored here.
+// techniqueToMsfCommand compiles a portable Technique to a meterpreter/shell
+// command: ttp.Compile resolves the technique to a portable primitive (the
+// shared catalog), and renderMsfPrimitive renders it to Metasploit's native
+// console syntax. The SourceID references the Atomic Red Team test or Caldera
+// ability — no payload content is authored here.
 func techniqueToMsfCommand(t domain.Technique) (string, error) {
-	switch t.AttackID {
-	case "T1059.001":
-		script := t.Inputs["command"]
-		if script == "" {
-			script = "whoami"
-		}
-		return fmt.Sprintf("execute -f powershell.exe -a '-c \"%s\"' -H", script), nil
+	prim, ok, err := ttp.Compile(t)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("metasploit: no catalog mapping for technique %s (source: %s id: %s)",
+			t.AttackID, t.Source, t.SourceID)
+	}
+	return renderMsfPrimitive(prim)
+}
 
-	case "T1059.003":
-		command := t.Inputs["command"]
-		if command == "" {
-			command = "whoami"
-		}
-		return fmt.Sprintf("shell cmd /c \"%s\"", command), nil
-
-	case "T1082":
+// renderMsfPrimitive renders a portable primitive into a meterpreter/shell
+// command. Primitives Metasploit does not implement (e.g. a registry Run-key
+// write) return an error so the caller records the technique unsupported.
+func renderMsfPrimitive(p c2.Primitive) (string, error) {
+	switch p.Kind {
+	case c2.PrimPowerShell:
+		return fmt.Sprintf("execute -f powershell.exe -a '-c \"%s\"' -H", p.Arg("script")), nil
+	case c2.PrimShell:
+		return fmt.Sprintf("shell cmd /c \"%s\"", p.Arg("command")), nil
+	case c2.PrimSysInfo:
 		return "sysinfo", nil
-
-	case "T1057":
+	case c2.PrimProcessList:
 		return "ps", nil
-
-	case "T1049":
+	case c2.PrimNetConnections:
 		return "netstat", nil
-
-	case "T1016":
+	case c2.PrimNetConfig:
 		return "ipconfig", nil
-
-	case "T1083":
-		path := t.Inputs["path"]
+	case c2.PrimFileList:
+		path := p.Arg("path")
 		if path == "" {
 			path = "C:\\"
 		}
 		return fmt.Sprintf("ls \"%s\"", path), nil
-
-	case "T1005":
-		path := t.Inputs["path"]
-		if path == "" {
-			return "", fmt.Errorf("T1005 requires inputs.path")
-		}
-		return fmt.Sprintf("download \"%s\"", path), nil
-
-	case "T1053.005":
-		taskName := t.Inputs["task_name"]
-		if taskName == "" {
-			taskName = "RInfraTest"
-		}
-		return fmt.Sprintf(`shell schtasks /create /tn "%s" /tr whoami /sc once /st 00:00`, taskName), nil
-
+	case c2.PrimDownload:
+		return fmt.Sprintf("download \"%s\"", p.Arg("path")), nil
+	case c2.PrimScheduledTask:
+		return fmt.Sprintf(`shell schtasks /create /tn "%s" /tr whoami /sc once /st 00:00`, p.Arg("task_name")), nil
 	default:
-		return "", fmt.Errorf("metasploit: no command mapping for technique %s (source: %s id: %s)",
-			t.AttackID, t.Source, t.SourceID)
+		return "", fmt.Errorf("metasploit: unsupported primitive %q", p.Kind)
 	}
 }
 

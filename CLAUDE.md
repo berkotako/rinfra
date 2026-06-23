@@ -93,10 +93,29 @@ Generation is engagement-bound and audited, gated by `CanDeploy()`.
 ### Portable technique format (decided)
 
 Scenarios are authored once in a **portable internal format** (`domain.Technique`)
-and each `Operator.Execute` adapter translates a technique down to its
-framework's native primitives. This keeps scenarios reusable across C2s — the
-point, for a consultancy that switches frameworks per engagement. `Technique`
-references an Atomic Red Team / Caldera ability; it is not a payload.
+and translated down to each framework's native primitives. This keeps scenarios
+reusable across C2s — the point, for a consultancy that switches frameworks per
+engagement. `Technique` references an Atomic Red Team / Caldera ability; it is
+not a payload.
+
+The translation is a **two-layer, data-driven** pipeline (do not reintroduce
+per-adapter `switch t.AttackID` tables):
+
+1. **Catalog** (`internal/emulation/ttp`, embedded `catalog.yaml`) maps an
+   ATT&CK ID → a portable **`c2.Primitive`** (closed `PrimitiveKind` set:
+   powershell, shell, sysinfo, process_list, net_connections, net_config,
+   file_list, download, scheduled_task, registry_run_key) plus argument bindings
+   (`from` input key, `default`, `required`). `ttp.Compile(t)` resolves a
+   `Technique` to a primitive. **This is the "add a TTP" surface** — a technique
+   that reuses an existing primitive is a one-entry YAML change, no Go edits.
+2. **Renderers** — each `Operator.Execute` adapter has a small
+   `renderXxxPrimitive(c2.Primitive)` switching over the closed primitive set
+   and emitting that framework's native command(s). Framework-specific defaults
+   live here (e.g. `file_list` root is `.` on Sliver/Havoc/PoshC2, `C:\` on
+   Metasploit); universal defaults (`whoami`, `RInfraTest`) live in the catalog.
+   A framework that doesn't implement a primitive returns `ExecUnsupported` (no
+   fabricated attempt). Scripted-tier allowlists (Havoc/PoshC2) are **derived**
+   from "catalog × renderer", not hand-maintained.
 
 ## Tech stack & conventions
 
@@ -166,7 +185,8 @@ layer assumes reverse-proxy + categorized-domain patterns, not fronting tricks.
 - `internal/cloud` — `CloudProvider` interface + per-provider impls + registry.
 - `internal/c2` — `C2Provider`/`Operator` interfaces + per-framework impls + registry.
 - `internal/payload` — `Generator` interface (msfvenom) + registry.
-- `internal/emulation` — scenario orchestrator.
+- `internal/emulation` — scenario orchestrator; `catalog` (scenario YAMLs),
+  `index` (SRA index import), `ttp` (technique→`c2.Primitive` catalog).
 - `internal/audit` — append-only audit log.
 - `internal/store` — persistence interfaces.
 - `migrations` — Postgres schema.
@@ -174,6 +194,12 @@ layer assumes reverse-proxy + categorized-domain patterns, not fronting tricks.
 
 ## Working preferences (Claude Code)
 
+- **Docs are part of the change (definition of done).** Any change that alters
+  architecture, an interface, a behavior, a build/run step, or the status of the
+  build order MUST update the relevant Markdown in the **same PR** — this file
+  first, plus `docs/` (SUPPORT_MATRIX, PROJECT_PLAN, the runbooks) as applicable.
+  Capture *what* changed, *why*, and *how it works now*. A PR that changes code
+  but leaves the docs describing the old behavior is incomplete.
 - **Model floor: minimum Sonnet.** Never dispatch work to Haiku — not for
   subagents / the Task tool, not for any delegated step. Use Sonnet at minimum,
   Opus for anything non-trivial. When spawning agents, set the model explicitly
