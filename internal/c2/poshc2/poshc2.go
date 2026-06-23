@@ -25,6 +25,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 func init() { c2.Register(&provider{}) }
@@ -36,14 +37,6 @@ const (
 	poshPort       = 443
 )
 
-// supportedTechniques is the narrow set PoshC2's CLI wrapper reliably handles.
-var supportedTechniques = map[string]bool{
-	"T1059.001": true, // PowerShell
-	"T1082":     true, // System Information Discovery
-	"T1057":     true, // Process Discovery
-	"T1083":     true, // File and Directory Discovery
-}
-
 type provider struct{}
 
 func (p *provider) Name() string         { return "poshc2" }
@@ -52,15 +45,28 @@ func (p *provider) Tier() c2.SupportTier { return c2.TierScripted }
 // Capabilities reports PoshC2's routing metadata: Windows/Linux implants over
 // HTTPS, with an explicit technique allowlist matching the automated subset.
 func (p *provider) Capabilities() c2.Capabilities {
-	techs := make([]string, 0, len(supportedTechniques))
-	for id := range supportedTechniques {
-		techs = append(techs, id)
-	}
 	return c2.Capabilities{
 		Platforms:         []string{"windows", "linux"},
-		Techniques:        techs,
+		Techniques:        supportedAttackIDs(),
 		ListenerProtocols: []string{"https"},
 	}
+}
+
+// supportedAttackIDs returns the catalog techniques PoshC2 can run automatically:
+// those that compile to a primitive renderPoshPrimitive renders. This derives
+// the Scripted-tier subset from the catalog instead of a hand-kept list.
+func supportedAttackIDs() []string {
+	var ids []string
+	for _, id := range ttp.Default().AttackIDs() {
+		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
+		if !ok || err != nil {
+			continue
+		}
+		if _, rok := renderPoshPrimitive(prim); rok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // Deploy installs PoshC2 on the node via SSH using the official release.
@@ -176,7 +182,11 @@ func (o *operator) Sessions(ctx context.Context) ([]c2.Session, error) {
 func (o *operator) Execute(ctx context.Context, implantID string, t domain.Technique) (domain.Result, error) {
 	start := time.Now()
 
-	if !supportedTechniques[t.AttackID] {
+	cmd, ok := techniqueToCommand(t)
+	if !ok {
+		// Outside the subset PoshC2's CLI wrapper reliably handles (no catalog
+		// mapping, or a primitive PoshC2 doesn't render) — Scripted-tier means
+		// the operator drives it manually.
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecUnsupported,
@@ -187,7 +197,6 @@ func (o *operator) Execute(ctx context.Context, implantID string, t domain.Techn
 		}, nil
 	}
 
-	cmd := techniqueToCommand(t)
 	output, err := o.client.Execute(ctx, implantID, cmd)
 	fin := time.Now()
 	if err != nil {
@@ -209,26 +218,38 @@ func (o *operator) Execute(ctx context.Context, implantID string, t domain.Techn
 	}, nil
 }
 
-func techniqueToCommand(t domain.Technique) string {
-	switch t.AttackID {
-	case "T1059.001":
-		cmd := t.Inputs["command"]
-		if cmd == "" {
-			cmd = "whoami"
-		}
-		return cmd
-	case "T1082":
-		return "$env:COMPUTERNAME; [System.Environment]::OSVersion"
-	case "T1057":
-		return "Get-Process | Select-Object Id, ProcessName"
-	case "T1083":
-		path := t.Inputs["path"]
+// techniqueToCommand compiles a portable Technique to a PoshC2 PowerShell command
+// via the shared catalog (ttp.Compile) + renderPoshPrimitive. ok=false means the
+// technique is outside the narrow set PoshC2's CLI wrapper reliably handles —
+// deriving the Scripted-tier support set from the catalog rather than a separate
+// hand-maintained allowlist.
+func techniqueToCommand(t domain.Technique) (string, bool) {
+	prim, ok, err := ttp.Compile(t)
+	if !ok || err != nil {
+		return "", false
+	}
+	return renderPoshPrimitive(prim)
+}
+
+// renderPoshPrimitive renders a portable primitive into a PoshC2 implant command
+// (PowerShell). ok=false for primitives outside PoshC2's reliable subset — the
+// operator runs those by hand via the PoshC2 client.
+func renderPoshPrimitive(p c2.Primitive) (string, bool) {
+	switch p.Kind {
+	case c2.PrimPowerShell:
+		return p.Arg("script"), true
+	case c2.PrimSysInfo:
+		return "$env:COMPUTERNAME; [System.Environment]::OSVersion", true
+	case c2.PrimProcessList:
+		return "Get-Process | Select-Object Id, ProcessName", true
+	case c2.PrimFileList:
+		path := p.Arg("path")
 		if path == "" {
 			path = "."
 		}
-		return fmt.Sprintf("Get-ChildItem '%s'", path)
+		return fmt.Sprintf("Get-ChildItem '%s'", path), true
 	default:
-		return "whoami"
+		return "", false
 	}
 }
 

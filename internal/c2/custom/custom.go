@@ -42,6 +42,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 func init() { c2.Register(&provider{}) }
@@ -210,20 +211,34 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	}, nil
 }
 
+// techniqueToCommand compiles a portable Technique to a custom-framework command
+// via the shared catalog (ttp.Compile) + renderCustomPrimitive. The custom
+// framework implements only a narrow primitive set; anything else is reported
+// unsupported.
 func techniqueToCommand(t domain.Technique) (string, error) {
-	switch t.AttackID {
-	case "T1082":
+	prim, ok, err := ttp.Compile(t)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("custom: no catalog mapping for technique %s", t.AttackID)
+	}
+	return renderCustomPrimitive(prim)
+}
+
+// renderCustomPrimitive renders a portable primitive into the custom framework's
+// command vocabulary. Replace with the real framework's verbs; primitives it
+// does not implement return an error so the caller records them unsupported.
+func renderCustomPrimitive(p c2.Primitive) (string, error) {
+	switch p.Kind {
+	case c2.PrimSysInfo:
 		return "sysinfo", nil
-	case "T1057":
+	case c2.PrimProcessList:
 		return "ps", nil
-	case "T1059.001":
-		cmd := t.Inputs["command"]
-		if cmd == "" {
-			cmd = "whoami"
-		}
-		return fmt.Sprintf("powershell %s", cmd), nil
+	case c2.PrimPowerShell:
+		return fmt.Sprintf("powershell %s", p.Arg("script")), nil
 	default:
-		return "", fmt.Errorf("custom: no command mapping for technique %s", t.AttackID)
+		return "", fmt.Errorf("custom: unsupported primitive %q", p.Kind)
 	}
 }
 

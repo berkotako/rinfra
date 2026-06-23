@@ -34,6 +34,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 func init() { c2.Register(&provider{}) }
@@ -45,35 +46,38 @@ const (
 	havocPort       = 40056 // default Havoc teamserver port
 )
 
-// supportedTechniques lists the ATT&CK technique IDs that the Havoc scripting
-// API reliably exposes. Techniques outside this set return ExecUnsupported.
-var supportedTechniques = map[string]bool{
-	"T1059.001": true, // PowerShell
-	"T1059.003": true, // cmd.exe
-	"T1082":     true, // System Information Discovery
-	"T1057":     true, // Process Discovery
-	"T1049":     true, // System Network Connections Discovery
-	"T1016":     true, // System Network Configuration Discovery
-	"T1083":     true, // File and Directory Discovery
-}
-
 type provider struct{}
 
 func (p *provider) Name() string         { return "havoc" }
 func (p *provider) Tier() c2.SupportTier { return c2.TierScripted }
 
 // Capabilities reports Havoc's routing metadata: Windows demons over HTTPS, with
-// an explicit technique allowlist matching the Scripted-tier automated subset.
+// the technique allowlist DERIVED from the shared catalog — every catalog
+// technique whose primitive renderHavocPrimitive supports. This keeps the
+// Scripted-tier automated subset in sync with the renderer automatically,
+// instead of a separately maintained list.
 func (p *provider) Capabilities() c2.Capabilities {
-	techs := make([]string, 0, len(supportedTechniques))
-	for id := range supportedTechniques {
-		techs = append(techs, id)
-	}
 	return c2.Capabilities{
 		Platforms:         []string{"windows"},
-		Techniques:        techs,
+		Techniques:        supportedAttackIDs(),
 		ListenerProtocols: []string{"https"},
 	}
+}
+
+// supportedAttackIDs returns the catalog techniques Havoc can run automatically:
+// those that compile to a primitive renderHavocPrimitive renders.
+func supportedAttackIDs() []string {
+	var ids []string
+	for _, id := range ttp.Default().AttackIDs() {
+		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
+		if !ok || err != nil {
+			continue
+		}
+		if _, rok := renderHavocPrimitive(prim); rok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // Deploy installs the upstream Havoc teamserver release on the node via SSH.
@@ -223,7 +227,11 @@ func (o *operator) Sessions(ctx context.Context) ([]c2.Session, error) {
 func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Technique) (domain.Result, error) {
 	start := time.Now()
 
-	if !supportedTechniques[t.AttackID] {
+	cmd, ok := techniqueToHavocCommand(t)
+	if !ok {
+		// Outside the subset Havoc's scripting API reliably exposes (no catalog
+		// mapping, or a primitive Havoc doesn't render) — Scripted-tier means the
+		// operator drives it manually.
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecUnsupported,
@@ -231,17 +239,6 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 				"operator should execute manually", t.AttackID),
 			StartedAt:  start,
 			FinishedAt: time.Now(),
-		}, nil
-	}
-
-	cmd, err := techniqueToHavocCommand(t)
-	if err != nil {
-		return domain.Result{
-			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecUnsupported,
-			Output:            err.Error(),
-			StartedAt:         start,
-			FinishedAt:        time.Now(),
 		}, nil
 	}
 
@@ -267,45 +264,46 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	}, nil
 }
 
-// techniqueToHavocCommand maps a portable Technique to a Havoc demon command.
-// Only techniques in supportedTechniques should reach this function.
-func techniqueToHavocCommand(t domain.Technique) (string, error) {
-	switch t.AttackID {
-	case "T1059.001":
-		script := t.Inputs["command"]
-		if script == "" {
-			script = "whoami"
-		}
-		return fmt.Sprintf("powershell %s", script), nil
+// techniqueToHavocCommand compiles a portable Technique to a Havoc demon command
+// via the shared catalog (ttp.Compile) + renderHavocPrimitive. ok=false means
+// the technique is outside Havoc's reliably-scriptable subset — either it has no
+// catalog mapping or it compiles to a primitive Havoc doesn't render. This
+// derives the Scripted-tier support set from the catalog instead of a separate
+// hand-maintained allowlist.
+func techniqueToHavocCommand(t domain.Technique) (string, bool) {
+	prim, ok, err := ttp.Compile(t)
+	if !ok || err != nil {
+		return "", false
+	}
+	return renderHavocPrimitive(prim)
+}
 
-	case "T1059.003":
-		command := t.Inputs["command"]
-		if command == "" {
-			command = "whoami"
-		}
-		return fmt.Sprintf("shell %s", command), nil
-
-	case "T1082":
-		return "sysinfo", nil
-
-	case "T1057":
-		return "ps", nil
-
-	case "T1049":
-		return "netstat", nil
-
-	case "T1016":
-		return "ipconfig", nil
-
-	case "T1083":
-		path := t.Inputs["path"]
+// renderHavocPrimitive renders a portable primitive into a Havoc demon command.
+// ok=false for primitives outside Havoc's reliably-scriptable subset (e.g.
+// download, scheduled task, registry persistence) — the operator runs those by
+// hand.
+func renderHavocPrimitive(p c2.Primitive) (string, bool) {
+	switch p.Kind {
+	case c2.PrimPowerShell:
+		return fmt.Sprintf("powershell %s", p.Arg("script")), true
+	case c2.PrimShell:
+		return fmt.Sprintf("shell %s", p.Arg("command")), true
+	case c2.PrimSysInfo:
+		return "sysinfo", true
+	case c2.PrimProcessList:
+		return "ps", true
+	case c2.PrimNetConnections:
+		return "netstat", true
+	case c2.PrimNetConfig:
+		return "ipconfig", true
+	case c2.PrimFileList:
+		path := p.Arg("path")
 		if path == "" {
 			path = "."
 		}
-		return fmt.Sprintf("dir %s", path), nil
-
+		return fmt.Sprintf("dir %s", path), true
 	default:
-		return "", fmt.Errorf("havoc: no command mapping for technique %s", t.AttackID)
+		return "", false
 	}
 }
 

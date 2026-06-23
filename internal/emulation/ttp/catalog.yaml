@@ -64,9 +64,11 @@ techniques:
     tactic: discovery
     primitive: file_list
     args:
+      # No default here: the listing root is framework-specific (e.g. "." on
+      # Sliver/Havoc/PoshC2, "C:\" on Metasploit), so each renderer supplies its
+      # own fallback when no path input is given.
       path:
         from: path
-        default: "."
 
   - attack_id: "T1005"
     name: "Data from Local System"

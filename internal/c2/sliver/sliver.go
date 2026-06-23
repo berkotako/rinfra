@@ -322,7 +322,11 @@ func renderSliverPrimitive(p c2.Primitive) (string, error) {
 	case c2.PrimNetConfig:
 		return "ifconfig", nil
 	case c2.PrimFileList:
-		return fmt.Sprintf("ls %s", p.Arg("path")), nil
+		path := p.Arg("path")
+		if path == "" {
+			path = "."
+		}
+		return fmt.Sprintf("ls %s", path), nil
 	case c2.PrimDownload:
 		return fmt.Sprintf("download %s", p.Arg("path")), nil
 	case c2.PrimScheduledTask:

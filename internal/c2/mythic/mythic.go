@@ -31,6 +31,7 @@ import (
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 func init() { c2.Register(&provider{}) }
@@ -265,63 +266,53 @@ func (o *operator) Execute(ctx context.Context, callbackID string, t domain.Tech
 	}, nil
 }
 
-// techniqueToMythicTasking maps a portable Technique to a Mythic tasking
-// command + params. No payload content is authored; the SourceID references
-// the procedure in a public library (Atomic Red Team / Caldera).
+// techniqueToMythicTasking compiles a portable Technique to a Mythic tasking
+// command + params: ttp.Compile resolves the technique to a portable primitive
+// (the shared catalog), and renderMythicPrimitive renders it to Mythic's native
+// tasking. No payload content is authored; the SourceID references the procedure
+// in a public library (Atomic Red Team / Caldera).
 func techniqueToMythicTasking(t domain.Technique) (cmd string, params map[string]string, err error) {
-	p := make(map[string]string)
+	prim, ok, err := ttp.Compile(t)
+	if err != nil {
+		return "", nil, err
+	}
+	if !ok {
+		return "", nil, fmt.Errorf("mythic: no catalog mapping for technique %s (source: %s id: %s)",
+			t.AttackID, t.Source, t.SourceID)
+	}
+	return renderMythicPrimitive(prim)
+}
 
-	switch t.AttackID {
-	case "T1059.001":
-		script := t.Inputs["command"]
-		if script == "" {
-			script = "whoami"
-		}
-		return "powershell", map[string]string{"command": script}, nil
-
-	case "T1059.003":
-		command := t.Inputs["command"]
-		if command == "" {
-			command = "whoami"
-		}
-		return "shell", map[string]string{"command": command}, nil
-
-	case "T1082":
-		return "sysinfo", p, nil
-
-	case "T1057":
-		return "ps", p, nil
-
-	case "T1049":
-		return "netstat", p, nil
-
-	case "T1016":
-		return "ipconfig", p, nil
-
-	case "T1083":
-		path := t.Inputs["path"]
+// renderMythicPrimitive renders a portable primitive into a Mythic tasking
+// command and parameter map. Primitives Mythic does not implement (e.g. a
+// registry Run-key write) return an error so the caller records the technique
+// unsupported.
+func renderMythicPrimitive(p c2.Primitive) (string, map[string]string, error) {
+	switch p.Kind {
+	case c2.PrimPowerShell:
+		return "powershell", map[string]string{"command": p.Arg("script")}, nil
+	case c2.PrimShell:
+		return "shell", map[string]string{"command": p.Arg("command")}, nil
+	case c2.PrimSysInfo:
+		return "sysinfo", map[string]string{}, nil
+	case c2.PrimProcessList:
+		return "ps", map[string]string{}, nil
+	case c2.PrimNetConnections:
+		return "netstat", map[string]string{}, nil
+	case c2.PrimNetConfig:
+		return "ipconfig", map[string]string{}, nil
+	case c2.PrimFileList:
+		path := p.Arg("path")
 		if path == "" {
 			path = "."
 		}
 		return "ls", map[string]string{"path": path}, nil
-
-	case "T1005":
-		path := t.Inputs["path"]
-		if path == "" {
-			return "", nil, fmt.Errorf("T1005 requires inputs.path")
-		}
-		return "download", map[string]string{"file": path}, nil
-
-	case "T1053.005":
-		taskName := t.Inputs["task_name"]
-		if taskName == "" {
-			taskName = "RInfraTest"
-		}
-		return "schtasks", map[string]string{"task_name": taskName, "action": "create"}, nil
-
+	case c2.PrimDownload:
+		return "download", map[string]string{"file": p.Arg("path")}, nil
+	case c2.PrimScheduledTask:
+		return "schtasks", map[string]string{"task_name": p.Arg("task_name"), "action": "create"}, nil
 	default:
-		return "", nil, fmt.Errorf("mythic: no tasking mapping for technique %s (source: %s id: %s)",
-			t.AttackID, t.Source, t.SourceID)
+		return "", nil, fmt.Errorf("mythic: unsupported primitive %q", p.Kind)
 	}
 }
 
