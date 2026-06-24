@@ -48,7 +48,10 @@ func (p *provider) BuildConfig(engagementID string, creds cloud.Credentials, nod
 			"tags": tags,
 		}
 		instances[key] = map[string]any{
-			"ami":                    DefaultImage,
+			// Region-correct AMI: resolved at apply time from the public SSM
+			// parameter (see the aws_ssm_parameter data source below) rather than a
+			// hardcoded us-east-1 image.
+			"ami":                    "${data.aws_ssm_parameter.rinfra_ami.value}",
 			"instance_type":          instanceType,
 			"vpc_security_group_ids": []string{fmt.Sprintf("${aws_security_group.%s.id}", key)},
 			"tags":                   tags,
@@ -73,6 +76,12 @@ func (p *provider) BuildConfig(engagementID string, creds cloud.Credentials, nod
 			},
 		},
 		Provider: map[string]any{"aws": map[string]any{"region": region}},
+		Data: map[string]any{
+			// Latest Amazon Linux AMI for the provider's region.
+			"aws_ssm_parameter": map[string]any{
+				"rinfra_ami": map[string]any{"name": amazonLinuxSSMParameter},
+			},
+		},
 		Resource: map[string]any{
 			"aws_security_group": sgs,
 			"aws_instance":       instances,

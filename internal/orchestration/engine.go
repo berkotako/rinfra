@@ -1,5 +1,7 @@
 // Package orchestration compiles a domain.Topology into a Pulumi automation-API
-// program and drives stack.Up / stack.Destroy against a local-file backend.
+// program and drives stack.Up / stack.Destroy against a local-file backend (or a
+// remote backend when PULUMI_BACKEND_URL is set), with bounded retries on
+// transient failures.
 //
 // # Design
 //
@@ -40,6 +42,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
@@ -48,6 +51,15 @@ import (
 
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/retry"
+)
+
+// Retry policy for transient IaC failures (rate limits, throttling, 5xx, brief
+// network blips). Pulumi Up/Destroy are declarative and converge, so retrying is
+// safe.
+const (
+	deployAttempts = 3
+	deployBackoff  = 2 * time.Second
 )
 
 // NodeResult is the per-node outcome returned by Deploy.
@@ -82,22 +94,33 @@ func NodePublicIPKey(nodeID string) string { return "publicIP:" + nodeID }
 
 // Engine compiles and executes Pulumi stacks for RInfra engagements.
 type Engine struct {
-	builders map[domain.CloudProviderType]ProgramBuilder
-	stateDir string
-	log      *slog.Logger
+	builders   map[domain.CloudProviderType]ProgramBuilder
+	stateDir   string
+	backendURL string
+	log        *slog.Logger
 }
 
 // New returns a new Engine. stateDir is the root directory for local Pulumi
 // state; if empty it defaults to $HOME/.rinfra/pulumi-state.
+//
+// If PULUMI_BACKEND_URL is set in the environment it is used verbatim as the
+// state backend (e.g. s3://bucket, gs://bucket, azblob://container, or a Pulumi
+// service URL), so state survives an ephemeral container instead of living on
+// local disk. Otherwise state is the local file backend under stateDir.
 func New(stateDir string, log *slog.Logger) *Engine {
 	if stateDir == "" {
 		home, _ := os.UserHomeDir()
 		stateDir = filepath.Join(home, ".rinfra", "pulumi-state")
 	}
+	backend := os.Getenv("PULUMI_BACKEND_URL")
+	if backend == "" {
+		backend = "file://" + stateDir
+	}
 	return &Engine{
-		builders: make(map[domain.CloudProviderType]ProgramBuilder),
-		stateDir: stateDir,
-		log:      log,
+		builders:   make(map[domain.CloudProviderType]ProgramBuilder),
+		stateDir:   stateDir,
+		backendURL: backend,
+		log:        log,
 	}
 }
 
@@ -126,8 +149,9 @@ func (e *Engine) buildEnvVars(creds cloud.Credentials) map[string]string {
 	for k, v := range creds.Raw {
 		env[k] = v
 	}
-	// Tell Pulumi to use our local file backend.
-	env["PULUMI_BACKEND_URL"] = "file://" + e.stateDir
+	// Tell Pulumi which state backend to use (local file by default; a remote
+	// s3://, gs://, azblob:// or Pulumi-service URL when PULUMI_BACKEND_URL is set).
+	env["PULUMI_BACKEND_URL"] = e.backendURL
 	return env
 }
 
@@ -180,7 +204,14 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 			continue
 		}
 
-		upRes, err := stack.Up(ctx, optup.ProgressStreams(newLogWriter(e.log, engagementID)))
+		// Pulumi is declarative, so re-running Up after a transient failure is
+		// safe (it converges to the same desired state).
+		var upRes auto.UpResult
+		err = retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
+			var e2 error
+			upRes, e2 = stack.Up(ctx, optup.ProgressStreams(newLogWriter(e.log, engagementID)))
+			return e2
+		})
 		if err != nil {
 			for _, n := range providerNodes {
 				results = append(results, NodeResult{NodeID: n.ID, Err: fmt.Errorf("stack up: %w", err)})
@@ -233,7 +264,10 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 			// Stack does not exist — nothing to destroy for this provider.
 			e.log.Info("orchestration: stack not found for teardown (already destroyed?)", "engagement", engagementID, "provider", providerType, "err", err)
 		} else {
-			_, err = stack.Destroy(ctx, optdestroy.ProgressStreams(newLogWriter(e.log, engagementID)))
+			err = retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
+				_, e2 := stack.Destroy(ctx, optdestroy.ProgressStreams(newLogWriter(e.log, engagementID)))
+				return e2
+			})
 			if err != nil {
 				e.log.Error("orchestration: stack destroy error", "engagement", engagementID, "err", err)
 				// Continue to sweep phase — best-effort cleanup.

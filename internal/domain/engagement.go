@@ -177,6 +177,27 @@ func (e *Engagement) CanDeploy(now time.Time) error {
 	return nil
 }
 
+// WindowExpired reports whether an authorized/active engagement's permitted
+// activity window has closed at time `now` — its authorization has expired or
+// its RoE window has ended. This is the trigger for automatic teardown: infra
+// provisioned under a now-closed window must not linger (orphaned infra = cost,
+// exposure, ToS risk). Engagements that were never deployable (draft/closed/…)
+// are not "expired" in this sense and are left alone.
+func (e *Engagement) WindowExpired(now time.Time) bool {
+	switch e.Status {
+	case EngagementAuthorized, EngagementActive:
+	default:
+		return false
+	}
+	if !e.Authorization.ExpiresAt.IsZero() && now.After(e.Authorization.ExpiresAt) {
+		return true
+	}
+	if !e.RoE.WindowEnd.IsZero() && now.After(e.RoE.WindowEnd) {
+		return true
+	}
+	return false
+}
+
 // TargetInScope reports whether a given target (IP, CIDR, or domain) is allowed
 // by the engagement scope. Exclusions take precedence: a target matching any
 // exclusion is out of scope even if it also matches an allowed entry.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
+	"github.com/rinfra/rinfra/internal/redirector"
 	"github.com/rinfra/rinfra/internal/secrets"
 	"github.com/rinfra/rinfra/internal/store"
 )
@@ -175,6 +177,95 @@ func (s *InfraService) provisioner(ctx context.Context) Provisioner {
 // GetTopology returns the stored topology for an engagement.
 func (s *InfraService) GetTopology(ctx context.Context, engagementID string) (domain.Topology, error) {
 	return s.infra.GetTopology(ctx, engagementID)
+}
+
+// RedirectorConfig renders the reverse-proxy configuration for a redirector
+// node, resolving the upstream it fronts from the topology Edge (the node the
+// redirector forwards to) and its Profile from the built-in profile catalog.
+// This turns the abstract canvas (a redirector with a profile + an edge to a C2)
+// into concrete, inspectable nginx config. Applying it on the box (cloud-init /
+// SSH) is the live-infra step layered on top of this.
+func (s *InfraService) RedirectorConfig(ctx context.Context, engagementID, nodeID string) (string, error) {
+	t, err := s.infra.GetTopology(ctx, engagementID)
+	if err != nil {
+		return "", err
+	}
+	byID := make(map[string]domain.Node, len(t.Nodes))
+	var node *domain.Node
+	for i := range t.Nodes {
+		byID[t.Nodes[i].ID] = t.Nodes[i]
+		if t.Nodes[i].ID == nodeID {
+			node = &t.Nodes[i]
+		}
+	}
+	if node == nil {
+		return "", fmt.Errorf("node %s: %w", nodeID, store.ErrNotFound)
+	}
+	if node.Spec.Type != domain.NodeRedirector {
+		return "", fmt.Errorf("node %s is not a redirector", nodeID)
+	}
+
+	target, ok := redirectorTarget(t, nodeID, byID)
+	if !ok {
+		return "", fmt.Errorf("redirector %s has no edge to a target node to front", nodeID)
+	}
+	if target.PublicIP == "" {
+		return "", fmt.Errorf("redirector target %s has no public IP yet — provision it first", target.ID)
+	}
+
+	profile, ok := redirector.LookupProfile(node.Spec.ProfileName)
+	if !ok {
+		profile = redirector.PlainProfile()
+	}
+	up := redirector.Upstream{
+		Host: target.PublicIP,
+		Port: upstreamPort(node.Spec.Subtype, target),
+		TLS:  strings.EqualFold(node.Spec.Subtype, "https"),
+	}
+	return redirector.RenderNginx(profile, up, node.Spec.Subtype, node.Canvas.FrontDomain)
+}
+
+// redirectorTarget returns the node a redirector forwards to: the destination of
+// its first outgoing edge, preferring a C2 server, then a payload host.
+func redirectorTarget(t domain.Topology, redirectorID string, byID map[string]domain.Node) (domain.Node, bool) {
+	var fallback *domain.Node
+	for _, e := range t.Edges {
+		if e.FromNodeID != redirectorID {
+			continue
+		}
+		dst, ok := byID[e.ToNodeID]
+		if !ok {
+			continue
+		}
+		if dst.Spec.Type == domain.NodeC2Server {
+			return dst, true
+		}
+		if fallback == nil {
+			d := dst
+			fallback = &d
+		}
+	}
+	if fallback != nil {
+		return *fallback, true
+	}
+	return domain.Node{}, false
+}
+
+// upstreamPort picks the port the redirector proxies to: a port embedded in the
+// target's listener string ("host:port" or ":port") if present, else the
+// conventional default for the redirector subtype.
+func upstreamPort(subtype string, target domain.Node) int {
+	if l := target.Canvas.Listener; l != "" {
+		if i := strings.LastIndex(l, ":"); i >= 0 && i < len(l)-1 {
+			if p, err := strconv.Atoi(l[i+1:]); err == nil && p > 0 && p <= 65535 {
+				return p
+			}
+		}
+	}
+	if strings.EqualFold(subtype, "https") {
+		return 443
+	}
+	return 80
 }
 
 // SaveTopology persists a topology. Nodes that are live or draining may not be

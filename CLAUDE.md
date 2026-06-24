@@ -43,7 +43,11 @@ them as invariants; never weaken them to make a feature easier.
   extends to **emulation artifacts**: a persistence technique (scheduled task,
   Run key) is reverted at the end of its run via the optional `c2.Reverter`
   capability (run in reverse order, audited as `emulation.cleanup`), so an
-  engagement leaves no orphaned persistence on the customer's host.
+  engagement leaves no orphaned persistence on the customer's host. It also
+  extends in **time**: a background reaper (`InfraService.ReapExpired`,
+  `StartReaper`) tears down infra whose engagement activity window has closed
+  (`Engagement.WindowExpired`), audited as `infra.auto_teardown` — `CanDeploy`
+  blocks new deploys after expiry, the reaper removes what was already standing.
 
 ## Architecture
 
@@ -198,6 +202,15 @@ SIEM connectors.
 Classic domain fronting is effectively dead on the major CDNs. The redirector
 layer assumes reverse-proxy + categorized-domain patterns, not fronting tricks.
 
+`internal/redirector` is the translation layer: it renders a `domain.Profile`
+(resolved from a built-in profile catalog by `NodeSpec.ProfileName`) plus the
+upstream resolved from the topology `Edge` (the C2/payload node the redirector
+fronts) into concrete nginx config — default-deny on unlisted paths
+(`return 444`), `RewriteHost` → upstream `Host` header. `InfraService.
+RedirectorConfig` computes it from the live topology; `GET /engagements/{id}/
+nodes/{nodeId}/redirector-config` exposes it. On-box application (cloud-init /
+SSH push) and auto-DNS for the front domain are the live-infra step on top.
+
 ## Repo map
 
 - `cmd/rinfra-server` — entrypoint, wiring, HTTP server.
@@ -205,6 +218,8 @@ layer assumes reverse-proxy + categorized-domain patterns, not fronting tricks.
 - `internal/cloud` — `CloudProvider` interface + per-provider impls + registry.
 - `internal/c2` — `C2Provider`/`Operator` interfaces + per-framework impls + registry.
 - `internal/payload` — `Generator` interface (msfvenom) + registry.
+- `internal/redirector` — renders `domain.Profile` + topology-resolved upstream
+  into reverse-proxy (nginx) config; built-in profile catalog.
 - `internal/emulation` — scenario orchestrator; `catalog` (scenario YAMLs),
   `index` (SRA index import), `ttp` (technique→`c2.Primitive` catalog).
 - `internal/audit` — append-only audit log.

@@ -34,15 +34,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
+	"github.com/rinfra/rinfra/internal/retry"
+)
+
+// Retry policy for transient terraform failures; apply/destroy are idempotent.
+const (
+	deployAttempts = 3
+	deployBackoff  = 2 * time.Second
 )
 
 // Config is a Terraform JSON document — the contents of a main.tf.json file.
@@ -51,6 +61,7 @@ type Config struct {
 	Terraform map[string]any `json:"terraform,omitempty"`
 	Provider  map[string]any `json:"provider,omitempty"`
 	Resource  map[string]any `json:"resource,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
 	Output    map[string]any `json:"output,omitempty"`
 }
 
@@ -142,7 +153,10 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 			results = append(results, errResults(providerNodes, fmt.Errorf("terraform init: %w", err))...)
 			continue
 		}
-		if err := e.run(ctx, dir, env, "apply", "-auto-approve", "-input=false", "-no-color"); err != nil {
+		// terraform apply is idempotent (it converges), so retry transient failures.
+		if err := retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
+			return e.run(ctx, dir, env, "apply", "-auto-approve", "-input=false", "-no-color")
+		}); err != nil {
 			results = append(results, errResults(providerNodes, fmt.Errorf("terraform apply: %w", err))...)
 			continue
 		}
@@ -178,7 +192,9 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 		env := credEnv(providerCreds)
 		// destroy is best-effort; a missing dir/state means nothing to destroy.
 		if _, err := os.Stat(filepath.Join(dir, "main.tf.json")); err == nil {
-			if err := e.run(ctx, dir, env, "destroy", "-auto-approve", "-input=false", "-no-color"); err != nil {
+			if err := retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
+				return e.run(ctx, dir, env, "destroy", "-auto-approve", "-input=false", "-no-color")
+			}); err != nil {
 				e.log.Error("terraform: destroy error", "engagement", engagementID, "provider", providerType, "err", err)
 			}
 		} else {
@@ -217,9 +233,29 @@ func (e *Engine) run(ctx context.Context, dir string, env []string, args ...stri
 	cmd := exec.CommandContext(ctx, e.bin, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), append(env, "TF_IN_AUTOMATION=1")...)
-	cmd.Stdout = newLogWriter(e.log, "terraform")
-	cmd.Stderr = newLogWriter(e.log, "terraform")
-	return cmd.Run()
+	// Tee output to the logger AND a buffer so the returned error carries the
+	// provider's message (e.g. "429", "throttling", "timeout"). Without this the
+	// error is just exec's "exit status 1" and retry.IsTransient can't tell a
+	// transient failure from a permanent one.
+	var buf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(newLogWriter(e.log, "terraform"), &buf)
+	cmd.Stderr = io.MultiWriter(newLogWriter(e.log, "terraform"), &buf)
+	if err := cmd.Run(); err != nil {
+		if out := strings.TrimSpace(tail(buf.String(), 4096)); out != "" {
+			return fmt.Errorf("%w: %s", err, out)
+		}
+		return err
+	}
+	return nil
+}
+
+// tail returns the last n bytes of s (the part most likely to contain the error
+// message), so a noisy run can't balloon the wrapped error.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // outputs runs `terraform output -json` and returns name->value.
