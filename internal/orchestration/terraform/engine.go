@@ -34,11 +34,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/rinfra/rinfra/internal/cloud"
@@ -59,6 +61,7 @@ type Config struct {
 	Terraform map[string]any `json:"terraform,omitempty"`
 	Provider  map[string]any `json:"provider,omitempty"`
 	Resource  map[string]any `json:"resource,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
 	Output    map[string]any `json:"output,omitempty"`
 }
 
@@ -230,9 +233,29 @@ func (e *Engine) run(ctx context.Context, dir string, env []string, args ...stri
 	cmd := exec.CommandContext(ctx, e.bin, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), append(env, "TF_IN_AUTOMATION=1")...)
-	cmd.Stdout = newLogWriter(e.log, "terraform")
-	cmd.Stderr = newLogWriter(e.log, "terraform")
-	return cmd.Run()
+	// Tee output to the logger AND a buffer so the returned error carries the
+	// provider's message (e.g. "429", "throttling", "timeout"). Without this the
+	// error is just exec's "exit status 1" and retry.IsTransient can't tell a
+	// transient failure from a permanent one.
+	var buf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(newLogWriter(e.log, "terraform"), &buf)
+	cmd.Stderr = io.MultiWriter(newLogWriter(e.log, "terraform"), &buf)
+	if err := cmd.Run(); err != nil {
+		if out := strings.TrimSpace(tail(buf.String(), 4096)); out != "" {
+			return fmt.Errorf("%w: %s", err, out)
+		}
+		return err
+	}
+	return nil
+}
+
+// tail returns the last n bytes of s (the part most likely to contain the error
+// message), so a noisy run can't balloon the wrapped error.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // outputs runs `terraform output -json` and returns name->value.

@@ -57,6 +57,35 @@ func TestReapExpired_TearsDownExpiredWithLiveInfra(t *testing.T) {
 	}
 }
 
+// TestReapExpired_ReapsFailedNodes verifies that a node left in `failed` after a
+// partial deploy (which may still own cloud resources in IaC state) is reaped —
+// otherwise the auto-teardown path would leave exactly the orphans it prevents.
+func TestReapExpired_ReapsFailedNodes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+	svcInfra := buildInfraService(t, s, hub)
+
+	topo := domain.Topology{
+		EngagementID: eng.ID,
+		Nodes:        []domain.Node{{ID: "n1", Status: domain.NodeFailed, Spec: domain.NodeSpec{Type: domain.NodeC2Server, Cloud: fake.CloudProviderTypeFake}}},
+	}
+	if err := svcInfra.SaveTopology(ctx, eng.ID, topo, "op"); err != nil {
+		t.Fatalf("SaveTopology: %v", err)
+	}
+
+	future := eng.Authorization.ExpiresAt.Add(time.Hour)
+	reaped, err := svcInfra.ReapExpired(ctx, future)
+	if err != nil {
+		t.Fatalf("ReapExpired: %v", err)
+	}
+	if len(reaped) != 1 || reaped[0] != eng.ID {
+		t.Fatalf("expected failed-node engagement reaped, got %v", reaped)
+	}
+}
+
 // TestReapExpired_SkipsExpiredWithNoLiveInfra verifies an expired engagement
 // with no standing infrastructure is not torn down (nothing to reap).
 func TestReapExpired_SkipsExpiredWithNoLiveInfra(t *testing.T) {

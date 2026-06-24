@@ -38,8 +38,8 @@ func (s *InfraService) ReapExpired(ctx context.Context, now time.Time) ([]string
 			s.log.Warn("reaper: list nodes failed", "engagement", e.ID, "err", err)
 			continue
 		}
-		live := countLiveInfra(nodes)
-		if live == 0 {
+		reapable := countReapableInfra(nodes)
+		if reapable == 0 {
 			continue
 		}
 		_ = s.audit.Record(ctx, audit.Event{
@@ -47,7 +47,7 @@ func (s *InfraService) ReapExpired(ctx context.Context, now time.Time) ([]string
 			Actor:        reaperActor,
 			Action:       "infra.auto_teardown",
 			Target:       e.ID,
-			Detail:       fmt.Sprintf("activity window closed (status=%s); reaping %d live node(s)", e.Status, live),
+			Detail:       fmt.Sprintf("activity window closed (status=%s); reaping %d standing node(s)", e.Status, reapable),
 			At:           now.UTC(),
 		})
 		if _, err := s.Teardown(ctx, e.ID, reaperActor); err != nil {
@@ -90,14 +90,19 @@ func (s *InfraService) StartReaper(ctx context.Context, interval time.Duration) 
 	}()
 }
 
-// countLiveInfra counts nodes that represent standing cloud resources (live,
-// provisioning, or draining) — i.e. things that still cost money / hold exposure
-// and therefore must be torn down when the window closes.
-func countLiveInfra(nodes []domain.Node) int {
+// countReapableInfra counts nodes that may own standing cloud resources and so
+// warrant a teardown pass when the window closes: live/provisioning/draining,
+// AND failed. A failed node matters because a partial IaC deploy can create real
+// resources before erroring — the node is marked failed but Pulumi/Terraform
+// state (and the tag-based sweep) can still destroy them; skipping failed nodes
+// would leave exactly the orphans the reaper exists to prevent. Pending (never
+// provisioned) and destroyed nodes own nothing and are ignored. Teardown itself
+// is idempotent/best-effort, so an over-inclusive count is safe.
+func countReapableInfra(nodes []domain.Node) int {
 	n := 0
 	for _, node := range nodes {
 		switch node.Status {
-		case domain.NodeLive, domain.NodeProvisioning, domain.NodeDraining:
+		case domain.NodeLive, domain.NodeProvisioning, domain.NodeDraining, domain.NodeFailed:
 			n++
 		}
 	}

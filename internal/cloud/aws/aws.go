@@ -54,6 +54,7 @@ import (
 	"github.com/aws/smithy-go"
 	awsec2 "github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
 	awsr53 "github.com/pulumi/pulumi-aws/sdk/v6/go/aws/route53"
+	awsssm "github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ssm"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"github.com/rinfra/rinfra/internal/cloud"
@@ -159,16 +160,6 @@ func (p *provider) route53Client(ctx context.Context, creds cloud.Credentials) (
 	}), nil
 }
 
-// resolveImage returns the AMI to use for a node. The live, per-region path is
-// an SSM GetParameter lookup of amazonLinuxSSMParameter; absent the SSM client
-// dependency it returns DefaultImage. Kept as a seam so dynamic resolution is a
-// drop-in once the SSM client is wired.
-func resolveImage(region string) string {
-	_ = region
-	_ = amazonLinuxSSMParameter
-	return DefaultImage
-}
-
 // isAWSErrorCode reports whether err is an AWS API error with the given code
 // (e.g. "InvalidInstanceID.NotFound"). Used to make deletes idempotent.
 func isAWSErrorCode(err error, code string) bool {
@@ -188,17 +179,22 @@ func isAWSErrorCode(err error, code string) bool {
 //	"rinfra:node"     = nodeID
 func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, nodes []domain.Node) pulumi.RunFunc {
 	return func(ctx *pulumi.Context) error {
+		// Resolve the AMI once for the provider's region (AWS_REGION) from the
+		// public SSM parameter, so deploys outside us-east-1 get the right image
+		// instead of the hardcoded fallback.
+		ami := DefaultImage
+		if amiParam, err := awsssm.LookupParameter(ctx, &awsssm.LookupParameterArgs{Name: amazonLinuxSSMParameter}); err != nil {
+			return fmt.Errorf("aws: resolve AMI via SSM %q: %w", amazonLinuxSSMParameter, err)
+		} else if amiParam.Value != "" {
+			ami = amiParam.Value
+		}
+
 		for _, n := range nodes {
 			nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
 			instanceType := n.Spec.Size
 			if instanceType == "" {
 				instanceType = "t3.micro"
 			}
-			region := n.Spec.Region
-			if region == "" {
-				region = "us-east-1"
-			}
-			ami := resolveImage(region)
 
 			tags := pulumi.StringMap{
 				TagKey:           pulumi.String(engagementID),
