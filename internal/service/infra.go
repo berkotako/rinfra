@@ -549,6 +549,9 @@ func topologyProblems(t domain.Topology, eng domain.Engagement) []string {
 			if strings.TrimSpace(n.Spec.ProfileName) == "" {
 				problems = append(problems, fmt.Sprintf("redirector %q: missing profile", label))
 			}
+			if !redirector.ValidFrontDomain(n.Canvas.FrontDomain) {
+				problems = append(problems, fmt.Sprintf("redirector %q: invalid front domain %q", label, n.Canvas.FrontDomain))
+			}
 		}
 	}
 

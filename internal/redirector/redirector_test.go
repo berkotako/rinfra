@@ -70,6 +70,42 @@ func TestRenderNginx_DedupesPathRules(t *testing.T) {
 	}
 }
 
+func TestValidFrontDomain(t *testing.T) {
+	valid := []string{"", "cdn.example.com", "a.b.c.example.co", "host-1.example.com"}
+	for _, s := range valid {
+		if !redirector.ValidFrontDomain(s) {
+			t.Errorf("expected %q to be valid", s)
+		}
+	}
+	// Injection / malformed inputs must be rejected.
+	invalid := []string{
+		"x;\n}\nserver{listen 8080;}",
+		"a b.com",
+		"evil.com; return 200",
+		"foo{bar}",
+		"has space",
+		".leadingdot",
+		"trailingdot.",
+	}
+	for _, s := range invalid {
+		if redirector.ValidFrontDomain(s) {
+			t.Errorf("expected %q to be rejected", s)
+		}
+	}
+}
+
+func TestRenderNginx_RejectsInjectionFrontDomain(t *testing.T) {
+	_, err := redirector.RenderNginx(
+		domain.Profile{Name: "p"},
+		redirector.Upstream{Host: "10.0.0.1", Port: 80},
+		"http",
+		"evil.com;\n}\nserver { listen 8080; }",
+	)
+	if err == nil {
+		t.Fatal("expected RenderNginx to reject a front domain that injects nginx directives")
+	}
+}
+
 func TestInstallScript(t *testing.T) {
 	s := redirector.InstallScript(redirector.StagePath, redirector.InstallPath)
 	for _, want := range []string{

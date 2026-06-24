@@ -12,6 +12,7 @@ package redirector
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/rinfra/rinfra/internal/domain"
@@ -33,6 +34,26 @@ func (u Upstream) scheme() string {
 	return "http"
 }
 
+// hostnameRe matches a syntactically valid DNS hostname (RFC-1123 labels). It is
+// used to keep operator-supplied front domains from injecting nginx directives:
+// the value is written verbatim into `server_name`, so anything with whitespace,
+// ';', '{', '}' or newlines must be rejected.
+var hostnameRe = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+
+// ValidFrontDomain reports whether s is safe to embed as an nginx server_name.
+// The empty string is valid (the redirector then matches any host). A non-empty
+// value must be a valid hostname — this is the injection guard for the
+// operator-controlled front domain.
+func ValidFrontDomain(s string) bool {
+	if s == "" {
+		return true
+	}
+	if len(s) > 253 {
+		return false
+	}
+	return hostnameRe.MatchString(s)
+}
+
 // RenderNginx renders an nginx reverse-proxy server block for an HTTP/HTTPS
 // redirector. It is pure and deterministic so it can be unit-tested and diffed.
 //
@@ -51,6 +72,11 @@ func RenderNginx(profile domain.Profile, up Upstream, subtype, frontDomain strin
 	}
 	if up.Host == "" || up.Port == 0 {
 		return "", fmt.Errorf("redirector: upstream host and port are required")
+	}
+	// Fail closed on a front domain that could inject nginx directives — the
+	// value is written verbatim into server_name.
+	if !ValidFrontDomain(frontDomain) {
+		return "", fmt.Errorf("redirector: invalid front domain %q", frontDomain)
 	}
 
 	serverName := "_"
