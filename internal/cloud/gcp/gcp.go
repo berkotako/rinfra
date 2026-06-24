@@ -37,10 +37,12 @@
 // the Google Cloud REST APIs directly with the google.golang.org/api client
 // libraries, for out-of-band reconciliation and the guaranteed-teardown sweep.
 //
-// These standalone methods issue GCP operations but, by design, do NOT poll
-// the returned long-running Operation to completion: enqueuing the operation is
-// sufficient for reconciliation purposes and the immediate call error is the
-// only failure we surface. The engine path owns full lifecycle convergence.
+// The teardown/sweep methods (Destroy, SweepOrphans) poll the returned
+// long-running Operation to completion via waitOp, so "teardown succeeded" means
+// the resource is actually gone rather than merely enqueued for deletion — the
+// guaranteed-teardown promise. The deploy-time helpers (ConfigureIngress,
+// AssignStaticIP) enqueue their operations and surface the immediate call error;
+// the engine path owns full deploy-lifecycle convergence (Pulumi polls).
 //
 // # Verified by compile vs needs live testing
 //
@@ -154,6 +156,34 @@ func isNotFound(err error) bool {
 		return gerr.Code == 404
 	}
 	return false
+}
+
+// waitOp blocks until a compute long-running Operation reaches DONE (or ctx is
+// cancelled), routing to the zone/region/global Operations service by the
+// operation's scope. It returns the operation's terminal error, if any. A nil op
+// (or an immediate-DONE op) returns immediately. This is what makes the
+// standalone teardown/sweep path actually reliable: without it, Delete returns
+// while the resource is still being torn down, so the sweep can report success
+// against infrastructure that still exists.
+func waitOp(ctx context.Context, svc *compute.Service, proj string, op *compute.Operation) error {
+	for op != nil && op.Status != "DONE" {
+		var err error
+		switch {
+		case op.Zone != "":
+			op, err = svc.ZoneOperations.Wait(proj, lastPathSegment(op.Zone), op.Name).Context(ctx).Do()
+		case op.Region != "":
+			op, err = svc.RegionOperations.Wait(proj, lastPathSegment(op.Region), op.Name).Context(ctx).Do()
+		default:
+			op, err = svc.GlobalOperations.Wait(proj, op.Name).Context(ctx).Do()
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if op != nil && op.Error != nil && len(op.Error.Errors) > 0 {
+		return fmt.Errorf("gcp operation %s failed: %s", op.Name, op.Error.Errors[0].Message)
+	}
+	return nil
 }
 
 // lastPathSegment returns the final "/"-delimited segment of s. GCP REST
@@ -569,7 +599,7 @@ func addGCPDNSRecord(ctx *pulumi.Context, name string, rec domain.Record, manage
 
 // Destroy deletes the node's GCE instance. Idempotent: an empty ProviderRef is a
 // no-op, and a 404/notFound from the API (instance already gone) is treated as
-// success. The delete Operation is not polled to completion (see package doc).
+// success. The delete Operation is polled to completion (waitOp).
 //
 // node.ProviderRef holds the instance identifier exported by BuildProgram. GCP
 // instance IDs/self-links embed the zone (".../zones/<zone>/instances/<name>");
@@ -589,11 +619,17 @@ func (p *provider) Destroy(ctx context.Context, creds cloud.Credentials, node do
 	proj := project(creds)
 
 	zone, name := instanceZoneName(node)
-	if _, err := svc.Instances.Delete(proj, zone, name).Context(ctx).Do(); err != nil {
+	op, err := svc.Instances.Delete(proj, zone, name).Context(ctx).Do()
+	if err != nil {
 		if isNotFound(err) {
 			return nil // already gone — idempotent
 		}
 		return fmt.Errorf("gcp.Destroy: delete instance %s in %s: %w", name, zone, err)
+	}
+	// Poll to completion so teardown only reports success once the instance is
+	// actually gone, not merely enqueued for deletion.
+	if err := waitOp(ctx, svc, proj, op); err != nil {
+		return fmt.Errorf("gcp.Destroy: await delete of instance %s in %s: %w", name, zone, err)
 	}
 	return nil
 }
@@ -633,8 +669,8 @@ func instanceZoneName(node domain.Node) (zone, name string) {
 //     (TagPrefix+engagementID) — deleted by name.
 //
 // Failures are collected with errors.Join and returned together; a notFound on
-// any delete is treated as already-swept. Delete operations are not polled to
-// completion (see package doc).
+// any delete is treated as already-swept. Each delete is polled to completion
+// (waitOp) so the sweep returns only once resources are actually gone.
 func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, engagementID string) error {
 	if err := validateGCPCreds(creds); err != nil {
 		return err
@@ -656,8 +692,13 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 		for _, scoped := range instList.Items {
 			for _, inst := range scoped.Instances {
 				zone := lastPathSegment(inst.Zone)
-				if _, err := svc.Instances.Delete(proj, zone, inst.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+				op, err := svc.Instances.Delete(proj, zone, inst.Name).Context(ctx).Do()
+				if err != nil && !isNotFound(err) {
 					errs = append(errs, fmt.Errorf("delete instance %s in %s: %w", inst.Name, zone, err))
+				} else if err == nil {
+					if werr := waitOp(ctx, svc, proj, op); werr != nil {
+						errs = append(errs, fmt.Errorf("await delete instance %s in %s: %w", inst.Name, zone, werr))
+					}
 				}
 			}
 		}
@@ -671,8 +712,13 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 		for _, scoped := range addrList.Items {
 			for _, addr := range scoped.Addresses {
 				region := lastPathSegment(addr.Region)
-				if _, err := svc.Addresses.Delete(proj, region, addr.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+				op, err := svc.Addresses.Delete(proj, region, addr.Name).Context(ctx).Do()
+				if err != nil && !isNotFound(err) {
 					errs = append(errs, fmt.Errorf("delete address %s in %s: %w", addr.Name, region, err))
+				} else if err == nil {
+					if werr := waitOp(ctx, svc, proj, op); werr != nil {
+						errs = append(errs, fmt.Errorf("await delete address %s in %s: %w", addr.Name, region, werr))
+					}
 				}
 			}
 		}
@@ -687,8 +733,13 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 			if fw.Description != engTag {
 				continue
 			}
-			if _, err := svc.Firewalls.Delete(proj, fw.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+			op, err := svc.Firewalls.Delete(proj, fw.Name).Context(ctx).Do()
+			if err != nil && !isNotFound(err) {
 				errs = append(errs, fmt.Errorf("delete firewall %s: %w", fw.Name, err))
+			} else if err == nil {
+				if werr := waitOp(ctx, svc, proj, op); werr != nil {
+					errs = append(errs, fmt.Errorf("await delete firewall %s: %w", fw.Name, werr))
+				}
 			}
 		}
 	}

@@ -68,6 +68,8 @@ _Last updated: 2026-06-22._
 - **Auto-teardown reaper** (`InfraService.ReapExpired`/`StartReaper`): tears down
   infra whose engagement activity window has closed (audited
   `infra.auto_teardown`); interval via `RINFRA_REAPER_INTERVAL` (default 5m).
+  GCP teardown/sweep deletes are **polled to completion** (`waitOp`), so a
+  successful teardown means the resources are actually gone, not just enqueued.
 - `internal/cloud`: `CloudProvider` impls for **DigitalOcean, AWS, GCP, Azure**
   + `fake`; per-provider ingress divergence covered by tests. Standalone API
   methods (ingress / static IP / DNS / destroy / orphan-sweep) are wired to each
