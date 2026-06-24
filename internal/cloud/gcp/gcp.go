@@ -774,3 +774,6 @@ func validateGCPCreds(creds cloud.Credentials) error {
 
 // ensure addGCPDNSRecord is referenced (used in Pulumi programs, not tested here directly)
 var _ = addGCPDNSRecord
+
+// PerNodeDestroy marks this provider's Destroy as node-scoped (see cloud.PerNodeDestroyer).
+func (p *provider) PerNodeDestroy() {}

@@ -650,32 +650,58 @@ func (s *InfraService) rollbackProvisioned(ctx context.Context, engagementID, ac
 		node := nodes[i]
 		prov, err := cloud.Get(node.Spec.Cloud)
 		if err != nil {
-			s.log.Warn("rollback: no provider", "node", node.ID, "cloud", node.Spec.Cloud, "err", err)
+			// Can't reach the provider — leave the node reapable so a later
+			// teardown/sweep removes it rather than orphaning it.
+			s.log.Warn("rollback: no provider; left reapable", "node", node.ID, "cloud", node.Spec.Cloud, "err", err)
+			s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, "no provider; left for teardown")
 			continue
 		}
+
+		// Skip providers whose Destroy is engagement-scoped (e.g. Azure deletes
+		// the whole resource group): destroying this node would also remove
+		// pre-existing siblings from earlier deploys. Leave it reapable for
+		// engagement-level teardown (which uses the tag sweep) instead.
+		if _, perNode := prov.(cloud.PerNodeDestroyer); !perNode {
+			s.log.Warn("rollback: provider Destroy is engagement-scoped; deferring to teardown", "node", node.ID, "cloud", node.Spec.Cloud)
+			s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, "engagement-scoped destroy; deferred to teardown")
+			continue
+		}
+
 		// Real providers need creds; the fake/direct path uses empty creds.
 		creds := cloud.Credentials{Provider: node.Spec.Cloud}
 		if c, err := s.loadCreds(ctx, engagementID, node.Spec.Cloud); err == nil {
 			creds = c
 		}
 		if err := prov.Destroy(ctx, creds, *node); err != nil {
-			s.log.Warn("rollback: destroy failed (left for teardown sweep)", "node", node.ID, "err", err)
+			// Destroy failed — keep the node failed/reapable so teardown/the reaper
+			// retry it. Marking it destroyed here would orphan the live resource
+			// (both runTeardown and the reaper skip destroyed nodes).
+			s.log.Warn("rollback: destroy failed; left reapable for teardown sweep", "node", node.ID, "err", err)
+			s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, fmt.Sprintf("destroy failed (%v); left for teardown", err))
+			continue
 		}
-		node.Status = domain.NodeDestroyed
-		node.Health = domain.HealthUnknown
-		_ = s.infra.UpdateNodeStatus(ctx, node.ID, domain.NodeDestroyed, domain.HealthUnknown)
-		s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(node)})
-		_ = s.audit.Record(ctx, audit.Event{
-			EngagementID: engagementID,
-			Actor:        actor,
-			Action:       "infra.rollback",
-			Target:       node.ID,
-			Detail:       fmt.Sprintf("rolled back after partial deploy failure (cloud=%s)", node.Spec.Cloud),
-			At:           time.Now().UTC(),
-		})
+		s.markRolledBack(ctx, engagementID, actor, node, domain.NodeDestroyed, "rolled back after partial deploy failure")
 		n++
 	}
 	return n
+}
+
+// markRolledBack records a rollback outcome for a node: sets its status (destroyed
+// on a confirmed cleanup, failed/reapable otherwise), publishes the change, and
+// audits infra.rollback.
+func (s *InfraService) markRolledBack(ctx context.Context, engagementID, actor string, node *domain.Node, status domain.NodeStatus, detail string) {
+	node.Status = status
+	node.Health = domain.HealthUnknown
+	_ = s.infra.UpdateNodeStatus(ctx, node.ID, status, domain.HealthUnknown)
+	s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(node)})
+	_ = s.audit.Record(ctx, audit.Event{
+		EngagementID: engagementID,
+		Actor:        actor,
+		Action:       "infra.rollback",
+		Target:       node.ID,
+		Detail:       fmt.Sprintf("%s (cloud=%s, status=%s)", detail, node.Spec.Cloud, status),
+		At:           time.Now().UTC(),
+	})
 }
 
 func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor string) {

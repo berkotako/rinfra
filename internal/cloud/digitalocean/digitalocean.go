@@ -475,3 +475,6 @@ func containsString(xs []string, want string) bool {
 	}
 	return false
 }
+
+// PerNodeDestroy marks this provider's Destroy as node-scoped (see cloud.PerNodeDestroyer).
+func (p *provider) PerNodeDestroy() {}
