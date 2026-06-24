@@ -39,10 +39,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
+	"github.com/rinfra/rinfra/internal/retry"
+)
+
+// Retry policy for transient terraform failures; apply/destroy are idempotent.
+const (
+	deployAttempts = 3
+	deployBackoff  = 2 * time.Second
 )
 
 // Config is a Terraform JSON document — the contents of a main.tf.json file.
@@ -142,7 +150,10 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 			results = append(results, errResults(providerNodes, fmt.Errorf("terraform init: %w", err))...)
 			continue
 		}
-		if err := e.run(ctx, dir, env, "apply", "-auto-approve", "-input=false", "-no-color"); err != nil {
+		// terraform apply is idempotent (it converges), so retry transient failures.
+		if err := retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
+			return e.run(ctx, dir, env, "apply", "-auto-approve", "-input=false", "-no-color")
+		}); err != nil {
 			results = append(results, errResults(providerNodes, fmt.Errorf("terraform apply: %w", err))...)
 			continue
 		}
@@ -178,7 +189,9 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 		env := credEnv(providerCreds)
 		// destroy is best-effort; a missing dir/state means nothing to destroy.
 		if _, err := os.Stat(filepath.Join(dir, "main.tf.json")); err == nil {
-			if err := e.run(ctx, dir, env, "destroy", "-auto-approve", "-input=false", "-no-color"); err != nil {
+			if err := retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
+				return e.run(ctx, dir, env, "destroy", "-auto-approve", "-input=false", "-no-color")
+			}); err != nil {
 				e.log.Error("terraform: destroy error", "engagement", engagementID, "provider", providerType, "err", err)
 			}
 		} else {

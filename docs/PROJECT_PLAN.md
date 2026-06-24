@@ -59,7 +59,15 @@ _Last updated: 2026-06-22._
 **Orchestration & cloud**
 - `internal/orchestration`: Pulumi automation-API engine; one stack per
   engagement; resources tagged `rinfra:<engagement-id>`; teardown sweep
-  (`cloud/sweeper.go`).
+  (`cloud/sweeper.go`). State backend is local-file by default but honors a
+  remote `PULUMI_BACKEND_URL` (s3/gcs/azblob/Pulumi-service) so state survives
+  an ephemeral container; `stack.Up`/`Destroy` (and `terraform apply`/`destroy`)
+  retry transient failures with backoff (`internal/retry`).
+- `internal/redirector`: renders a `domain.Profile` + topology-resolved upstream
+  into nginx reverse-proxy config (`GET …/nodes/{id}/redirector-config`).
+- **Auto-teardown reaper** (`InfraService.ReapExpired`/`StartReaper`): tears down
+  infra whose engagement activity window has closed (audited
+  `infra.auto_teardown`); interval via `RINFRA_REAPER_INTERVAL` (default 5m).
 - `internal/cloud`: `CloudProvider` impls for **DigitalOcean, AWS, GCP, Azure**
   + `fake`; per-provider ingress divergence covered by tests. Standalone API
   methods (ingress / static IP / DNS / destroy / orphan-sweep) are wired to each
