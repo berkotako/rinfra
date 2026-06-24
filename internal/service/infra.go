@@ -262,6 +262,17 @@ func (s *InfraService) WithRedirectorRunner(factory func(host string) deploy.Run
 // The redirector node and its upstream must both be provisioned (have public
 // IPs). DNS failures are logged/audited but do not fail the apply.
 func (s *InfraService) ApplyRedirector(ctx context.Context, engagementID, nodeID, actor string) error {
+	// Authorization gate — this is a provisioning path (installs software, mutates
+	// DNS), so it must be refused outside an authorized, in-window engagement,
+	// even if stale live PublicIPs linger in the topology.
+	eng, err := s.engagements.Get(ctx, engagementID)
+	if err != nil {
+		return err
+	}
+	if err := eng.CanDeploy(time.Now()); err != nil {
+		return fmt.Errorf("redirector apply refused: %w", err)
+	}
+
 	cfg, node, err := s.redirectorPlan(ctx, engagementID, nodeID)
 	if err != nil {
 		return err
@@ -314,13 +325,7 @@ func (s *InfraService) pointFrontDomain(ctx context.Context, engagementID string
 	if err != nil {
 		return err
 	}
-	rec := domain.Record{
-		Zone:  registrableDomain(node.Canvas.FrontDomain),
-		Name:  node.Canvas.FrontDomain,
-		Type:  "A",
-		Value: node.PublicIP,
-		TTL:   300,
-	}
+	rec := dnsRecordFor(node.Spec.Cloud, node.Canvas.FrontDomain, node.PublicIP)
 	if err := prov.ManageDNS(ctx, creds, rec); err != nil {
 		return err
 	}
@@ -358,6 +363,37 @@ func registrableDomain(fqdn string) string {
 		return fqdn
 	}
 	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+// dnsRecordFor builds the A record for a front domain in the shape each
+// provider's ManageDNS expects — the record identifiers genuinely diverge:
+//
+//   - DigitalOcean / Azure: Zone is the apex domain, Name is the record relative
+//     to the zone ("cdn"; "@" for the apex itself).
+//   - AWS Route53: Zone is the apex (hosted zone resolved by name), Name is the
+//     full FQDN.
+//   - GCP Cloud DNS: Zone is the managed-zone name (defaulted to the apex, the
+//     common convention), Name is the FQDN with a trailing dot.
+//
+// Zone is a best-effort default; operators whose managed zone / hosted zone is
+// not named after the apex can still drive ManageDNS directly.
+func dnsRecordFor(provider domain.CloudProviderType, frontDomain, ip string) domain.Record {
+	fqdn := strings.TrimSuffix(strings.TrimSpace(frontDomain), ".")
+	apex := registrableDomain(fqdn)
+	rec := domain.Record{Zone: apex, Type: "A", Value: ip, TTL: 300}
+	switch provider {
+	case domain.CloudGCP:
+		rec.Name = fqdn + "."
+	case domain.CloudAWS:
+		rec.Name = fqdn
+	default: // DigitalOcean, Azure: relative record name
+		if fqdn == apex {
+			rec.Name = "@"
+		} else {
+			rec.Name = strings.TrimSuffix(fqdn, "."+apex)
+		}
+	}
+	return rec
 }
 
 // redirectorTarget returns the node a redirector forwards to: the destination of
