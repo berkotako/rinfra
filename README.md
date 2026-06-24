@@ -28,14 +28,6 @@ so you can click through all five screens and the deploy / emulation flows. The
 landing page includes a short "how to use" walkthrough. To run it locally
 instead, see `web/README.md` (`make web-dev`).
 
-> **One-time setup.** The demo deploys via the `Deploy demo to GitHub Pages`
-> workflow, but GitHub Pages must be enabled by hand first:
-> **Settings → Pages → Build and deployment → Source: "GitHub Actions"**.
-> (The workflow token cannot enable Pages itself.) Note that **Pages on a
-> private repo requires a paid GitHub plan** — on a free plan, make the repo
-> public to use Pages. Once enabled, the demo publishes on every push to `main`,
-> or on demand via the workflow's **Run workflow** button (pick this branch).
-
 ## How it works
 
 RInfra turns a drag-and-drop canvas into real, authorized attack infrastructure
