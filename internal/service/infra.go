@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rinfra/rinfra/internal/audit"
 	"github.com/rinfra/rinfra/internal/c2"
+	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
@@ -48,6 +49,9 @@ type InfraService struct {
 	provisioners   map[string]Provisioner
 	defaultBackend string
 	settings       store.SettingStore // optional: persists the selected backend
+	// runnerFactory builds the SSH runner used to apply redirector config on the
+	// box; nil means the default live node runner (tests inject a fake).
+	runnerFactory func(host string) deploy.Runner
 }
 
 // IaC backend keys.
@@ -186,9 +190,17 @@ func (s *InfraService) GetTopology(ctx context.Context, engagementID string) (do
 // into concrete, inspectable nginx config. Applying it on the box (cloud-init /
 // SSH) is the live-infra step layered on top of this.
 func (s *InfraService) RedirectorConfig(ctx context.Context, engagementID, nodeID string) (string, error) {
+	cfg, _, err := s.redirectorPlan(ctx, engagementID, nodeID)
+	return cfg, err
+}
+
+// redirectorPlan resolves and renders a redirector's config and returns it along
+// with the redirector node (so callers that also need to reach the box — e.g.
+// ApplyRedirector — don't re-load the topology).
+func (s *InfraService) redirectorPlan(ctx context.Context, engagementID, nodeID string) (string, domain.Node, error) {
 	t, err := s.infra.GetTopology(ctx, engagementID)
 	if err != nil {
-		return "", err
+		return "", domain.Node{}, err
 	}
 	byID := make(map[string]domain.Node, len(t.Nodes))
 	var node *domain.Node
@@ -199,18 +211,18 @@ func (s *InfraService) RedirectorConfig(ctx context.Context, engagementID, nodeI
 		}
 	}
 	if node == nil {
-		return "", fmt.Errorf("node %s: %w", nodeID, store.ErrNotFound)
+		return "", domain.Node{}, fmt.Errorf("node %s: %w", nodeID, store.ErrNotFound)
 	}
 	if node.Spec.Type != domain.NodeRedirector {
-		return "", fmt.Errorf("node %s is not a redirector", nodeID)
+		return "", domain.Node{}, fmt.Errorf("node %s is not a redirector", nodeID)
 	}
 
 	target, ok := redirectorTarget(t, nodeID, byID)
 	if !ok {
-		return "", fmt.Errorf("redirector %s has no edge to a target node to front", nodeID)
+		return "", *node, fmt.Errorf("redirector %s has no edge to a target node to front", nodeID)
 	}
 	if target.PublicIP == "" {
-		return "", fmt.Errorf("redirector target %s has no public IP yet — provision it first", target.ID)
+		return "", *node, fmt.Errorf("redirector target %s has no public IP yet — provision it first", target.ID)
 	}
 
 	profile, ok := redirector.LookupProfile(node.Spec.ProfileName)
@@ -222,7 +234,166 @@ func (s *InfraService) RedirectorConfig(ctx context.Context, engagementID, nodeI
 		Port: upstreamPort(node.Spec.Subtype, target),
 		TLS:  strings.EqualFold(node.Spec.Subtype, "https"),
 	}
-	return redirector.RenderNginx(profile, up, node.Spec.Subtype, node.Canvas.FrontDomain)
+	cfg, err := redirector.RenderNginx(profile, up, node.Spec.Subtype, node.Canvas.FrontDomain)
+	return cfg, *node, err
+}
+
+// redirectorRunner builds the SSH runner used to apply config to a redirector
+// box. Overridable in tests via WithRedirectorRunner; defaults to the live SSH
+// node runner.
+func (s *InfraService) redirectorRunner(host string) deploy.Runner {
+	if s.runnerFactory != nil {
+		return s.runnerFactory(host)
+	}
+	return deploy.NewNodeRunner(host)
+}
+
+// WithRedirectorRunner injects the SSH runner factory used by ApplyRedirector
+// (tests pass a fake; production uses the default live runner).
+func (s *InfraService) WithRedirectorRunner(factory func(host string) deploy.Runner) {
+	s.runnerFactory = factory
+}
+
+// ApplyRedirector renders the redirector's reverse-proxy config and applies it
+// on the box: it uploads the config + an idempotent install script over SSH,
+// installs/reloads nginx, and (best-effort) points the front domain at the
+// redirector via the cloud provider's DNS. Audited as redirector.configure.
+//
+// The redirector node and its upstream must both be provisioned (have public
+// IPs). DNS failures are logged/audited but do not fail the apply.
+func (s *InfraService) ApplyRedirector(ctx context.Context, engagementID, nodeID, actor string) error {
+	// Authorization gate — this is a provisioning path (installs software, mutates
+	// DNS), so it must be refused outside an authorized, in-window engagement,
+	// even if stale live PublicIPs linger in the topology.
+	eng, err := s.engagements.Get(ctx, engagementID)
+	if err != nil {
+		return err
+	}
+	if err := eng.CanDeploy(time.Now()); err != nil {
+		return fmt.Errorf("redirector apply refused: %w", err)
+	}
+
+	cfg, node, err := s.redirectorPlan(ctx, engagementID, nodeID)
+	if err != nil {
+		return err
+	}
+	if node.PublicIP == "" {
+		return fmt.Errorf("redirector %s has no public IP yet — provision it before applying config", nodeID)
+	}
+
+	runner := s.redirectorRunner(node.PublicIP)
+	if err := runner.Upload(ctx, redirector.StagePath, cfg); err != nil {
+		return fmt.Errorf("upload redirector config: %w", err)
+	}
+	script := redirector.InstallScript(redirector.StagePath, redirector.InstallPath)
+	if err := runner.Upload(ctx, redirectorInstallScriptPath, script); err != nil {
+		return fmt.Errorf("upload redirector install script: %w", err)
+	}
+	if _, err := runner.Run(ctx, "sudo bash "+redirectorInstallScriptPath); err != nil {
+		return fmt.Errorf("apply redirector config: %w", err)
+	}
+
+	_ = s.audit.Record(ctx, audit.Event{
+		EngagementID: engagementID,
+		Actor:        actor,
+		Action:       "redirector.configure",
+		Target:       nodeID,
+		Detail:       fmt.Sprintf("nginx reverse-proxy applied (profile=%s, subtype=%s)", node.Spec.ProfileName, node.Spec.Subtype),
+		At:           time.Now().UTC(),
+	})
+
+	// Best-effort: point the categorized front domain at the redirector.
+	if node.Canvas.FrontDomain != "" {
+		if err := s.pointFrontDomain(ctx, engagementID, node, actor); err != nil {
+			s.log.Warn("redirector: front-domain DNS not set", "node", nodeID, "domain", node.Canvas.FrontDomain, "err", err)
+		}
+	}
+	return nil
+}
+
+// redirectorInstallScriptPath is where the install script is staged on the box.
+const redirectorInstallScriptPath = "/tmp/rinfra-redirector-install.sh"
+
+// pointFrontDomain creates/updates an A record for the redirector's front domain
+// pointing at the redirector's public IP, via the node's cloud provider DNS.
+func (s *InfraService) pointFrontDomain(ctx context.Context, engagementID string, node domain.Node, actor string) error {
+	prov, err := cloud.Get(node.Spec.Cloud)
+	if err != nil {
+		return err
+	}
+	creds, err := s.loadCreds(ctx, engagementID, node.Spec.Cloud)
+	if err != nil {
+		return err
+	}
+	rec := dnsRecordFor(node.Spec.Cloud, node.Canvas.FrontDomain, node.PublicIP)
+	if err := prov.ManageDNS(ctx, creds, rec); err != nil {
+		return err
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		EngagementID: engagementID,
+		Actor:        actor,
+		Action:       "redirector.dns",
+		Target:       node.ID,
+		Detail:       fmt.Sprintf("%s A %s (zone %s)", rec.Name, rec.Value, rec.Zone),
+		At:           time.Now().UTC(),
+	})
+	return nil
+}
+
+// loadCreds fetches and decrypts the engagement's credentials for a provider.
+func (s *InfraService) loadCreds(ctx context.Context, engagementID string, provider domain.CloudProviderType) (cloud.Credentials, error) {
+	ct, nonce, keyID, err := s.creds.GetCiphertext(ctx, engagementID, string(provider))
+	if err != nil {
+		return cloud.Credentials{}, err
+	}
+	creds, err := DecryptCredentials(s.enc, provider, ct, nonce, keyID)
+	if err != nil {
+		return cloud.Credentials{}, err
+	}
+	_ = s.creds.TouchLastUsed(ctx, engagementID, string(provider))
+	return creds, nil
+}
+
+// registrableDomain returns the apex (last two labels) of an FQDN, the
+// conventional DNS zone name. "cdn.front.victim.test" → "victim.test".
+func registrableDomain(fqdn string) string {
+	fqdn = strings.TrimSuffix(strings.TrimSpace(fqdn), ".")
+	parts := strings.Split(fqdn, ".")
+	if len(parts) <= 2 {
+		return fqdn
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+// dnsRecordFor builds the A record for a front domain in the shape each
+// provider's ManageDNS expects — the record identifiers genuinely diverge:
+//
+//   - DigitalOcean / Azure: Zone is the apex domain, Name is the record relative
+//     to the zone ("cdn"; "@" for the apex itself).
+//   - AWS Route53: Zone is the apex (hosted zone resolved by name), Name is the
+//     full FQDN.
+//   - GCP Cloud DNS: Zone is the managed-zone name (defaulted to the apex, the
+//     common convention), Name is the FQDN with a trailing dot.
+//
+// Zone is a best-effort default; operators whose managed zone / hosted zone is
+// not named after the apex can still drive ManageDNS directly.
+func dnsRecordFor(provider domain.CloudProviderType, frontDomain, ip string) domain.Record {
+	fqdn := strings.TrimSuffix(strings.TrimSpace(frontDomain), ".")
+	apex := registrableDomain(fqdn)
+	rec := domain.Record{Zone: apex, Type: "A", Value: ip, TTL: 300}
+	switch provider {
+	case domain.CloudGCP:
+		rec.Name = fqdn + "."
+	case domain.CloudAWS:
+		rec.Name = fqdn
+	default: // DigitalOcean, Azure: relative record name
+		if fqdn == apex {
+			rec.Name = "@"
+		} else {
+			rec.Name = strings.TrimSuffix(fqdn, "."+apex)
+		}
+	}
+	return rec
 }
 
 // redirectorTarget returns the node a redirector forwards to: the destination of

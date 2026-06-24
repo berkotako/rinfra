@@ -239,6 +239,18 @@ func (h *handlers) getRedirectorConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"nodeId": nodeID, "engine": "nginx", "config": cfg})
 }
 
+// applyRedirector renders and applies the redirector's reverse-proxy config on
+// the box (SSH upload + nginx install/reload) and points its front domain DNS.
+func (h *handlers) applyRedirector(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	nodeID := chi.URLParam(r, "nodeId")
+	if err := h.svc.Infra.ApplyRedirector(r.Context(), id, nodeID, actorFrom(r.Context())); err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodeId": nodeID, "status": "applied"})
+}
+
 func (h *handlers) putTopology(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req topologyRequest

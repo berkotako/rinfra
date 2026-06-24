@@ -104,6 +104,7 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			r.Get("/topology", h.getTopology)
 			r.Put("/topology", h.putTopology)
 			r.Get("/nodes/{nodeId}/redirector-config", h.getRedirectorConfig)
+			r.Post("/nodes/{nodeId}/redirector-apply", h.applyRedirector)
 			r.Post("/validate", h.validateTopology)
 			r.Post("/deploy", h.deploy)
 			r.Post("/teardown", h.teardown)
