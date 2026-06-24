@@ -331,7 +331,7 @@ func startWithMemstore(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		ThreatFeed:     buildThreatFeed(log, feedStore),
 	}, log)
 
-	runServer(log, router, svcC2)
+	runServer(log, router, svcC2, svcInfra)
 }
 
 func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hub) {
@@ -397,7 +397,7 @@ func startWithPostgres(log *slog.Logger, enc *secrets.Encrypter, hub *service.Hu
 		ThreatFeed:     buildThreatFeed(log, feedStore),
 	}, log)
 
-	runServer(log, router, svcC2)
+	runServer(log, router, svcC2, svcInfra)
 }
 
 // seedAdmin bootstraps the first admin when no users exist. In dev mode it uses
@@ -421,7 +421,7 @@ func seedAdmin(log *slog.Logger, svcAuth *service.AuthService, devMode bool) {
 	}
 }
 
-func runServer(log *slog.Logger, handler http.Handler, c2 *service.C2Service) {
+func runServer(log *slog.Logger, handler http.Handler, c2 *service.C2Service, infra *service.InfraService) {
 	addr := envOr("RINFRA_ADDR", ":8080")
 	srv := &http.Server{
 		Addr:              addr,
@@ -431,6 +431,12 @@ func runServer(log *slog.Logger, handler http.Handler, c2 *service.C2Service) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// Auto-teardown reaper: tears down infrastructure whose engagement window has
+	// closed. Bound to the server lifecycle so it stops on shutdown.
+	if infra != nil {
+		infra.StartReaper(ctx, reaperInterval(log))
+	}
 
 	go func() {
 		log.Info("rinfra control plane listening", "addr", addr)
@@ -456,6 +462,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// reaperInterval reads RINFRA_REAPER_INTERVAL (a Go duration, e.g. "5m").
+// Default is 5m; "0" or "off" disables the auto-teardown reaper.
+func reaperInterval(log *slog.Logger) time.Duration {
+	v := envOr("RINFRA_REAPER_INTERVAL", "5m")
+	if v == "off" || v == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Warn("invalid RINFRA_REAPER_INTERVAL, using 5m", "value", v, "err", err)
+		return 5 * time.Minute
+	}
+	return d
 }
 
 // corsOriginsFromEnv parses RINFRA_CORS_ORIGINS (comma-separated) into the

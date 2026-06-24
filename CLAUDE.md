@@ -43,7 +43,11 @@ them as invariants; never weaken them to make a feature easier.
   extends to **emulation artifacts**: a persistence technique (scheduled task,
   Run key) is reverted at the end of its run via the optional `c2.Reverter`
   capability (run in reverse order, audited as `emulation.cleanup`), so an
-  engagement leaves no orphaned persistence on the customer's host.
+  engagement leaves no orphaned persistence on the customer's host. It also
+  extends in **time**: a background reaper (`InfraService.ReapExpired`,
+  `StartReaper`) tears down infra whose engagement activity window has closed
+  (`Engagement.WindowExpired`), audited as `infra.auto_teardown` — `CanDeploy`
+  blocks new deploys after expiry, the reaper removes what was already standing.
 
 ## Architecture
 
