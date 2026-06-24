@@ -54,6 +54,22 @@ func TestWaitOp_PollsUntilDone(t *testing.T) {
 		}
 	})
 
+	t.Run("honors context cancellation (no hang on stuck op)", func(t *testing.T) {
+		// Server always reports RUNNING — without the bound/ctx this loops forever.
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"name":"op-3","status":"RUNNING"}`))
+		}))
+		defer ts.Close()
+		svc, _ := (&provider{baseEndpoint: ts.URL}).computeService(ctx, cloud.Credentials{})
+
+		cctx, cancel := context.WithCancel(ctx)
+		cancel() // already cancelled → the first Wait must return promptly
+		err := waitOp(cctx, svc, "proj", &compute.Operation{Name: "op-3", Status: "RUNNING"})
+		if err == nil {
+			t.Fatal("expected waitOp to return an error when the context is cancelled, not hang")
+		}
+	})
+
 	t.Run("nil and already-done are no-ops", func(t *testing.T) {
 		svc, _ := (&provider{baseEndpoint: "http://127.0.0.1:0"}).computeService(ctx, cloud.Credentials{})
 		if err := waitOp(ctx, svc, "proj", nil); err != nil {

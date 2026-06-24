@@ -59,6 +59,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	gcpcompute "github.com/pulumi/pulumi-gcp/sdk/v8/go/gcp/compute"
 	gcpdns "github.com/pulumi/pulumi-gcp/sdk/v8/go/gcp/dns"
@@ -158,14 +159,27 @@ func isNotFound(err error) bool {
 	return false
 }
 
-// waitOp blocks until a compute long-running Operation reaches DONE (or ctx is
-// cancelled), routing to the zone/region/global Operations service by the
-// operation's scope. It returns the operation's terminal error, if any. A nil op
-// (or an immediate-DONE op) returns immediately. This is what makes the
-// standalone teardown/sweep path actually reliable: without it, Delete returns
-// while the resource is still being torn down, so the sweep can report success
-// against infrastructure that still exists.
+// opWaitTimeout bounds how long waitOp will poll a single operation. GCP's
+// Wait returns roughly every 2 minutes even when the op is still running, so an
+// unbounded loop on a genuinely stuck operation would hang the teardown
+// goroutine forever — and since the per-engagement job stays "running" until it
+// returns, that would block all future deploy/teardown for the engagement. The
+// cap turns "stuck" into a surfaced timeout error instead.
+const opWaitTimeout = 15 * time.Minute
+
+// waitOp blocks until a compute long-running Operation reaches DONE (or the
+// bounded deadline / ctx cancellation), routing to the zone/region/global
+// Operations service by the operation's scope. It returns the operation's
+// terminal error, if any. A nil op (or an immediate-DONE op) returns
+// immediately. This is what makes the standalone teardown/sweep path actually
+// reliable: without it, Delete returns while the resource is still being torn
+// down, so the sweep can report success against infrastructure that still exists.
 func waitOp(ctx context.Context, svc *compute.Service, proj string, op *compute.Operation) error {
+	// Bound the poll so a stuck operation can't hang the caller indefinitely.
+	// WithTimeout keeps the earlier of this and any deadline already on ctx.
+	ctx, cancel := context.WithTimeout(ctx, opWaitTimeout)
+	defer cancel()
+
 	for op != nil && op.Status != "DONE" {
 		var err error
 		switch {
@@ -177,7 +191,7 @@ func waitOp(ctx context.Context, svc *compute.Service, proj string, op *compute.
 			op, err = svc.GlobalOperations.Wait(proj, op.Name).Context(ctx).Do()
 		}
 		if err != nil {
-			return err
+			return err // includes context deadline/cancellation
 		}
 	}
 	if op != nil && op.Error != nil && len(op.Error.Errors) > 0 {

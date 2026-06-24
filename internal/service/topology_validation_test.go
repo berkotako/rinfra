@@ -50,6 +50,7 @@ func TestValidateTopology_Cases(t *testing.T) {
 		{"missing region", func(tp *domain.Topology) { tp.Nodes[1].Spec.Region = "" }, "missing region"},
 		{"missing size", func(tp *domain.Topology) { tp.Nodes[0].Spec.Size = "" }, "missing size"},
 		{"missing redirector profile", func(tp *domain.Topology) { tp.Nodes[0].Spec.ProfileName = "" }, "missing profile"},
+		{"injection front domain", func(tp *domain.Topology) { tp.Nodes[0].Canvas.FrontDomain = "evil.com;\n}\nserver{}" }, "invalid front domain"},
 	}
 
 	for _, tt := range tests {
