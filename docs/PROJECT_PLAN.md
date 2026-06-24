@@ -68,6 +68,10 @@ _Last updated: 2026-06-22._
 - **Auto-teardown reaper** (`InfraService.ReapExpired`/`StartReaper`): tears down
   infra whose engagement activity window has closed (audited
   `infra.auto_teardown`); interval via `RINFRA_REAPER_INTERVAL` (default 5m).
+- **Partial-deploy rollback**: when a deploy fails after some nodes went live,
+  those nodes are rolled back (per-node `Destroy`, audited `infra.rollback`) so a
+  failed deploy leaves no live orphans; only nodes provisioned in that deploy are
+  touched. `RINFRA_DEPLOY_ROLLBACK=off` keeps them for fix-forward.
   GCP teardown/sweep deletes are **polled to completion** (`waitOp`), so a
   successful teardown means the resources are actually gone, not just enqueued.
 - `internal/cloud`: `CloudProvider` impls for **DigitalOcean, AWS, GCP, Azure**

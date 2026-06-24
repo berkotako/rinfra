@@ -48,6 +48,11 @@ them as invariants; never weaken them to make a feature easier.
   `StartReaper`) tears down infra whose engagement activity window has closed
   (`Engagement.WindowExpired`), audited as `infra.auto_teardown` — `CanDeploy`
   blocks new deploys after expiry, the reaper removes what was already standing.
+  And it extends to **partial deploys**: if a deploy fails after bringing some
+  nodes live, those nodes are rolled back (per-node `Destroy`, audited
+  `infra.rollback`) so a half-finished deploy leaves no live orphans — only the
+  nodes *this* deploy provisioned are touched; `RINFRA_DEPLOY_ROLLBACK=off`
+  opts into fix-forward instead.
 
 ## Architecture
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -628,6 +629,55 @@ func (s *InfraService) Deploy(ctx context.Context, engagementID string, actor st
 //     the engine is wired → grouped and sent through engine.Deploy (real cloud).
 //   - All other nodes (fake provider or engine == nil) → per-node ProvisionNode
 //     path (dev/test path).
+//
+// rollbackEnabled reports whether partial-failure rollback is active. It is on
+// by default; set RINFRA_DEPLOY_ROLLBACK=off to keep partially-deployed infra
+// for fix-forward instead (the operator then tears down manually).
+func rollbackEnabled() bool {
+	return os.Getenv("RINFRA_DEPLOY_ROLLBACK") != "off"
+}
+
+// rollbackProvisioned destroys the nodes a failed deploy DID bring live, in
+// reverse order, marking each destroyed and auditing infra.rollback. It is
+// best-effort (a Destroy error is logged, the node is still marked destroyed)
+// and idempotent — Destroy treats an already-gone resource as success, and the
+// tag-based teardown sweep is the backstop. Only nodes provisioned in this
+// deploy are passed in, so pre-existing live infra is never touched. Returns the
+// count rolled back.
+func (s *InfraService) rollbackProvisioned(ctx context.Context, engagementID, actor string, nodes []*domain.Node) int {
+	n := 0
+	for i := len(nodes) - 1; i >= 0; i-- {
+		node := nodes[i]
+		prov, err := cloud.Get(node.Spec.Cloud)
+		if err != nil {
+			s.log.Warn("rollback: no provider", "node", node.ID, "cloud", node.Spec.Cloud, "err", err)
+			continue
+		}
+		// Real providers need creds; the fake/direct path uses empty creds.
+		creds := cloud.Credentials{Provider: node.Spec.Cloud}
+		if c, err := s.loadCreds(ctx, engagementID, node.Spec.Cloud); err == nil {
+			creds = c
+		}
+		if err := prov.Destroy(ctx, creds, *node); err != nil {
+			s.log.Warn("rollback: destroy failed (left for teardown sweep)", "node", node.ID, "err", err)
+		}
+		node.Status = domain.NodeDestroyed
+		node.Health = domain.HealthUnknown
+		_ = s.infra.UpdateNodeStatus(ctx, node.ID, domain.NodeDestroyed, domain.HealthUnknown)
+		s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(node)})
+		_ = s.audit.Record(ctx, audit.Event{
+			EngagementID: engagementID,
+			Actor:        actor,
+			Action:       "infra.rollback",
+			Target:       node.ID,
+			Detail:       fmt.Sprintf("rolled back after partial deploy failure (cloud=%s)", node.Spec.Cloud),
+			At:           time.Now().UTC(),
+		})
+		n++
+	}
+	return n
+}
+
 func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor string) {
 	_ = s.jobs.UpdateStatus(ctx, jobID, domain.JobRunning, "")
 
@@ -666,6 +716,11 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 	}
 
 	anyFailed := false
+	// provisioned tracks ONLY the nodes this deploy brought live (pre-existing
+	// live nodes are never pending, so are never partitioned in here). On a
+	// partial failure these are rolled back so a failed deploy leaves no live
+	// orphans — making deploy closer to transactional.
+	var liveNodes []*domain.Node
 
 	// --- Engine path (real cloud providers) ---
 	if len(engineNodes) > 0 {
@@ -771,6 +826,7 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 						_ = s.persistNodeFields(ctx, np)
 						_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeLive, domain.HealthHealthy)
 						s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
+						liveNodes = append(liveNodes, np)
 					}
 				}
 			}
@@ -819,6 +875,14 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 		_ = s.persistNodeFields(ctx, n)
 		_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeLive, domain.HealthHealthy)
 		s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
+		liveNodes = append(liveNodes, n)
+	}
+
+	// Partial-failure rollback: if any node failed, tear down the nodes this
+	// deploy DID bring live so a half-finished deploy leaves no live orphans.
+	rolledBack := 0
+	if anyFailed && len(liveNodes) > 0 && rollbackEnabled() {
+		rolledBack = s.rollbackProvisioned(ctx, engagementID, actor, liveNodes)
 	}
 
 	status := domain.JobDone
@@ -826,6 +890,9 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 	if anyFailed {
 		status = domain.JobFailed
 		msg = "one or more nodes failed to provision"
+		if rolledBack > 0 {
+			msg += fmt.Sprintf("; rolled back %d provisioned node(s)", rolledBack)
+		}
 	}
 	_ = s.jobs.UpdateStatus(ctx, jobID, status, msg)
 
