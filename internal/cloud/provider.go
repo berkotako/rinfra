@@ -45,3 +45,15 @@ type CloudProvider interface {
 	// reconciliation when the actual cloud state is uncertain.
 	Destroy(ctx context.Context, creds Credentials, node domain.Node) error
 }
+
+// PerNodeDestroyer is an optional marker implemented by providers whose Destroy
+// removes ONLY the given node (DigitalOcean, AWS, GCP, the fake). Providers whose
+// Destroy is engagement-scoped — Azure's Destroy deletes the whole engagement
+// resource group — deliberately do NOT implement it. Callers that must affect a
+// single node (e.g. partial-deploy rollback) check for this marker and skip the
+// over-broad delete for providers that lack it, leaving the node for
+// engagement-level teardown instead of nuking unrelated siblings.
+type PerNodeDestroyer interface {
+	// PerNodeDestroy is a marker; its presence means Destroy is node-scoped.
+	PerNodeDestroy()
+}

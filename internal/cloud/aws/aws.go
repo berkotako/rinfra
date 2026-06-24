@@ -631,3 +631,6 @@ func validateAWSCreds(creds cloud.Credentials) error {
 	}
 	return nil
 }
+
+// PerNodeDestroy marks this provider's Destroy as node-scoped (see cloud.PerNodeDestroyer).
+func (p *provider) PerNodeDestroy() {}

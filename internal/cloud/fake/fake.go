@@ -171,3 +171,6 @@ func (p *Provider) IngressCalls() []IngressCall {
 	copy(out, p.ingress)
 	return out
 }
+
+// PerNodeDestroy marks the fake provider's Destroy as node-scoped (see cloud.PerNodeDestroyer).
+func (p *Provider) PerNodeDestroy() {}
