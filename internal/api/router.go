@@ -103,6 +103,7 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 			r.With(RequireRole(domain.RoleAdmin, domain.RoleLead)).Patch("/", h.patchEngagement)
 			r.Get("/topology", h.getTopology)
 			r.Put("/topology", h.putTopology)
+			r.Get("/nodes/{nodeId}/redirector-config", h.getRedirectorConfig)
 			r.Post("/validate", h.validateTopology)
 			r.Post("/deploy", h.deploy)
 			r.Post("/teardown", h.teardown)

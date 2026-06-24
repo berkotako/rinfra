@@ -198,6 +198,15 @@ SIEM connectors.
 Classic domain fronting is effectively dead on the major CDNs. The redirector
 layer assumes reverse-proxy + categorized-domain patterns, not fronting tricks.
 
+`internal/redirector` is the translation layer: it renders a `domain.Profile`
+(resolved from a built-in profile catalog by `NodeSpec.ProfileName`) plus the
+upstream resolved from the topology `Edge` (the C2/payload node the redirector
+fronts) into concrete nginx config — default-deny on unlisted paths
+(`return 444`), `RewriteHost` → upstream `Host` header. `InfraService.
+RedirectorConfig` computes it from the live topology; `GET /engagements/{id}/
+nodes/{nodeId}/redirector-config` exposes it. On-box application (cloud-init /
+SSH push) and auto-DNS for the front domain are the live-infra step on top.
+
 ## Repo map
 
 - `cmd/rinfra-server` — entrypoint, wiring, HTTP server.
@@ -205,6 +214,8 @@ layer assumes reverse-proxy + categorized-domain patterns, not fronting tricks.
 - `internal/cloud` — `CloudProvider` interface + per-provider impls + registry.
 - `internal/c2` — `C2Provider`/`Operator` interfaces + per-framework impls + registry.
 - `internal/payload` — `Generator` interface (msfvenom) + registry.
+- `internal/redirector` — renders `domain.Profile` + topology-resolved upstream
+  into reverse-proxy (nginx) config; built-in profile catalog.
 - `internal/emulation` — scenario orchestrator; `catalog` (scenario YAMLs),
   `index` (SRA index import), `ttp` (technique→`c2.Primitive` catalog).
 - `internal/audit` — append-only audit log.

@@ -225,6 +225,20 @@ func (h *handlers) getTopology(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, topologyToJSON(t))
 }
 
+// getRedirectorConfig returns the rendered reverse-proxy config for a redirector
+// node, computed from the current topology (the upstream it fronts) and its
+// profile.
+func (h *handlers) getRedirectorConfig(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	nodeID := chi.URLParam(r, "nodeId")
+	cfg, err := h.svc.Infra.RedirectorConfig(r.Context(), id, nodeID)
+	if err != nil {
+		writeError(w, h.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodeId": nodeID, "engine": "nginx", "config": cfg})
+}
+
 func (h *handlers) putTopology(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req topologyRequest
