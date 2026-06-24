@@ -208,8 +208,11 @@ upstream resolved from the topology `Edge` (the C2/payload node the redirector
 fronts) into concrete nginx config — default-deny on unlisted paths
 (`return 444`), `RewriteHost` → upstream `Host` header. `InfraService.
 RedirectorConfig` computes it from the live topology; `GET /engagements/{id}/
-nodes/{nodeId}/redirector-config` exposes it. On-box application (cloud-init /
-SSH push) and auto-DNS for the front domain are the live-infra step on top.
+nodes/{nodeId}/redirector-config` exposes it. `InfraService.ApplyRedirector`
+(POST `…/redirector-apply`) applies it on the box over the SSH `deploy.Runner`
+— uploads the config + an idempotent nginx install script (apt/dnf/yum) and
+reloads — then best-effort points the front domain at the redirector via the
+cloud provider's `ManageDNS` (audited `redirector.configure` / `redirector.dns`).
 
 ## Repo map
 

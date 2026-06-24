@@ -70,6 +70,21 @@ func TestRenderNginx_DedupesPathRules(t *testing.T) {
 	}
 }
 
+func TestInstallScript(t *testing.T) {
+	s := redirector.InstallScript(redirector.StagePath, redirector.InstallPath)
+	for _, want := range []string{
+		"apt-get install -y nginx", "dnf install -y nginx", "yum install -y nginx", // package-manager detection
+		"nginx -t",                // validate before restart
+		"systemctl restart nginx", // reload
+		redirector.StagePath,      // source
+		redirector.InstallPath,    // destination
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install script missing %q", want)
+		}
+	}
+}
+
 func TestRenderNginx_Errors(t *testing.T) {
 	if _, err := redirector.RenderNginx(domain.Profile{}, redirector.Upstream{Host: "h", Port: 80}, "dns", ""); err == nil {
 		t.Error("dns subtype should error")
