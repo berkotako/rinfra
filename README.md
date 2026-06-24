@@ -11,6 +11,12 @@ audit trail.
 > deploy is gated on an authorized engagement, provisions into the customer's own
 > cloud account, and is fully audited. See `CLAUDE.md` for the invariants.
 
+## Intro video
+
+A short walkthrough of what RInfra is and how the workflow fits together:
+
+[![RInfra — intro video](https://img.youtube.com/vi/i19LoHQ5LQ8/hqdefault.jpg)](https://youtu.be/i19LoHQ5LQ8)
+
 ## Live demo
 
 A fully interactive demo of the web console is published to GitHub Pages:
