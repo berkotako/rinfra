@@ -123,7 +123,7 @@ func TestHTTPMsfClient_MethodsRoundTrip(t *testing.T) {
 		if err := c.ConsoleWrite(ctx, "7", "use exploit/multi/handler\n"); err != nil {
 			t.Fatalf("ConsoleWrite: %v", err)
 		}
-		out, err := c.ConsoleRead(ctx, "7")
+		out, _, err := c.ConsoleRead(ctx, "7")
 		if err != nil || out != "[*] listener up" {
 			t.Fatalf("ConsoleRead out=%q err=%v", out, err)
 		}

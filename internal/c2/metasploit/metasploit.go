@@ -35,13 +35,14 @@ import (
 func init() { c2.Register(&provider{}) }
 
 const (
-	msfVersion    = "6.4.0"
-	msfReleaseURL = "https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/software/metasploit-framework.rb"
-	// In practice, Metasploit is installed via apt/gem. The install script
-	// uses the official Metasploit installer (curl | bash — pinned to a tagged commit).
-	msfInstallerURL    = "https://raw.githubusercontent.com/rapid7/metasploit-omnibus/ad8f7c6b5d9bb5da5ff8fdaa0ea18f7b3b50e0f7/config/installers/linux/install-metasploit.sh"
-	msfInstallerSHA256 = "placeholder-operator-should-verify-from-rapid7-repo"
-	msfRpcdPort        = 55553
+	// Metasploit ships as the Rapid7 "omnibus" package, installed via the
+	// official nightly installer script (pinned to a metasploit-omnibus commit).
+	// The installer is downloaded and run in ExtraSetup; it lays down the
+	// framework (msfconsole, msfrpcd, msfdb) under /opt/metasploit-framework with
+	// /usr/bin symlinks. There is no published checksum for the script, so
+	// integrity rests on HTTPS + the pinned commit URL (no placeholder SHA).
+	msfInstallerURL = "https://raw.githubusercontent.com/rapid7/metasploit-omnibus/ad8f7c6b5d9bb5da5ff8fdaa0ea18f7b3b50e0f7/config/installers/linux/install-metasploit.sh"
+	msfRpcdPort     = 55553
 )
 
 type provider struct{}
@@ -78,25 +79,28 @@ func deployMSF(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2
 	}
 
 	extraSetup := []string{
-		"# Install Metasploit Framework from the official Rapid7 omnibus installer.",
-		"bash /tmp/rinfra-install.sh || true", // installer sets up the MSF install
+		"export DEBIAN_FRONTEND=noninteractive",
+		"apt-get update -y || true",
+		"apt-get install -y curl postgresql || true",
+		// Run the official Rapid7 omnibus installer (downloaded here, not via the
+		// template's binary-download path — it's an installer, not msfrpcd itself).
+		fmt.Sprintf("curl -fsSL %s -o /tmp/msfinstall && chmod +x /tmp/msfinstall && /tmp/msfinstall", msfInstallerURL),
 		"msfdb init || true",
-		// Write the per-engagement RPC password to a 0600 env file first, then
-		// reference it by variable so the plaintext never appears in argv or the
-		// script's stdout.
+		// Write the per-engagement RPC password to a 0600 env file (dir 0700)
+		// first, then reference it by variable so the plaintext never appears in
+		// argv or the script's stdout.
+		"install -d -m 0700 /etc/msf",
 		"install -m 0600 /dev/null /etc/msf/rpc.env",
 		fmt.Sprintf("printf 'MSF_RPC_USER=%%s\\n' %s >> /etc/msf/rpc.env", shellSingleQuote(rpcUser)),
 		fmt.Sprintf("printf 'MSF_RPC_PASS=%%s\\n' %s >> /etc/msf/rpc.env", shellSingleQuote(string(rpcPass))),
-		fmt.Sprintf("set -a; . /etc/msf/rpc.env; set +a; msfrpcd -P \"$MSF_RPC_PASS\" -U \"$MSF_RPC_USER\" -a 127.0.0.1 -p %d -S -f &", msfRpcdPort),
-		"sleep 3",
-		"pkill -f msfrpcd || true",
-		"echo '[rinfra-msf] msfrpcd credentials written to /etc/msf/rpc.env'",
+		"echo '[rinfra-msf] msfrpcd credentials written to /etc/msf/rpc.env; daemon started by systemd'",
 	}
 
 	params := deploy.InstallParams{
-		ReleaseURL:  msfInstallerURL,
-		SHA256:      msfInstallerSHA256,
-		DestPath:    "/usr/local/bin/msfrpcd",
+		// No ReleaseURL: MSF is installed by the omnibus installer in ExtraSetup
+		// (it's not a single downloadable binary). The systemd unit runs the
+		// installed msfrpcd; there is NO pre-start/pkill dance.
+		DestPath:    "/usr/bin/msfrpcd",
 		SystemdUnit: "msfrpcd",
 		ServiceUser: "root",
 		// Load the per-engagement RPC password into the unit's environment so
@@ -104,7 +108,7 @@ func deployMSF(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2
 		// start with an unset password.
 		EnvironmentFile: "/etc/msf/rpc.env",
 		ExecStart: fmt.Sprintf(
-			"/usr/local/bin/msfrpcd -P ${MSF_RPC_PASS} -U %s -a 0.0.0.0 -p %d -S",
+			"/usr/bin/msfrpcd -P ${MSF_RPC_PASS} -U %s -a 0.0.0.0 -p %d -S",
 			rpcUser, msfRpcdPort,
 		),
 		ExtraSetup: extraSetup,
@@ -156,7 +160,7 @@ func msfRedirectorConfig(prof domain.Profile) (string, error) {
 // generated password). Callers that already hold a context+credentials can use
 // LiveOperator to authenticate eagerly instead.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	return &operator{ts: ts, client: clientForTeamserver(ts)}, true
+	return NewOperatorWithClient(ts, clientForTeamserver(ts), WithPoll(defaultPoll)), true
 }
 
 // MsfRpcdClient is the minimal interface over msfrpcd's MessagePack-over-HTTP
@@ -168,13 +172,22 @@ type MsfRpcdClient interface {
 	ConsoleCreate(ctx context.Context) (string, error)
 	// ConsoleWrite sends commands to a console.
 	ConsoleWrite(ctx context.Context, consoleID, command string) error
-	// ConsoleRead reads pending output from a console.
-	ConsoleRead(ctx context.Context, consoleID string) (string, error)
+	// ConsoleRead reads pending console output along with the busy flag: busy=true
+	// means the console is still executing (more output is coming). Callers poll
+	// until busy is false and no new data arrives.
+	ConsoleRead(ctx context.Context, consoleID string) (data string, busy bool, err error)
 	// SessionList returns active sessions.
 	SessionList(ctx context.Context) ([]MsfSession, error)
+	// SessionMeterpreterRun dispatches a meterpreter console command (async); the
+	// output is retrieved separately via SessionMeterpreterRead.
+	SessionMeterpreterRun(ctx context.Context, sessionID, command string) error
+	// SessionMeterpreterRead drains the meterpreter output buffer (a snapshot;
+	// poll until it stops returning data).
+	SessionMeterpreterRead(ctx context.Context, sessionID string) (string, error)
 	// SessionShellWrite sends a command to a shell session.
 	SessionShellWrite(ctx context.Context, sessionID, command string) error
-	// SessionShellRead reads pending output from a shell session.
+	// SessionShellRead reads pending output from a shell session (a snapshot; poll
+	// until it stops returning data).
 	SessionShellRead(ctx context.Context, sessionID string) (string, error)
 }
 
@@ -186,14 +199,128 @@ type MsfSession struct {
 	ViaExploit string
 }
 
-// NewOperatorWithClient returns a Metasploit Operator with the given client injected.
-func NewOperatorWithClient(ts c2.Teamserver, client MsfRpcdClient) c2.Operator {
-	return &operator{ts: ts, client: client}
+// Output-collection tuning. msfrpcd console/session reads are polling snapshots,
+// so output is collected by reading repeatedly until it stops.
+const (
+	defaultPoll   = 300 * time.Millisecond // delay between polls (live)
+	drainTimeout  = 20 * time.Second       // overall cap per drain
+	maxEmptyReads = 3                      // consecutive empty reads ⇒ done
+	maxReads      = 400                    // hard iteration cap (belt-and-suspenders)
+)
+
+// Option configures an operator (e.g. the poll interval for tests).
+type Option func(*operator)
+
+// WithPoll sets the inter-poll delay used while draining output. Production uses
+// defaultPoll; tests pass 0 for instant draining against a fake.
+func WithPoll(d time.Duration) Option { return func(o *operator) { o.poll = d } }
+
+// NewOperatorWithClient returns a Metasploit Operator with the given client
+// injected. Without options the poll interval is 0 (no delay) — production
+// callers (Control / LiveOperator) pass WithPoll(defaultPoll).
+func NewOperatorWithClient(ts c2.Teamserver, client MsfRpcdClient, opts ...Option) c2.Operator {
+	o := &operator{ts: ts, client: client}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
 }
 
 type operator struct {
 	ts     c2.Teamserver
 	client MsfRpcdClient
+	poll   time.Duration
+}
+
+// nap waits the poll interval (no-op when poll is 0, e.g. in tests), honoring ctx.
+func (o *operator) nap(ctx context.Context) {
+	if o.poll <= 0 {
+		return
+	}
+	select {
+	case <-time.After(o.poll):
+	case <-ctx.Done():
+	}
+}
+
+// drainConsole reads a console until it is idle (not busy and no new output) or
+// the timeout elapses, accumulating all output.
+func (o *operator) drainConsole(ctx context.Context, cid string) (string, error) {
+	var b strings.Builder
+	deadline := time.Now().Add(drainTimeout)
+	for i := 0; i < maxReads && time.Now().Before(deadline); i++ {
+		data, busy, err := o.client.ConsoleRead(ctx, cid)
+		if err != nil {
+			return b.String(), err
+		}
+		b.WriteString(data)
+		if !busy && data == "" {
+			break
+		}
+		o.nap(ctx)
+	}
+	return b.String(), nil
+}
+
+// drainReads polls a session read function until output stops (maxEmptyReads
+// consecutive empty reads) or the timeout elapses, accumulating all output.
+func (o *operator) drainReads(ctx context.Context, read func(context.Context) (string, error)) (string, error) {
+	var b strings.Builder
+	empty := 0
+	deadline := time.Now().Add(drainTimeout)
+	for i := 0; i < maxReads && time.Now().Before(deadline); i++ {
+		data, err := read(ctx)
+		if err != nil {
+			return b.String(), err
+		}
+		if data == "" {
+			if empty++; empty >= maxEmptyReads {
+				break
+			}
+		} else {
+			empty = 0
+			b.WriteString(data)
+		}
+		o.nap(ctx)
+	}
+	return b.String(), nil
+}
+
+// sessionIsMeterpreter reports whether the session is a meterpreter session
+// (vs a raw shell). Unknown/missing sessions default to meterpreter, since the
+// renderer emits meterpreter console commands. A SessionList error also defaults
+// to meterpreter rather than failing the technique.
+func (o *operator) sessionIsMeterpreter(ctx context.Context, sessionID string) bool {
+	sessions, err := o.client.SessionList(ctx)
+	if err != nil {
+		return true
+	}
+	for _, s := range sessions {
+		if s.ID == sessionID {
+			return !strings.EqualFold(s.Type, "shell")
+		}
+	}
+	return true
+}
+
+// runOnSession dispatches a rendered command to a session by type and drains its
+// output: meterpreter via run_single + meterpreter_read, raw shell via
+// shell_write + shell_read.
+func (o *operator) runOnSession(ctx context.Context, sessionID, cmd string) (string, error) {
+	if o.sessionIsMeterpreter(ctx, sessionID) {
+		if err := o.client.SessionMeterpreterRun(ctx, sessionID, cmd); err != nil {
+			return "", err
+		}
+		return o.drainReads(ctx, func(ctx context.Context) (string, error) {
+			return o.client.SessionMeterpreterRead(ctx, sessionID)
+		})
+	}
+	if err := o.client.SessionShellWrite(ctx, sessionID, cmd+"\n"); err != nil {
+		return "", err
+	}
+	return o.drainReads(ctx, func(ctx context.Context) (string, error) {
+		return o.client.SessionShellRead(ctx, sessionID)
+	})
 }
 
 func (o *operator) StartListener(ctx context.Context, spec c2.ListenerSpec) error {
@@ -221,8 +348,12 @@ func (o *operator) StartListener(ctx context.Context, spec c2.ListenerSpec) erro
 		if err := o.client.ConsoleWrite(ctx, cid, cmd+"\n"); err != nil {
 			return fmt.Errorf("metasploit: console write (%q): %w", cmd, err)
 		}
-		// Brief read to drain pending output.
-		_, _ = o.client.ConsoleRead(ctx, cid)
+		// Drain to completion: console.read is a polling snapshot with a busy
+		// flag — a single read would return partial/empty output and we'd never
+		// know the handler actually started.
+		if _, err := o.drainConsole(ctx, cid); err != nil {
+			return fmt.Errorf("metasploit: console read (%q): %w", cmd, err)
+		}
 	}
 	return nil
 }
@@ -262,18 +393,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 		}, nil
 	}
 
-	if err := o.client.SessionShellWrite(ctx, sessionID, cmd+"\n"); err != nil {
-		fin := time.Now()
-		return domain.Result{
-			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecFailed,
-			StartedAt:         start,
-			FinishedAt:        fin,
-			Err:               err.Error(),
-		}, nil
-	}
-
-	output, err := o.client.SessionShellRead(ctx, sessionID)
+	output, err := o.runOnSession(ctx, sessionID, cmd)
 	fin := time.Now()
 	if err != nil {
 		return domain.Result{
@@ -326,16 +446,7 @@ func (o *operator) Revert(ctx context.Context, sessionID string, t domain.Techni
 			FinishedAt:        time.Now(),
 		}, nil
 	}
-	if err := o.client.SessionShellWrite(ctx, sessionID, cmd+"\n"); err != nil {
-		return domain.Result{
-			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecFailed,
-			StartedAt:         start,
-			FinishedAt:        time.Now(),
-			Err:               err.Error(),
-		}, nil
-	}
-	output, err := o.client.SessionShellRead(ctx, sessionID)
+	output, err := o.runOnSession(ctx, sessionID, cmd)
 	fin := time.Now()
 	if err != nil {
 		return domain.Result{
