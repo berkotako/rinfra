@@ -78,10 +78,16 @@ type InstallParams struct {
 	EnvironmentFile string
 }
 
-// installScriptTmpl is the parameterised install script template. It:
+// installScriptTmpl is the parameterised install script template. When
+// ReleaseURL is set it:
 //  1. Downloads the official release archive from ReleaseURL.
-//  2. Verifies the SHA-256 checksum.
+//  2. Verifies the SHA-256 checksum (skipped, with a warning, if SHA256 is
+//     empty — e.g. Sliver verifies via minisign, not a published .sha256).
 //  3. Places the binary at DestPath.
+//
+// When ReleaseURL is empty the download/verify steps are skipped entirely and
+// the framework is expected to install itself within ExtraSetup (git clone +
+// build, apt repo, pip, or Docker — e.g. Mythic, Metasploit). It then always:
 //  4. Runs ExtraSetup lines.
 //  5. Installs and starts a systemd service unit.
 var installScriptTmpl = template.Must(template.New("install").Parse(`#!/usr/bin/env bash
@@ -98,16 +104,19 @@ DEST_PATH="{{ .DestPath }}"
 UNIT="{{ .SystemdUnit }}"
 SERVICE_USER="{{ .ServiceUser }}"
 
-echo "[rinfra-install] Downloading from ${RELEASE_URL}"
+{{ if .ReleaseURL }}echo "[rinfra-install] Downloading from ${RELEASE_URL}"
 curl -fsSL -o /tmp/rinfra-download "${RELEASE_URL}"
 
-echo "[rinfra-install] Verifying checksum"
+{{ if .SHA256 }}echo "[rinfra-install] Verifying checksum"
 echo "${EXPECTED_SHA256}  /tmp/rinfra-download" | sha256sum -c -
-
-install -m 0755 /tmp/rinfra-download "${DEST_PATH}"
+{{ else }}echo "[rinfra-install] WARNING: no SHA-256 pinned; integrity must be verified out of band (e.g. minisign/GPG)" >&2
+{{ end }}install -m 0755 /tmp/rinfra-download "${DEST_PATH}"
 rm -f /tmp/rinfra-download
 echo "[rinfra-install] Binary installed to ${DEST_PATH}"
-
+{{ else }}# No ReleaseURL: this framework is installed from source/package manager
+# (git clone + build, apt repo, pip, or Docker) entirely within ExtraSetup below.
+echo "[rinfra-install] No release binary to download; using ExtraSetup install"
+{{ end }}
 {{ range .ExtraSetup }}{{ . }}
 {{ end }}
 
