@@ -36,12 +36,13 @@ func init() { c2.Register(&provider{}) }
 
 const (
 	// Metasploit ships as the Rapid7 "omnibus" package, installed via the
-	// official nightly installer script (pinned to a metasploit-omnibus commit).
-	// The installer is downloaded and run in ExtraSetup; it lays down the
-	// framework (msfconsole, msfrpcd, msfdb) under /opt/metasploit-framework with
-	// /usr/bin symlinks. There is no published checksum for the script, so
-	// integrity rests on HTTPS + the pinned commit URL (no placeholder SHA).
-	msfInstallerURL = "https://raw.githubusercontent.com/rapid7/metasploit-omnibus/ad8f7c6b5d9bb5da5ff8fdaa0ea18f7b3b50e0f7/config/installers/linux/install-metasploit.sh"
+	// official nightly installer wrapper (msfupdate.erb — Rapid7's documented
+	// Linux install command), pinned to a metasploit-omnibus commit. It is
+	// downloaded and run in ExtraSetup; it lays down the framework (msfconsole,
+	// msfrpcd, msfdb) under /opt/metasploit-framework with /usr/bin symlinks.
+	// There is no published checksum for the script, so integrity rests on HTTPS +
+	// the pinned commit URL (no placeholder SHA). Verified to return 200.
+	msfInstallerURL = "https://raw.githubusercontent.com/rapid7/metasploit-omnibus/66ebcd7c0f0e9ea33f22be102d047e80faf5018d/config/templates/metasploit-framework-wrappers/msfupdate.erb"
 	msfRpcdPort     = 55553
 )
 
@@ -160,7 +161,7 @@ func msfRedirectorConfig(prof domain.Profile) (string, error) {
 // generated password). Callers that already hold a context+credentials can use
 // LiveOperator to authenticate eagerly instead.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	return NewOperatorWithClient(ts, clientForTeamserver(ts), WithPoll(defaultPoll)), true
+	return NewOperatorWithClient(ts, clientForTeamserver(ts)), true // poll defaults to defaultPoll
 }
 
 // MsfRpcdClient is the minimal interface over msfrpcd's MessagePack-over-HTTP
@@ -212,14 +213,16 @@ const (
 type Option func(*operator)
 
 // WithPoll sets the inter-poll delay used while draining output. Production uses
-// defaultPoll; tests pass 0 for instant draining against a fake.
+// the default (defaultPoll); tests pass WithPoll(0) for instant draining against
+// a fake.
 func WithPoll(d time.Duration) Option { return func(o *operator) { o.poll = d } }
 
 // NewOperatorWithClient returns a Metasploit Operator with the given client
-// injected. Without options the poll interval is 0 (no delay) — production
-// callers (Control / LiveOperator) pass WithPoll(defaultPoll).
+// injected. The poll interval defaults to defaultPoll so EVERY live caller
+// (Control, LiveOperator, anything else) drains output correctly without having
+// to remember an option; tests pass WithPoll(0) to drain instantly.
 func NewOperatorWithClient(ts c2.Teamserver, client MsfRpcdClient, opts ...Option) c2.Operator {
-	o := &operator{ts: ts, client: client}
+	o := &operator{ts: ts, client: client, poll: defaultPoll}
 	for _, opt := range opts {
 		opt(o)
 	}

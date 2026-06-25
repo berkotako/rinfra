@@ -101,8 +101,13 @@ func TestDeploy_FakeRunner(t *testing.T) {
 	if !ok {
 		t.Fatal("install script not uploaded")
 	}
-	if !strings.Contains(script, "rapid7") {
-		t.Error("install script should reference the Rapid7 official installer URL")
+	if !strings.Contains(script, "msfupdate.erb") {
+		t.Error("install script should use the valid Rapid7 installer wrapper (msfupdate.erb)")
+	}
+	for _, unwanted := range []string{"install-metasploit.sh", "pkill", "placeholder", "sha256sum"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("install script should not contain %q (old/broken deploy)", unwanted)
+		}
 	}
 }
 
@@ -126,7 +131,7 @@ func TestRedirectorConfig(t *testing.T) {
 
 func TestOperator_Execute_KnownTechnique(t *testing.T) {
 	client := &FakeMsfClient{shellOutput: "System info output"}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	tech := domain.Technique{AttackID: "T1082"}
 	result, err := op.Execute(context.Background(), "1", tech)
@@ -154,7 +159,7 @@ func TestOperator_Execute_RoutesBySessionType(t *testing.T) {
 				shellOutput: "drained output",
 				sessions:    []msfpkg.MsfSession{{ID: "1", Type: tc.sessType}},
 			}
-			op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+			op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 			res, err := op.Execute(context.Background(), "1", domain.Technique{AttackID: "T1082"})
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
@@ -174,7 +179,7 @@ func TestOperator_Execute_RoutesBySessionType(t *testing.T) {
 
 func TestOperator_Execute_UnknownTechnique_Skipped(t *testing.T) {
 	client := &FakeMsfClient{}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	tech := domain.Technique{AttackID: "T9876.543"}
 	result, err := op.Execute(context.Background(), "1", tech)
@@ -188,7 +193,7 @@ func TestOperator_Execute_UnknownTechnique_Skipped(t *testing.T) {
 
 func TestOperator_Execute_SessionError(t *testing.T) {
 	client := &FakeMsfClient{shellErr: errors.New("session closed")}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	tech := domain.Technique{AttackID: "T1057"}
 	result, err := op.Execute(context.Background(), "1", tech)
@@ -202,7 +207,7 @@ func TestOperator_Execute_SessionError(t *testing.T) {
 
 func TestOperator_StartListener(t *testing.T) {
 	client := &FakeMsfClient{}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	spec := c2.ListenerSpec{Protocol: "https", Bind: "0.0.0.0"}
 	if err := op.StartListener(context.Background(), spec); err != nil {
@@ -224,7 +229,7 @@ func TestOperator_Sessions(t *testing.T) {
 			{ID: "1", Type: "meterpreter", Info: "WORKSTATION01", ViaExploit: "multi/handler"},
 		},
 	}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 	sessions, err := op.Sessions(context.Background())
 	if err != nil {
 		t.Fatalf("Sessions: %v", err)
