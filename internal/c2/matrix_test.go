@@ -39,9 +39,9 @@ func TestSupportMatrix(t *testing.T) {
 		{name: "metasploit", tier: c2.TierOrchestrated, hasOperator: true},
 		{name: "custom", tier: c2.TierOrchestrated, hasOperator: true},
 		// Scripted: partial Operator (subset of techniques).
-		{name: "havoc", tier: c2.TierScripted, hasOperator: true},
 		{name: "poshc2", tier: c2.TierScripted, hasOperator: true},
 		// Fronted: deploy + redirector only; human operates.
+		{name: "havoc", tier: c2.TierFronted, hasOperator: false},
 		{name: "cobaltstrike", tier: c2.TierFronted, hasOperator: false},
 		{name: "bruteratel", tier: c2.TierFronted, hasOperator: false},
 	}

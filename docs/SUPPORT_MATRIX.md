@@ -27,14 +27,14 @@ only works where the framework exposes a usable operator API.
 | Mythic | Orchestrated | Yes | Scripting/GraphQL API, modular C2 profiles |
 | Metasploit | Orchestrated | Yes | msfrpcd RPC drives meterpreter; open source, no license |
 | custom (in-house) | Orchestrated | Yes | You own the operator surface |
-| Havoc | Scripted | Partial | Teamserver API; less stable to automate |
-| PoshC2 | Scripted | Partial | Open source; scriptable but no modern API |
+| PoshC2 | Scripted | Partial | Open source; scriptable via v9.0 REST API |
+| Havoc | Fronted | No | No headless operator CLI; only an undocumented WebSocket API — deployed + fronted, human-operated |
 | Cobalt Strike | Fronted | No | License-gated (customer key); operator drives manually |
 | Brute Ratel C4 | Fronted | No | License-gated, EDR-evasion focus; operator drives manually |
 
-`c2.C2Provider.Control()` returns `(Operator, ok)`. `ok=false` (Cobalt Strike,
-Brute Ratel) means the emulation engine records every technique as `skipped` and
-a human operates the framework.
+`c2.C2Provider.Control()` returns `(Operator, ok)`. `ok=false` (Havoc, Cobalt
+Strike, Brute Ratel) means the emulation engine records every technique as
+`manual_required` and a human operates the framework.
 
 ### Two usage modes
 
