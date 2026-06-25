@@ -187,7 +187,7 @@ Implement in this sequence; each step should compile and be testable.
 methods are wired to their official SDKs (godo / aws-sdk-go-v2 /
 google.golang.org/api / azure-sdk-for-go) and unit-tested; all eight C2
 frameworks have real clients (Sliver gRPC, Mythic GraphQL, Metasploit
-msgpack-RPC, PoshC2 SSH-CLI, Custom REST; Havoc, Cobalt Strike, and Brute Ratel
+msgpack-RPC, PoshC2 v9.0 REST, Custom REST; Havoc, Cobalt Strike, and Brute Ratel
 fronted — deploy + redirector, human-operated) over a shared live SSH runner;
 msfvenom generation is real. Built on
 top since: capability-based technique routing (`service.Route` —

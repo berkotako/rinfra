@@ -26,7 +26,6 @@ func (f *FakePoshC2Client) Execute(_ context.Context, _, cmd string) (string, er
 func (f *FakePoshC2Client) Implants(_ context.Context) ([]poshpkg.PoshC2Implant, error) {
 	return f.implants, nil
 }
-func (f *FakePoshC2Client) StartListener(_ context.Context, _ string, _ int) error { return nil }
 
 func TestTier(t *testing.T) {
 	p, err := c2.Get("poshc2")

@@ -1,24 +1,34 @@
 // Package poshc2 adapts the PoshC2 framework (Nettitude) to RInfra. Scripted-tier:
-// open source with a scriptable Python server, but the API surface is less clean
-// than a modern gRPC or REST API. RInfra supports deploy + redirector and a
-// partial operator: only techniques that map reliably to PoshC2 implant commands
-// are executed; others return ExecUnsupported.
+// RInfra deploys PoshC2 + a redirector and drives a PARTIAL operator over PoshC2
+// v9.0's REST API; techniques outside the renderable subset return
+// ExecUnsupported (no fabricated attempt).
 //
-// # Automation seam note
+// # Operator API (PoshC2 v9.0 "Revival")
 //
-// PoshC2 does not expose a stable machine-readable operator API. The partial
-// operator implemented here drives the poshc2 implant-handler CLI (the
-// `posh` / `poshc2` console, e.g. posh -i to issue implant tasks) via SSH on the
-// teamserver host and parses its textual output. This is brittle by design —
-// users should prefer Sliver or Mythic for operator-API-driven emulation.
+// PoshC2 v8.x had NO machine-readable operator API (only an interactive console),
+// so RInfra targets v9.0, which ships posh-api-server — a basic REST API on
+// :5000. The live client (httpPoshC2Client) drives the v9.0 endpoints (verified
+// against start_api.py at the pinned commit):
+//   - GET  /liveimplants        — list active implants
+//   - POST /newtasks            — queue a command (model: implant_id, command, user)
+//   - GET  /tasks/implant/{id}  — read task output
 //
-// If a future PoshC2 release exposes a proper API, swap the cliPoshC2Client
-// command strings for it and expand supportedTechniques.
+// posh-api-server protects these with HTTP Basic auth (default poshc2 /
+// change_on_install; override via RINFRA_POSHC2_API_USER/PASSWORD). There is no
+// listener-create endpoint — listeners are configured at deploy time. JSON
+// shapes are parsed leniently; field names want validation against a live v9.0
+// server (see docs/RUNBOOK). RInfra composes the upstream tool: it authors no
+// implants, payloads, or evasion.
 package poshc2
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -31,10 +41,13 @@ import (
 func init() { c2.Register(&provider{}) }
 
 const (
-	poshVersion    = "8.0.3"
-	poshReleaseURL = "https://github.com/nettitude/PoshC2/archive/refs/tags/v" + poshVersion + ".tar.gz"
-	poshSHA256     = "placeholder-operator-should-verify-from-nettitude-release"
-	poshPort       = 443
+	// PoshC2 installs from source at an IMMUTABLE pinned commit (the v9.0 tag) —
+	// v9.0 is the first release with the posh-api-server REST API. v8.x had no
+	// API and the previously-pinned "v8.0.3" tag never existed.
+	poshRepo    = "https://github.com/nettitude/PoshC2"
+	poshRef     = "64eb5570db2ea0a83cde855001caac9d8d33da29" // tag v9.0
+	poshPort    = 443                                        // implant HTTPS listener (redirector upstream)
+	poshAPIPort = 5000                                       // posh-api-server REST API
 )
 
 type provider struct{}
@@ -69,30 +82,41 @@ func supportedAttackIDs() []string {
 	return ids
 }
 
-// Deploy installs PoshC2 on the node via SSH using the official release.
+// Deploy installs PoshC2 v9.0 on the node via SSH (source build at the pinned
+// commit), then runs the C2 server and the posh-api-server REST API.
 func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
-	runner := runnerFromNode(node)
-	return deployPoshC2(ctx, runner, node, cfg)
+	return deployPoshC2(ctx, runnerFromNode(node), node, cfg)
 }
 
 func deployPoshC2(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2.Config) (c2.Teamserver, error) {
+	// PoshC2 has no release binary; install from source at the pinned commit
+	// (ReleaseURL empty ⇒ the template skips its download/checksum block). Run the
+	// C2 server plus the v9.0 REST API (posh-api-server) under one unit.
 	extraSetup := []string{
-		"apt-get install -y python3 python3-pip || true",
-		fmt.Sprintf("mkdir -p /opt/poshc2 && cd /opt/poshc2 && curl -fsSL %s | tar xz --strip-components=1", poshReleaseURL),
-		"cd /opt/poshc2 && pip3 install -r requirements.txt || true",
-		"cd /opt/poshc2 && python3 poshc2 server &",
-		"sleep 2 && pkill -f 'poshc2 server' || true",
-		"echo '[rinfra-poshc2] PoshC2 installed from official release'",
+		"export DEBIAN_FRONTEND=noninteractive",
+		"apt-get update -y || true",
+		"apt-get install -y git python3 python3-pip || true",
+		"rm -rf /opt/poshc2 && git init -q /opt/poshc2",
+		fmt.Sprintf("cd /opt/poshc2 && git remote add origin %s", poshRepo),
+		fmt.Sprintf("cd /opt/poshc2 && git fetch --depth 1 origin %s", poshRef),
+		"cd /opt/poshc2 && git checkout -q FETCH_HEAD",
+		// Install.sh is the upstream installer: it sets up the pipenv deps and
+		// symlinks posh-server / posh-api-server / posh-project into /usr/local/bin.
+		// pip3 alone does NOT create those entrypoints.
+		"cd /opt/poshc2 && ./Install.sh",
+		"posh-project -n rinfra || true", // create the engagement project
+		"echo '[rinfra-poshc2] PoshC2 v9.0 installed via Install.sh; REST API on :5000'",
 	}
 
 	params := deploy.InstallParams{
-		ReleaseURL:  poshReleaseURL,
-		SHA256:      poshSHA256,
-		DestPath:    "/opt/poshc2/poshc2",
+		// No ReleaseURL/SHA256: built from source in ExtraSetup.
+		DestPath:    "/opt/poshc2/posh-server",
 		SystemdUnit: "poshc2-server",
 		ServiceUser: "root",
-		ExecStart:   "python3 /opt/poshc2/poshc2 server",
-		ExtraSetup:  extraSetup,
+		// Start the C2 server (background) and the REST API (foreground keeps the
+		// unit alive). Operators refine listeners/project config via posh-project.
+		ExecStart:  "/bin/bash -lc '(posh-server &) && exec posh-api-server'",
+		ExtraSetup: extraSetup,
 	}
 
 	if err := deploy.RunInstall(ctx, runner, params); err != nil {
@@ -103,7 +127,7 @@ func deployPoshC2(ctx context.Context, runner deploy.Runner, node domain.Node, _
 		Host:           node.PublicIP,
 		Port:           poshPort,
 		Status:         "running",
-		ConnectionInfo: fmt.Sprintf("PoshC2 server @ %s:%d", node.PublicIP, poshPort),
+		ConnectionInfo: fmt.Sprintf("PoshC2 v9.0 @ %s:%d (REST API on :%d)", node.PublicIP, poshPort, poshAPIPort),
 	}, nil
 }
 
@@ -127,18 +151,20 @@ func (p *provider) RedirectorConfig(prof domain.Profile) (string, error) {
 	return cfg, nil
 }
 
-// Control returns a scripted partial Operator. Techniques outside
-// supportedTechniques return ExecUnsupported.
+// Control returns a scripted partial Operator backed by the v9.0 REST API. The
+// API base/token are read from the per-engagement environment
+// (RINFRA_POSHC2_API_URL / RINFRA_POSHC2_API_TOKEN); the default base is the
+// teamserver host on the REST port.
 func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	client := newCLIPoshC2Client(deploy.NewNodeRunner(ts.Host))
-	return &operator{ts: ts, client: client}, true
+	return &operator{ts: ts, client: newHTTPClient(ts)}, true
 }
 
-// PoshC2Client wraps the PoshC2 implant-handler CLI for limited automation.
+// PoshC2Client wraps PoshC2 v9.0's REST API for limited automation.
 type PoshC2Client interface {
+	// Execute queues a command for an implant and returns its task output.
 	Execute(ctx context.Context, implantID, command string) (string, error)
+	// Implants lists active implants.
 	Implants(ctx context.Context) ([]PoshC2Implant, error)
-	StartListener(ctx context.Context, protocol string, port int) error
 }
 
 // PoshC2Implant is an active implant session.
@@ -158,9 +184,12 @@ type operator struct {
 	client PoshC2Client
 }
 
-func (o *operator) StartListener(ctx context.Context, spec c2.ListenerSpec) error {
-	port := 443
-	return o.client.StartListener(ctx, spec.Protocol, port)
+// StartListener is a no-op for PoshC2: listeners are configured at deploy time
+// (posh-project), and the v9.0 REST API exposes no listener-create endpoint. It
+// returns nil so an emulation run isn't aborted; the deploy-time listener is what
+// implants call back to.
+func (o *operator) StartListener(_ context.Context, _ c2.ListenerSpec) error {
+	return nil
 }
 
 func (o *operator) Sessions(ctx context.Context) ([]c2.Session, error) {
@@ -170,11 +199,7 @@ func (o *operator) Sessions(ctx context.Context) ([]c2.Session, error) {
 	}
 	out := make([]c2.Session, 0, len(implants))
 	for _, im := range implants {
-		out = append(out, c2.Session{
-			ID:   im.ID,
-			Host: im.Hostname,
-			User: im.Username,
-		})
+		out = append(out, c2.Session{ID: im.ID, Host: im.Hostname, User: im.Username})
 	}
 	return out, nil
 }
@@ -184,14 +209,11 @@ func (o *operator) Execute(ctx context.Context, implantID string, t domain.Techn
 
 	cmd, ok := techniqueToCommand(t)
 	if !ok {
-		// Outside the subset PoshC2's CLI wrapper reliably handles (no catalog
-		// mapping, or a primitive PoshC2 doesn't render) — Scripted-tier means
-		// the operator drives it manually.
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecUnsupported,
-			Output: fmt.Sprintf("poshc2 (scripted-tier): technique %s is outside the supported subset; "+
-				"operator should execute manually via PoshC2 client", t.AttackID),
+			Output: fmt.Sprintf("poshc2 (scripted-tier): technique %s is outside the renderable subset; "+
+				"operator should execute manually via the PoshC2 client", t.AttackID),
 			StartedAt:  start,
 			FinishedAt: time.Now(),
 		}, nil
@@ -219,10 +241,8 @@ func (o *operator) Execute(ctx context.Context, implantID string, t domain.Techn
 }
 
 // techniqueToCommand compiles a portable Technique to a PoshC2 PowerShell command
-// via the shared catalog (ttp.Compile) + renderPoshPrimitive. ok=false means the
-// technique is outside the narrow set PoshC2's CLI wrapper reliably handles —
-// deriving the Scripted-tier support set from the catalog rather than a separate
-// hand-maintained allowlist.
+// via the shared catalog (ttp.Compile) + renderPoshPrimitive. ok=false derives
+// the Scripted-tier support set from the catalog rather than a hand-kept list.
 func techniqueToCommand(t domain.Technique) (string, bool) {
 	prim, ok, err := ttp.Compile(t)
 	if !ok || err != nil {
@@ -232,8 +252,7 @@ func techniqueToCommand(t domain.Technique) (string, bool) {
 }
 
 // renderPoshPrimitive renders a portable primitive into a PoshC2 implant command
-// (PowerShell). ok=false for primitives outside PoshC2's reliable subset — the
-// operator runs those by hand via the PoshC2 client.
+// (PowerShell). ok=false for primitives outside PoshC2's reliable subset.
 func renderPoshPrimitive(p c2.Primitive) (string, bool) {
 	switch p.Kind {
 	case c2.PrimPowerShell:
@@ -261,103 +280,148 @@ func runnerFromNode(node domain.Node) deploy.Runner {
 	return deploy.NewNodeRunner(node.PublicIP)
 }
 
-// cliPoshC2Client is the live PoshC2Client. It drives the upstream PoshC2
-// implant-handler CLI (`poshc2`) on the teamserver host through a deploy.Runner
-// and parses its textual stdout. RInfra composes the upstream tool here: every
-// command string below targets PoshC2's own CLI — RInfra authors no implants,
-// payloads, or evasion.
-type cliPoshC2Client struct {
-	runner deploy.Runner
+// httpPoshC2Client is the live PoshC2Client. It drives PoshC2 v9.0's REST API
+// (posh-api-server) over HTTP. RInfra composes the upstream tool — it authors no
+// implants, payloads, or evasion.
+type httpPoshC2Client struct {
+	base    string // e.g. http://host:5000
+	user    string // HTTP Basic auth user (posh-api-server uses HTTPBasicAuth)
+	pass    string // HTTP Basic auth password
+	hc      *http.Client
+	poll    time.Duration // delay between task-output polls
+	timeout time.Duration // overall budget to wait for task output
 }
 
-// newCLIPoshC2Client constructs a live CLI-backed PoshC2Client. runner executes
-// commands on the teamserver host (production: deploy.NewNodeRunner).
-func newCLIPoshC2Client(runner deploy.Runner) *cliPoshC2Client {
-	return &cliPoshC2Client{runner: runner}
+// posh-api-server defaults (start_api.py): HTTPBasicAuth with this user/pass.
+const (
+	defaultAPIUser = "poshc2"
+	defaultAPIPass = "change_on_install"
+)
+
+// newHTTPClient builds the live REST client from the teamserver, allowing the
+// API URL/credentials to be overridden per engagement via the environment.
+func newHTTPClient(ts c2.Teamserver) *httpPoshC2Client {
+	base := os.Getenv("RINFRA_POSHC2_API_URL")
+	if base == "" {
+		base = fmt.Sprintf("http://%s:%d", ts.Host, poshAPIPort)
+	}
+	return &httpPoshC2Client{
+		base:    strings.TrimRight(base, "/"),
+		user:    envOr("RINFRA_POSHC2_API_USER", defaultAPIUser),
+		pass:    envOr("RINFRA_POSHC2_API_PASSWORD", defaultAPIPass),
+		hc:      &http.Client{Timeout: 30 * time.Second},
+		poll:    500 * time.Millisecond,
+		timeout: 30 * time.Second,
+	}
 }
 
-// Execute tasks an implant with a command via the PoshC2 implant-handler and
-// returns the task output. The handler is driven non-interactively with `-i`
-// (implant id) and `-c` (command) flags.
-func (c *cliPoshC2Client) Execute(ctx context.Context, implantID, command string) (string, error) {
-	cmd := fmt.Sprintf("poshc2 -i %s -c %s", shellQuote(implantID), shellQuote(command))
-	out, err := c.runner.Run(ctx, cmd)
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func (c *httpPoshC2Client) do(ctx context.Context, method, path string, body any) ([]byte, error) {
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		rdr = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
 	if err != nil {
-		return out, fmt.Errorf("poshc2: implant-handler task on %s: %w", implantID, err)
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("poshc2 api %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return data, nil
+}
+
+// Implants lists active implants via GET /liveimplants. Fields are parsed
+// leniently to tolerate the v9.0 API's loosely-documented shape.
+func (c *httpPoshC2Client) Implants(ctx context.Context) ([]PoshC2Implant, error) {
+	data, err := c.do(ctx, http.MethodGet, "/liveimplants", nil)
+	if err != nil {
+		return nil, err
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, fmt.Errorf("poshc2: decode liveimplants: %w", err)
+	}
+	out := make([]PoshC2Implant, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, PoshC2Implant{
+			ID:       firstString(r, "ImplantID", "RandomURI", "id"),
+			Hostname: firstString(r, "Hostname", "hostname"),
+			Username: firstString(r, "User", "Domain\\User", "user"),
+		})
 	}
 	return out, nil
 }
 
-// Implants lists active implants by parsing `poshc2 --list-implants` output.
-func (c *cliPoshC2Client) Implants(ctx context.Context) ([]PoshC2Implant, error) {
-	out, err := c.runner.Run(ctx, "poshc2 --list-implants")
-	if err != nil {
-		return nil, fmt.Errorf("poshc2: list implants: %w", err)
+// Execute queues a command for an implant (POST /newtasks — the create endpoint;
+// /newtasksview is GET-only) then polls GET /tasks/implant/{id} for the output.
+// The v9.0 NewTask model requires implant_id, command, and user.
+func (c *httpPoshC2Client) Execute(ctx context.Context, implantID, command string) (string, error) {
+	if _, err := c.do(ctx, http.MethodPost, "/newtasks", map[string]string{
+		"implant_id": implantID,
+		"command":    command,
+		"user":       c.user,
+	}); err != nil {
+		return "", fmt.Errorf("poshc2: queue task on implant %s: %w", implantID, err)
 	}
-	return parsePoshImplants(out), nil
+
+	// Poll for the task output: the implant runs the command on its next check-in.
+	deadline := time.Now().Add(c.timeout)
+	for time.Now().Before(deadline) {
+		data, err := c.do(ctx, http.MethodGet, "/tasks/implant/"+implantID, nil)
+		if err != nil {
+			return "", err
+		}
+		if out := latestTaskOutput(data); out != "" {
+			return out, nil
+		}
+		select {
+		case <-time.After(c.poll):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return "", nil // no output before timeout — implant may not have checked in yet
 }
 
-// StartListener creates a listener on the PoshC2 server via the implant-handler.
-func (c *cliPoshC2Client) StartListener(ctx context.Context, protocol string, port int) error {
-	cmd := fmt.Sprintf("poshc2 --create-listener --name rinfra-%s --type %s --port %d",
-		protocol, protocol, port)
-	if _, err := c.runner.Run(ctx, cmd); err != nil {
-		return fmt.Errorf("poshc2: create listener: %w", err)
+// latestTaskOutput extracts the most recent task's output text from the
+// /tasks/implant/{id} response, tolerating the loosely-documented shape.
+func latestTaskOutput(data []byte) string {
+	var rows []map[string]any
+	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
+		return ""
 	}
-	return nil
+	return firstString(rows[len(rows)-1], "Output", "output", "TaskResult", "result")
 }
 
-// parsePoshImplants parses the tabular output of `poshc2 --list-implants`. Each
-// implant row is whitespace/pipe separated:
-//
-//	ID | Hostname | Username
-//
-// Header lines, separators, and blanks are skipped; short rows fill what they can.
-func parsePoshImplants(out string) []PoshC2Implant {
-	var implants []PoshC2Implant
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "id") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "=") {
-			continue
-		}
-		fields := splitColumns(line)
-		if len(fields) == 0 {
-			continue
-		}
-		im := PoshC2Implant{ID: fields[0]}
-		if len(fields) > 1 {
-			im.Hostname = fields[1]
-		}
-		if len(fields) > 2 {
-			im.Username = fields[2]
-		}
-		implants = append(implants, im)
-	}
-	return implants
-}
-
-// splitColumns splits a PoshC2 table row on pipes or runs of whitespace.
-func splitColumns(line string) []string {
-	var raw []string
-	if strings.Contains(line, "|") {
-		raw = strings.Split(line, "|")
-	} else {
-		raw = strings.Fields(line)
-	}
-	out := make([]string, 0, len(raw))
-	for _, f := range raw {
-		if f = strings.TrimSpace(f); f != "" {
-			out = append(out, f)
+// firstString returns the first non-empty string value among the given keys.
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			return s
 		}
 	}
-	return out
-}
-
-// shellQuote single-quotes s for safe use as a shell argument.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return ""
 }
