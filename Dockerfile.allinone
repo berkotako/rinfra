@@ -1,0 +1,45 @@
+# RInfra all-in-one image: ONE container that serves both the web console and the
+# Go control-plane API on a single origin/port (:8080).
+#
+#   /api/v1/*, /healthz   -> Go API
+#   everything else        -> the built web console (Next.js static export)
+#
+# The frontend is built with same-origin API calls (NEXT_PUBLIC_RINFRA_API unset
+# => it calls /api/v1/... on its own origin), so no CORS/cross-host wiring is
+# needed. Deploy this single image to any container host (Fly.io, Render,
+# Railway, Cloud Run, a VM). For LIVE cloud provisioning the deploy/teardown
+# paths additionally need the Pulumi CLI on PATH — install it in a derived image;
+# the API/engagement/audit/emulation paths run without it.
+#
+# Build:  docker build -f Dockerfile.allinone -t rinfra .
+# Run:    docker run -p 8080:8080 -e RINFRA_DEV=1 rinfra   # in-memory dev mode
+
+# ---- stage 1: build the web console (static export) ----
+FROM node:20-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+# Static export (out/), same-origin API (NEXT_PUBLIC_RINFRA_API intentionally unset).
+ENV NEXT_PUBLIC_STATIC_EXPORT=true
+RUN npm run build
+
+# ---- stage 2: build the Go control plane ----
+FROM golang:1.24-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/rinfra-server ./cmd/rinfra-server
+
+# ---- stage 3: runtime ----
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates && adduser -D -u 10001 rinfra
+COPY --from=build /out/rinfra-server /usr/local/bin/rinfra-server
+COPY --from=web /web/out /srv/web
+# RINFRA_WEB_DIR makes the API server also serve the static console (see router.go).
+ENV RINFRA_WEB_DIR=/srv/web
+USER rinfra
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/rinfra-server"]

@@ -5,6 +5,10 @@
 //
 // Core:
 //   - RINFRA_ADDR         listen address (default :8080)
+//   - RINFRA_WEB_DIR      optional: path to the built web console (Next.js static
+//     export). When set, the server also serves the frontend
+//     on the same origin (all-in-one container; API stays at
+//     /api/v1, everything else serves static files).
 //   - DATABASE_URL        Postgres connection string (required unless RINFRA_DEV=1)
 //   - RINFRA_MASTER_KEY   base64-encoded 32-byte AES key (required unless RINFRA_DEV=1)
 //   - RINFRA_DEV          set to "1" for in-memory stores and fake cloud;
