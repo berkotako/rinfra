@@ -43,12 +43,19 @@ func init() { c2.Register(&provider{}) }
 // is responsible for verifying the official release. URL and checksum are
 // parameters — never hardcoded payload content.
 const (
+	// sliverVersion is pinned with its matching sliverSHA256. Upstream Sliver
+	// signs releases with minisign (.minisig files), NOT a published .sha256, so
+	// the digest below is computed by the operator from the downloaded binary.
+	// To upgrade: download sliver-server_linux-amd64 for the new tag, verify its
+	// .minisig with Sliver's minisign pubkey, then `sha256sum` it and update both
+	// constants together. Newer tags (v1.7.x+) use the arch-suffixed filename
+	// sliver-server_linux-amd64.
 	sliverVersion    = "v1.5.42"
 	sliverReleaseURL = "https://github.com/BishopFox/sliver/releases/download/" + sliverVersion + "/sliver-server_linux"
-	sliverSHA256     = "c4d8c3eadc15f07ac6a0614e0f1ea6f31e6c8c2eab9c93f265bc7a9ae6abd6c2" // pinned; operator should verify
+	sliverSHA256     = "c4d8c3eadc15f07ac6a0614e0f1ea6f31e6c8c2eab9c93f265bc7a9ae6abd6c2" // pinned; verify via minisign on upgrade
 	sliverDestPath   = "/usr/local/bin/sliver-server"
 	sliverUnit       = "sliver-server"
-	sliverPort       = 31337 // default multiplayer port
+	sliverPort       = 31337 // default operator/multiplayer gRPC port (implant mTLS listener defaults to 4444)
 )
 
 type provider struct{}
@@ -211,9 +218,19 @@ type operator struct {
 func (o *operator) StartListener(ctx context.Context, spec c2.ListenerSpec) error {
 	switch strings.ToLower(spec.Protocol) {
 	case "mtls":
-		return o.client.StartMTLSListener(ctx, spec.Bind, uint32(4444))
+		// Sliver's mTLS implant listener defaults to 4444 (distinct from the
+		// operator/multiplayer gRPC port, 31337); honor an explicit spec.Port.
+		port := uint32(spec.Port)
+		if port == 0 {
+			port = 4444
+		}
+		return o.client.StartMTLSListener(ctx, spec.Bind, port)
 	case "https":
-		return o.client.StartHTTPSListener(ctx, spec.Name, 443)
+		port := uint32(spec.Port)
+		if port == 0 {
+			port = 443
+		}
+		return o.client.StartHTTPSListener(ctx, spec.Name, port)
 	case "dns":
 		return o.client.StartDNSListener(ctx, []string{spec.Name})
 	default:

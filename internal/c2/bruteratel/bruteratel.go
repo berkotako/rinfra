@@ -1,6 +1,9 @@
 // Package bruteratel adapts Brute Ratel C4 to RInfra. Fronted-tier: commercial,
-// license-gated, with no clean public automation API — RInfra stands up the
-// server and redirectors, then a human operates it.
+// license-gated — RInfra stands up the server and redirectors, then a human
+// operates it. (BRc4 v2.2+ ships bruteratel.py, an asyncio WebSocket automation
+// library; a future Scripted-tier upgrade could build on it, but it is delivered
+// only inside the licensed package and is not a public, stable API — so RInfra
+// keeps BRc4 Fronted for now.)
 //
 // # License
 //
@@ -10,8 +13,10 @@
 //
 // # Control
 //
-// Control() returns (nil, false): no public automation API. The emulation
-// engine records every technique as ExecManualRequired when Operator is nil.
+// Control() returns (nil, false): no public, stable automation API (the v2.2+
+// bruteratel.py WebSocket library ships only inside the licensed package). The
+// emulation engine records every technique as ExecManualRequired when Operator
+// is nil.
 package bruteratel
 
 import (

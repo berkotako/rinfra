@@ -61,6 +61,7 @@ type ListenerSpec struct {
 	Name     string
 	Protocol string // "https", "dns", "smb", ...
 	Bind     string
+	Port     int // listener port; 0 means the framework/protocol default
 	Profile  string
 }
 

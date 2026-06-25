@@ -11,9 +11,13 @@
 //
 // # Control
 //
-// Control() returns (nil, false): Cobalt Strike has no clean public automation
-// API. The emulation engine records every technique as ExecManualRequired when the
-// Operator is nil, and the operator drives the framework manually.
+// Control() returns (nil, false): RInfra treats Cobalt Strike as Fronted —
+// deployed and fronted, human-operated. CS does expose scripting surfaces
+// (agscript/Aggressor Sleep scripts, and a beta REST API in 4.12+), but these
+// are license-gated, bespoke (Sleep dialect), and not a stable structured
+// operator API suitable for unattended emulation; a future Scripted-tier
+// upgrade could build on the 4.12 REST API. Until then the emulation engine
+// records every technique as ExecManualRequired (nil Operator).
 package cobaltstrike
 
 import (
