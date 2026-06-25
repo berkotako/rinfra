@@ -87,11 +87,23 @@ func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) 
 }
 
 func deployCustom(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2.Config) (c2.Teamserver, error) {
+	releaseURL := os.Getenv(EnvCustomReleaseURL)
+	sha := os.Getenv(EnvCustomSHA256)
+	// Refuse to install an UNPINNED operator-supplied binary: a release URL with
+	// no checksum would download-and-run unverified bytes. (The shared template
+	// only warns, because providers like Sliver verify out of band via minisign;
+	// the custom framework has no such verifier, so require the pin here.)
+	if releaseURL != "" && sha == "" {
+		return c2.Teamserver{}, fmt.Errorf(
+			"custom.Deploy: %s is set but %s is empty — refusing to install an unpinned release (set the checksum)",
+			EnvCustomReleaseURL, EnvCustomSHA256)
+	}
+
 	params := deploy.InstallParams{
 		// Operator-supplied (env); empty ReleaseURL ⇒ the template skips download
 		// and the binary is expected to be present (baked image / ExtraSetup).
-		ReleaseURL:  os.Getenv(EnvCustomReleaseURL),
-		SHA256:      os.Getenv(EnvCustomSHA256),
+		ReleaseURL:  releaseURL,
+		SHA256:      sha,
 		DestPath:    customDestPath,
 		SystemdUnit: customUnit,
 		ServiceUser: "nobody",

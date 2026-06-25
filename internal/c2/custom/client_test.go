@@ -8,7 +8,34 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rinfra/rinfra/internal/c2"
+	"github.com/rinfra/rinfra/internal/c2/deploy"
+	"github.com/rinfra/rinfra/internal/domain"
 )
+
+// TestDeploy_RejectsUnpinnedRelease verifies that an operator-supplied release
+// URL without a checksum is refused (no installing unverified bytes), while an
+// empty release URL (binary baked into the image) is allowed.
+func TestDeploy_RejectsUnpinnedRelease(t *testing.T) {
+	node := domain.Node{PublicIP: "203.0.113.80"}
+
+	t.Run("url without checksum is rejected", func(t *testing.T) {
+		t.Setenv(EnvCustomReleaseURL, "https://ops.example/custom-server")
+		t.Setenv(EnvCustomSHA256, "")
+		if _, err := deployCustom(context.Background(), deploy.NewFakeRunner(), node, c2.Config{}); err == nil {
+			t.Error("expected deploy to refuse an unpinned release URL")
+		}
+	})
+
+	t.Run("no release url is allowed", func(t *testing.T) {
+		t.Setenv(EnvCustomReleaseURL, "")
+		t.Setenv(EnvCustomSHA256, "")
+		if _, err := deployCustom(context.Background(), deploy.NewFakeRunner(), node, c2.Config{}); err != nil {
+			t.Errorf("empty release URL should deploy (binary provided out of band): %v", err)
+		}
+	})
+}
 
 // customAPIServer stands up the in-house operator REST API (the contract
 // defined in the package doc) with canned responses. It records the bearer
