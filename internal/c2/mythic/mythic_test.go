@@ -90,11 +90,23 @@ func TestDeploy_FakeRunner(t *testing.T) {
 	if !ok {
 		t.Fatal("install script not uploaded")
 	}
-	if !strings.Contains(script, "docker") {
-		t.Error("Mythic install script should reference docker")
+	// Mythic installs from source at an immutable commit + Docker Compose; there
+	// is no release tarball or checksum.
+	for _, want := range []string{
+		"git fetch --depth 1 origin",
+		"b294c8ff5354ed57a6697da61d0524286e663c95", // pinned commit (v3.4.0.5)
+		"make",               // builds mythic-cli
+		"./mythic-cli start", // Docker Compose up
+		"docker",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("install script missing %q", want)
+		}
 	}
-	if !strings.Contains(script, "sha256sum") {
-		t.Error("install script must verify checksum")
+	for _, unwanted := range []string{"placeholder", "sha256sum", "tar xz", "python3 mythic-cli", ".tar.gz"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("install script should not contain %q (wrong/old deploy model)", unwanted)
+		}
 	}
 }
 

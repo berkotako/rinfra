@@ -4,10 +4,11 @@
 //
 // # Posture
 //
-// This adapter DEPLOYS and DRIVES the upstream Mythic release. It does not
-// implement Mythic, agents, payloads, or evasion. The deploy path installs
-// Mythic via docker-compose (the official install method) by fetching the
-// official install script from the Mythic GitHub repo at a pinned version.
+// This adapter DEPLOYS and DRIVES upstream Mythic. It does not implement Mythic,
+// agents, payloads, or evasion. Mythic ships no release binary/checksum, so the
+// deploy path installs it from source the official way — git clone at an
+// immutable pinned commit, `make` to build mythic-cli, then `mythic-cli start`
+// (Docker Compose).
 //
 // # HTTP client
 //
@@ -37,11 +38,15 @@ import (
 func init() { c2.Register(&provider{}) }
 
 const (
-	mythicVersion    = "v3.3.1"
-	mythicInstallURL = "https://github.com/its-a-feature/Mythic/archive/refs/tags/" + mythicVersion + ".tar.gz"
-	mythicSHA256     = "placeholder-operator-should-verify-from-mythic-release-page"
-	mythicPort       = 7443 // default Mythic HTTPS port
-	mythicRPCPort    = 17443
+	// Mythic has no release binaries or SHA-256 checksums — it is installed from
+	// source: git clone at an IMMUTABLE pinned commit, then `make` builds the
+	// mythic-cli Go binary, then `mythic-cli start` brings up the Docker Compose
+	// stack. mythicRef is the commit for the tag below; to upgrade, review a newer
+	// tag's commit and update both.
+	mythicRepo    = "https://github.com/its-a-feature/Mythic"
+	mythicRef     = "b294c8ff5354ed57a6697da61d0524286e663c95" // tag v3.4.0.5
+	mythicPort    = 7443                                       // default Mythic HTTPS port
+	mythicRPCPort = 17443
 )
 
 type provider struct{}
@@ -58,42 +63,44 @@ func (p *provider) Capabilities() c2.Capabilities {
 	}
 }
 
-// Deploy installs Mythic via docker-compose on the node. Mythic's official
-// install method is docker-compose; the install script fetches Mythic from the
-// official GitHub release.
+// Deploy installs Mythic on the node. Mythic's only supported install method is
+// from source (git clone + `make` + `mythic-cli start`, Docker Compose based) —
+// it ships no release binary or checksum — so Deploy pins an immutable commit and
+// builds it in-place. It authors no payload content; it drives upstream tooling.
 func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
 	runner := runnerFromNode(node)
 	return deployMythic(ctx, runner, node, cfg)
 }
 
 func deployMythic(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2.Config) (c2.Teamserver, error) {
-	// Step 1: ensure docker and docker-compose are available.
-	// Step 2: download the official Mythic release archive.
-	// Step 3: extract and run ./install_docker_<os>.sh (official install).
-	// Step 4: start Mythic via docker-compose.
-	// None of these steps author payload content — we're invoking upstream tooling.
+	// Mythic is git-clone + build + docker-compose; there is no release tarball or
+	// SHA-256, so ReleaseURL is empty and the whole install happens in ExtraSetup:
+	// fetch the exact pinned commit, `make` the mythic-cli Go binary, then start
+	// the Docker Compose stack via mythic-cli.
 	extraSetup := []string{
-		"# Mythic uses docker-compose as its official install method.",
-		"apt-get install -y docker.io docker-compose-plugin curl || true",
-		fmt.Sprintf("mkdir -p /opt/mythic && cd /opt/mythic && curl -fsSL %s | tar xz --strip-components=1", mythicInstallURL),
-		"cd /opt/mythic && python3 mythic-cli install",
-		"cd /opt/mythic && python3 mythic-cli config set MYTHIC_SERVER_PORT " + fmt.Sprintf("%d", mythicPort),
-		"cd /opt/mythic && python3 mythic-cli start",
-		"echo '[rinfra-mythic] Mythic started via docker-compose'",
+		"export DEBIAN_FRONTEND=noninteractive",
+		"apt-get update -y || true",
+		"apt-get install -y git make docker.io docker-compose-plugin curl || true",
+		"systemctl enable --now docker || true",
+		// Immutable checkout of the pinned commit (depth 1).
+		"rm -rf /opt/mythic && git init -q /opt/mythic",
+		fmt.Sprintf("cd /opt/mythic && git remote add origin %s", mythicRepo),
+		fmt.Sprintf("cd /opt/mythic && git fetch --depth 1 origin %s", mythicRef),
+		"cd /opt/mythic && git checkout -q FETCH_HEAD",
+		"cd /opt/mythic && make", // builds the mythic-cli Go binary
+		fmt.Sprintf("cd /opt/mythic && ./mythic-cli config set MYTHIC_SERVER_PORT %d", mythicPort),
+		"cd /opt/mythic && ./mythic-cli start",
+		"echo '[rinfra-mythic] Mythic started via mythic-cli (Docker Compose)'",
 	}
 
-	// For the Mythic install we use a docker-compose-based approach; the
-	// systemd unit wraps docker-compose start/stop.
 	params := deploy.InstallParams{
-		// Mythic uses docker-compose, not a single binary. We still need a
-		// placeholder binary path and unit for the systemd wrapper.
-		ReleaseURL:  mythicInstallURL,
-		SHA256:      mythicSHA256,
+		// No ReleaseURL/SHA256: Mythic has no release binary; built in ExtraSetup.
 		DestPath:    "/opt/mythic/mythic-cli",
 		SystemdUnit: "mythic",
 		ServiceUser: "root",
-		ExecStart:   "/usr/bin/docker compose -f /opt/mythic/docker-compose.yml start",
-		ExtraSetup:  extraSetup,
+		// mythic-cli start (idempotent) brings the Compose stack up on boot.
+		ExecStart:  "/bin/bash -c 'cd /opt/mythic && ./mythic-cli start'",
+		ExtraSetup: extraSetup,
 	}
 
 	if err := deploy.RunInstall(ctx, runner, params); err != nil {
