@@ -142,6 +142,11 @@ systemctl daemon-reload
 systemctl enable "${UNIT}"
 systemctl start "${UNIT}"
 echo "[rinfra-install] Service ${UNIT} started"
+
+# Remove this script: it may embed secrets (e.g. a teamserver profile password)
+# and is uploaded world-readable to /tmp. Deleting a running script is safe on
+# Linux (the kernel holds the open inode until bash finishes).
+rm -f /tmp/rinfra-install.sh
 `))
 
 // BuildInstallScript renders the install script for the given params.

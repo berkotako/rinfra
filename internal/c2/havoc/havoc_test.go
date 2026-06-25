@@ -60,18 +60,26 @@ func TestDeploy_FakeRunner(t *testing.T) {
 	if !ok {
 		t.Fatal("install script not uploaded")
 	}
-	// Built from source at the pinned git ref (no download/checksum step).
-	for _, want := range []string{"git clone", "HavocFramework", "make ts-build", "havoc.yaotl"} {
+	// Built from source at an immutable pinned commit (no download/checksum step).
+	for _, want := range []string{
+		"HavocFramework", "git fetch --depth 1 origin", "git checkout -q FETCH_HEAD",
+		"c84f7755a8b1c0f737576bdd3a0e982a296012f1", // pinned commit SHA
+		"make ts-build", "havoc.yaotl",
+		"chmod 600 /etc/havoc/havoc.yaotl", // secret-bearing profile is restricted
+	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("install script missing %q", want)
 		}
 	}
-	// Yaotl profile, NOT YAML, and no placeholder checksum.
+	// Yaotl profile, NOT YAML, no placeholder checksum, and no mutable branch ref.
 	if !strings.Contains(script, "Teamserver {") {
 		t.Error("profile should be Yaotl/HCL (Teamserver { ... })")
 	}
 	if strings.Contains(script, "placeholder") {
 		t.Error("install script must not contain a placeholder checksum")
+	}
+	if strings.Contains(script, "--branch main") {
+		t.Error("install script must pin an immutable commit, not a mutable branch")
 	}
 }
 

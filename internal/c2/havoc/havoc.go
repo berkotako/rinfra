@@ -26,6 +26,8 @@ package havoc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 
 	"github.com/rinfra/rinfra/internal/c2"
@@ -36,11 +38,13 @@ import (
 func init() { c2.Register(&provider{}) }
 
 const (
-	// havocRepo / havocRef: Havoc publishes no signed release artifacts, so the
-	// teamserver is built from source at a pinned git ref. Operators should pin a
-	// reviewed commit/tag for reproducibility; "main" tracks upstream.
+	// havocRepo / havocRef: Havoc publishes no signed release artifacts and no
+	// git tags, so the teamserver is built from source at a pinned, IMMUTABLE
+	// commit SHA (not a mutable branch — two deploys of the same RInfra commit
+	// must build identical upstream code). To upgrade: review a newer commit on
+	// HavocFramework/Havoc main and update this SHA.
 	havocRepo = "https://github.com/HavocFramework/Havoc"
-	havocRef  = "main"
+	havocRef  = "c84f7755a8b1c0f737576bdd3a0e982a296012f1"
 	havocPort = 40056 // default Havoc teamserver operator port
 )
 
@@ -56,28 +60,40 @@ func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) 
 
 func deployHavoc(ctx context.Context, runner deploy.Runner, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
 	// Operator credentials for the teamserver profile. Operator-supplied via
-	// Config.Extra; a clearly-marked default is written when absent so the deploy
-	// is functional and the operator rotates it on first connect.
+	// Config.Extra; otherwise a RANDOM per-deploy secret is generated (never a
+	// shared default — the teamserver binds 0.0.0.0:40056 and a known default
+	// would be an open door before the operator rotates it).
 	operatorPass := cfg.Extra["operator_password"]
 	if operatorPass == "" {
-		operatorPass = "rinfra-change-on-first-connect"
+		pw, err := randomSecret()
+		if err != nil {
+			return c2.Teamserver{}, fmt.Errorf("havoc.Deploy: generate operator password: %w", err)
+		}
+		operatorPass = pw
 	}
 
 	// Havoc's teamserver is built from source (no release binary). Build deps +
-	// git clone + `make ts-build` (produces ./havoc) all run in ExtraSetup; the
-	// install template skips its download/checksum block because ReleaseURL is
-	// empty.
+	// an immutable-commit checkout + `make ts-build` (produces ./havoc) all run
+	// in ExtraSetup; the install template skips its download/checksum block
+	// because ReleaseURL is empty. The profile carries the operator secret, so it
+	// is written 0600 in a 0700 dir, and the install script self-deletes (see the
+	// deploy template) so the secret does not linger world-readable in /tmp.
 	profile := havocProfile(operatorPass)
 	extraSetup := []string{
 		"export DEBIAN_FRONTEND=noninteractive",
 		"apt-get update -y || true",
 		"apt-get install -y git build-essential cmake make golang-go nasm mingw-w64 " +
 			"pkg-config libssl-dev libboost-all-dev python3-dev curl || true",
-		fmt.Sprintf("rm -rf /opt/havoc && git clone --depth 1 --branch %s %s /opt/havoc", havocRef, havocRepo),
+		// Fetch exactly the pinned commit (depth 1) and check it out — immutable.
+		"rm -rf /opt/havoc && git init -q /opt/havoc",
+		fmt.Sprintf("cd /opt/havoc && git remote add origin %s", havocRepo),
+		fmt.Sprintf("cd /opt/havoc && git fetch --depth 1 origin %s", havocRef),
+		"cd /opt/havoc && git checkout -q FETCH_HEAD",
 		"cd /opt/havoc && make ts-build", // builds the teamserver binary -> /opt/havoc/havoc
-		"install -d -m 0755 /etc/havoc",
-		"cat > /etc/havoc/havoc.yaotl <<'YAOTL'\n" + profile + "\nYAOTL",
-		"echo '[rinfra-havoc] Havoc teamserver built from source at pinned ref'",
+		"install -d -m 0700 /etc/havoc",
+		"umask 077 && cat > /etc/havoc/havoc.yaotl <<'YAOTL'\n" + profile + "\nYAOTL",
+		"chmod 600 /etc/havoc/havoc.yaotl",
+		"echo '[rinfra-havoc] Havoc teamserver built from source at pinned commit'",
 	}
 
 	params := deploy.InstallParams{
@@ -162,4 +178,14 @@ func (p *provider) Control(_ c2.Teamserver) (c2.Operator, bool) {
 
 func runnerFromNode(node domain.Node) deploy.Runner {
 	return deploy.NewNodeRunner(node.PublicIP)
+}
+
+// randomSecret returns a URL-safe random string for use as a per-deploy
+// teamserver operator password (24 bytes of crypto/rand entropy).
+func randomSecret() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
