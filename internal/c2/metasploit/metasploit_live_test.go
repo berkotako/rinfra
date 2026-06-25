@@ -144,7 +144,7 @@ func TestLiveClient_RPCFlow(t *testing.T) {
 		if err := client.ConsoleWrite(ctx, id, "use exploit/multi/handler\n"); err != nil {
 			t.Fatalf("ConsoleWrite: %v", err)
 		}
-		out, err := client.ConsoleRead(ctx, id)
+		out, _, err := client.ConsoleRead(ctx, id)
 		if err != nil || out != "[*] handler started" {
 			t.Fatalf("ConsoleRead out=%q err=%v", out, err)
 		}

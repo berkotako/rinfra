@@ -12,12 +12,24 @@ import (
 	"github.com/rinfra/rinfra/internal/domain"
 )
 
-// FakeMsfClient is a test double for MsfRpcdClient.
+// FakeMsfClient is a test double for MsfRpcdClient. Reads model msfrpcd's
+// polling-snapshot behaviour: the rendered output is returned by the first read
+// and empty thereafter, so the operator's drain loop terminates.
 type FakeMsfClient struct {
 	sessions      []msfpkg.MsfSession
 	shellOutput   string
-	shellErr      error
+	shellErr      error // returned by the dispatch call (meterpreter run / shell write)
 	consoleWrites []string
+	reads         int
+	lastDispatch  string // "meterpreter" or "shell" — which transport ran the command
+}
+
+func (f *FakeMsfClient) popOutput() string {
+	f.reads++
+	if f.reads == 1 {
+		return f.shellOutput
+	}
+	return ""
 }
 
 func (f *FakeMsfClient) Auth(_ context.Context, _, _ string) error { return nil }
@@ -28,17 +40,25 @@ func (f *FakeMsfClient) ConsoleWrite(_ context.Context, _, cmd string) error {
 	f.consoleWrites = append(f.consoleWrites, cmd)
 	return nil
 }
-func (f *FakeMsfClient) ConsoleRead(_ context.Context, _ string) (string, error) {
-	return "", nil
+func (f *FakeMsfClient) ConsoleRead(_ context.Context, _ string) (string, bool, error) {
+	return "", false, nil // idle console
 }
 func (f *FakeMsfClient) SessionList(_ context.Context) ([]msfpkg.MsfSession, error) {
 	return f.sessions, nil
 }
+func (f *FakeMsfClient) SessionMeterpreterRun(_ context.Context, _, _ string) error {
+	f.lastDispatch = "meterpreter"
+	return f.shellErr
+}
+func (f *FakeMsfClient) SessionMeterpreterRead(_ context.Context, _ string) (string, error) {
+	return f.popOutput(), nil
+}
 func (f *FakeMsfClient) SessionShellWrite(_ context.Context, _, _ string) error {
+	f.lastDispatch = "shell"
 	return f.shellErr
 }
 func (f *FakeMsfClient) SessionShellRead(_ context.Context, _ string) (string, error) {
-	return f.shellOutput, nil
+	return f.popOutput(), nil
 }
 
 func TestTier(t *testing.T) {
@@ -81,8 +101,13 @@ func TestDeploy_FakeRunner(t *testing.T) {
 	if !ok {
 		t.Fatal("install script not uploaded")
 	}
-	if !strings.Contains(script, "rapid7") {
-		t.Error("install script should reference the Rapid7 official installer URL")
+	if !strings.Contains(script, "msfupdate.erb") {
+		t.Error("install script should use the valid Rapid7 installer wrapper (msfupdate.erb)")
+	}
+	for _, unwanted := range []string{"install-metasploit.sh", "pkill", "placeholder", "sha256sum"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("install script should not contain %q (old/broken deploy)", unwanted)
+		}
 	}
 }
 
@@ -106,7 +131,7 @@ func TestRedirectorConfig(t *testing.T) {
 
 func TestOperator_Execute_KnownTechnique(t *testing.T) {
 	client := &FakeMsfClient{shellOutput: "System info output"}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	tech := domain.Technique{AttackID: "T1082"}
 	result, err := op.Execute(context.Background(), "1", tech)
@@ -118,9 +143,43 @@ func TestOperator_Execute_KnownTechnique(t *testing.T) {
 	}
 }
 
+// TestOperator_Execute_RoutesBySessionType verifies meterpreter sessions are
+// driven via meterpreter_run_single (not shell_write), and raw shell sessions via
+// shell_write — and that the drained output is returned either way.
+func TestOperator_Execute_RoutesBySessionType(t *testing.T) {
+	for _, tc := range []struct {
+		name, sessType, wantDispatch string
+	}{
+		{"meterpreter", "meterpreter", "meterpreter"},
+		{"shell", "shell", "shell"},
+		{"unknown defaults to meterpreter", "", "meterpreter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &FakeMsfClient{
+				shellOutput: "drained output",
+				sessions:    []msfpkg.MsfSession{{ID: "1", Type: tc.sessType}},
+			}
+			op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
+			res, err := op.Execute(context.Background(), "1", domain.Technique{AttackID: "T1082"})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if res.Status != domain.ExecSuccess {
+				t.Errorf("status = %v, want ExecSuccess", res.Status)
+			}
+			if res.Output != "drained output" {
+				t.Errorf("output = %q, want drained output", res.Output)
+			}
+			if client.lastDispatch != tc.wantDispatch {
+				t.Errorf("dispatch = %q, want %q", client.lastDispatch, tc.wantDispatch)
+			}
+		})
+	}
+}
+
 func TestOperator_Execute_UnknownTechnique_Skipped(t *testing.T) {
 	client := &FakeMsfClient{}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	tech := domain.Technique{AttackID: "T9876.543"}
 	result, err := op.Execute(context.Background(), "1", tech)
@@ -134,7 +193,7 @@ func TestOperator_Execute_UnknownTechnique_Skipped(t *testing.T) {
 
 func TestOperator_Execute_SessionError(t *testing.T) {
 	client := &FakeMsfClient{shellErr: errors.New("session closed")}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	tech := domain.Technique{AttackID: "T1057"}
 	result, err := op.Execute(context.Background(), "1", tech)
@@ -148,7 +207,7 @@ func TestOperator_Execute_SessionError(t *testing.T) {
 
 func TestOperator_StartListener(t *testing.T) {
 	client := &FakeMsfClient{}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 
 	spec := c2.ListenerSpec{Protocol: "https", Bind: "0.0.0.0"}
 	if err := op.StartListener(context.Background(), spec); err != nil {
@@ -170,7 +229,7 @@ func TestOperator_Sessions(t *testing.T) {
 			{ID: "1", Type: "meterpreter", Info: "WORKSTATION01", ViaExploit: "multi/handler"},
 		},
 	}
-	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
 	sessions, err := op.Sessions(context.Background())
 	if err != nil {
 		t.Fatalf("Sessions: %v", err)

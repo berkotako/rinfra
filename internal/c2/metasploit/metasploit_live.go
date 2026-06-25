@@ -145,10 +145,16 @@ type errClient struct{ err error }
 func (e *errClient) Auth(context.Context, string, string) error         { return e.err }
 func (e *errClient) ConsoleCreate(context.Context) (string, error)      { return "", e.err }
 func (e *errClient) ConsoleWrite(context.Context, string, string) error { return e.err }
-func (e *errClient) ConsoleRead(context.Context, string) (string, error) {
-	return "", e.err
+func (e *errClient) ConsoleRead(context.Context, string) (string, bool, error) {
+	return "", false, e.err
 }
 func (e *errClient) SessionList(context.Context) ([]MsfSession, error) { return nil, e.err }
+func (e *errClient) SessionMeterpreterRun(context.Context, string, string) error {
+	return e.err
+}
+func (e *errClient) SessionMeterpreterRead(context.Context, string) (string, error) {
+	return "", e.err
+}
 func (e *errClient) SessionShellWrite(context.Context, string, string) error {
 	return e.err
 }
@@ -234,15 +240,16 @@ func (c *liveClient) ConsoleWrite(ctx context.Context, consoleID, command string
 	return err
 }
 
-func (c *liveClient) ConsoleRead(ctx context.Context, consoleID string) (string, error) {
+func (c *liveClient) ConsoleRead(ctx context.Context, consoleID string) (string, bool, error) {
 	if err := c.ensureAuth(ctx); err != nil {
-		return "", err
+		return "", false, err
 	}
 	m, err := c.rpc(ctx, "console.read", c.token, consoleID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return asString(m["data"]), nil
+	busy, _ := m["busy"].(bool)
+	return asString(m["data"]), busy, nil
 }
 
 func (c *liveClient) SessionList(ctx context.Context) ([]MsfSession, error) {
@@ -267,6 +274,27 @@ func (c *liveClient) SessionList(ctx context.Context) ([]MsfSession, error) {
 		})
 	}
 	return out, nil
+}
+
+func (c *liveClient) SessionMeterpreterRun(ctx context.Context, sessionID, command string) error {
+	if err := c.ensureAuth(ctx); err != nil {
+		return err
+	}
+	// run_single dispatches the command on the meterpreter session asynchronously;
+	// output is collected via session.meterpreter_read.
+	_, err := c.rpc(ctx, "session.meterpreter_run_single", c.token, sessionArg(sessionID), command)
+	return err
+}
+
+func (c *liveClient) SessionMeterpreterRead(ctx context.Context, sessionID string) (string, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return "", err
+	}
+	m, err := c.rpc(ctx, "session.meterpreter_read", c.token, sessionArg(sessionID))
+	if err != nil {
+		return "", err
+	}
+	return asString(m["data"]), nil
 }
 
 func (c *liveClient) SessionShellWrite(ctx context.Context, sessionID, command string) error {
