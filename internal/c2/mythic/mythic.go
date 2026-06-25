@@ -45,8 +45,8 @@ const (
 	// tag's commit and update both.
 	mythicRepo    = "https://github.com/its-a-feature/Mythic"
 	mythicRef     = "b294c8ff5354ed57a6697da61d0524286e663c95" // tag v3.4.0.5
-	mythicPort    = 7443                                       // default Mythic HTTPS port
-	mythicRPCPort = 17443
+	mythicPort    = 7443                                       // NGINX_PORT: UI/API the operator connects to
+	mythicRPCPort = 17443                                      // MYTHIC_SERVER_PORT: backend (left at default)
 )
 
 type provider struct{}
@@ -88,7 +88,11 @@ func deployMythic(ctx context.Context, runner deploy.Runner, node domain.Node, _
 		fmt.Sprintf("cd /opt/mythic && git fetch --depth 1 origin %s", mythicRef),
 		"cd /opt/mythic && git checkout -q FETCH_HEAD",
 		"cd /opt/mythic && make", // builds the mythic-cli Go binary
-		fmt.Sprintf("cd /opt/mythic && ./mythic-cli config set MYTHIC_SERVER_PORT %d", mythicPort),
+		// NGINX_PORT is the UI/API reverse-proxy port operators connect to
+		// (default 7443 = mythicPort). The backend MYTHIC_SERVER_PORT (default
+		// 17443 = mythicRPCPort) is left untouched — setting it to 7443 would
+		// collide with Nginx and break `mythic-cli start`.
+		fmt.Sprintf("cd /opt/mythic && ./mythic-cli config set NGINX_PORT %d", mythicPort),
 		"cd /opt/mythic && ./mythic-cli start",
 		"echo '[rinfra-mythic] Mythic started via mythic-cli (Docker Compose)'",
 	}

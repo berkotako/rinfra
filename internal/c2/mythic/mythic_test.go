@@ -103,7 +103,12 @@ func TestDeploy_FakeRunner(t *testing.T) {
 			t.Errorf("install script missing %q", want)
 		}
 	}
-	for _, unwanted := range []string{"placeholder", "sha256sum", "tar xz", "python3 mythic-cli", ".tar.gz"} {
+	// The UI port is set via NGINX_PORT, not the backend MYTHIC_SERVER_PORT
+	// (which would collide with Nginx on 7443).
+	if !strings.Contains(script, "config set NGINX_PORT 7443") {
+		t.Error("install script should set NGINX_PORT (UI port), not MYTHIC_SERVER_PORT")
+	}
+	for _, unwanted := range []string{"placeholder", "sha256sum", "tar xz", "python3 mythic-cli", ".tar.gz", "MYTHIC_SERVER_PORT"} {
 		if strings.Contains(script, unwanted) {
 			t.Errorf("install script should not contain %q (wrong/old deploy model)", unwanted)
 		}
