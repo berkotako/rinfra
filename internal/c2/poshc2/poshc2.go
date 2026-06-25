@@ -7,17 +7,18 @@
 //
 // PoshC2 v8.x had NO machine-readable operator API (only an interactive console),
 // so RInfra targets v9.0, which ships posh-api-server — a basic REST API on
-// :5000. The live client (httpPoshC2Client) drives the documented endpoints:
-//   - GET  /liveimplants            — list active implants
-//   - POST /newtasksview            — queue a command for an implant
-//   - GET  /tasks/implant/{id}      — read task output
+// :5000. The live client (httpPoshC2Client) drives the v9.0 endpoints (verified
+// against start_api.py at the pinned commit):
+//   - GET  /liveimplants        — list active implants
+//   - POST /newtasks            — queue a command (model: implant_id, command, user)
+//   - GET  /tasks/implant/{id}  — read task output
 //
-// The v9.0 REST API is community-contributed, "basic", and not fully documented
-// (no versioning guarantees, and no listener-create endpoint — listeners are
-// configured at deploy time via posh-project). Request/response shapes here
-// follow the documented endpoints and are parsed leniently; exact field names
-// want validation against a live v9.0 server (see docs/RUNBOOK). RInfra composes
-// the upstream tool: it authors no implants, payloads, or evasion.
+// posh-api-server protects these with HTTP Basic auth (default poshc2 /
+// change_on_install; override via RINFRA_POSHC2_API_USER/PASSWORD). There is no
+// listener-create endpoint — listeners are configured at deploy time. JSON
+// shapes are parsed leniently; field names want validation against a live v9.0
+// server (see docs/RUNBOOK). RInfra composes the upstream tool: it authors no
+// implants, payloads, or evasion.
 package poshc2
 
 import (
@@ -99,10 +100,12 @@ func deployPoshC2(ctx context.Context, runner deploy.Runner, node domain.Node, _
 		fmt.Sprintf("cd /opt/poshc2 && git remote add origin %s", poshRepo),
 		fmt.Sprintf("cd /opt/poshc2 && git fetch --depth 1 origin %s", poshRef),
 		"cd /opt/poshc2 && git checkout -q FETCH_HEAD",
-		"cd /opt/poshc2 && pip3 install -r requirements.txt || true",
-		"cd /opt/poshc2 && pip3 install . || true", // installs posh-* entrypoints on PATH
-		"posh-project -n rinfra || true",           // create the engagement project
-		"echo '[rinfra-poshc2] PoshC2 v9.0 installed from pinned source; REST API on :5000'",
+		// Install.sh is the upstream installer: it sets up the pipenv deps and
+		// symlinks posh-server / posh-api-server / posh-project into /usr/local/bin.
+		// pip3 alone does NOT create those entrypoints.
+		"cd /opt/poshc2 && ./Install.sh",
+		"posh-project -n rinfra || true", // create the engagement project
+		"echo '[rinfra-poshc2] PoshC2 v9.0 installed via Install.sh; REST API on :5000'",
 	}
 
 	params := deploy.InstallParams{
@@ -282,14 +285,21 @@ func runnerFromNode(node domain.Node) deploy.Runner {
 // implants, payloads, or evasion.
 type httpPoshC2Client struct {
 	base    string // e.g. http://host:5000
-	token   string // optional bearer token
+	user    string // HTTP Basic auth user (posh-api-server uses HTTPBasicAuth)
+	pass    string // HTTP Basic auth password
 	hc      *http.Client
 	poll    time.Duration // delay between task-output polls
 	timeout time.Duration // overall budget to wait for task output
 }
 
+// posh-api-server defaults (start_api.py): HTTPBasicAuth with this user/pass.
+const (
+	defaultAPIUser = "poshc2"
+	defaultAPIPass = "change_on_install"
+)
+
 // newHTTPClient builds the live REST client from the teamserver, allowing the
-// API URL/token to be overridden per engagement via the environment.
+// API URL/credentials to be overridden per engagement via the environment.
 func newHTTPClient(ts c2.Teamserver) *httpPoshC2Client {
 	base := os.Getenv("RINFRA_POSHC2_API_URL")
 	if base == "" {
@@ -297,11 +307,19 @@ func newHTTPClient(ts c2.Teamserver) *httpPoshC2Client {
 	}
 	return &httpPoshC2Client{
 		base:    strings.TrimRight(base, "/"),
-		token:   os.Getenv("RINFRA_POSHC2_API_TOKEN"),
+		user:    envOr("RINFRA_POSHC2_API_USER", defaultAPIUser),
+		pass:    envOr("RINFRA_POSHC2_API_PASSWORD", defaultAPIPass),
 		hc:      &http.Client{Timeout: 30 * time.Second},
 		poll:    500 * time.Millisecond,
 		timeout: 30 * time.Second,
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func (c *httpPoshC2Client) do(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -320,8 +338,8 @@ func (c *httpPoshC2Client) do(ctx context.Context, method, path string, body any
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.pass)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -357,12 +375,14 @@ func (c *httpPoshC2Client) Implants(ctx context.Context) ([]PoshC2Implant, error
 	return out, nil
 }
 
-// Execute queues a command for an implant (POST /newtasksview) then polls
-// GET /tasks/implant/{id} for the resulting output.
+// Execute queues a command for an implant (POST /newtasks — the create endpoint;
+// /newtasksview is GET-only) then polls GET /tasks/implant/{id} for the output.
+// The v9.0 NewTask model requires implant_id, command, and user.
 func (c *httpPoshC2Client) Execute(ctx context.Context, implantID, command string) (string, error) {
-	if _, err := c.do(ctx, http.MethodPost, "/newtasksview", map[string]string{
+	if _, err := c.do(ctx, http.MethodPost, "/newtasks", map[string]string{
 		"implant_id": implantID,
 		"command":    command,
+		"user":       c.user,
 	}); err != nil {
 		return "", fmt.Errorf("poshc2: queue task on implant %s: %w", implantID, err)
 	}
