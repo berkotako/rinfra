@@ -20,7 +20,7 @@ npm run dev      # http://localhost:3000
 ## Build
 
 ```bash
-npm run build    # produces static export in out/
+npm run build    # full Next.js build in .next/ (NEXT_PUBLIC_STATIC_EXPORT=true → static out/)
 npm run lint     # ESLint
 npx tsc --noEmit # TypeScript check
 ```
@@ -33,9 +33,10 @@ make web-build
 make web-lint
 ```
 
-## Deploy to Vercel
+## Deploy to Vercel (full Next.js)
 
-This app deploys to Vercel out of the box (it's a mock-data demo — no backend).
+Vercel is the full-deployment target. The **default** build is a full Next.js app
+(SSR / API routes / serverless + edge) — no extra env var needed.
 
 In the Vercel project settings:
 
@@ -45,10 +46,14 @@ In the Vercel project settings:
 - Leave **`NEXT_PUBLIC_BASE_PATH` unset** — that's only for the GitHub Pages
   sub-path; on Vercel the app serves from the domain root.
 
-By default the build is a static export (`output: "export"`), which Vercel serves
-as a static site — matching the build that ships to GitHub Pages. To use full
-Next.js features (SSR / API routes) on Vercel instead, set the env var
-`NEXT_PUBLIC_SSR=true`. Security headers are applied via `web/vercel.json`.
+Security headers are applied via `web/vercel.json`.
+
+### Static export (GitHub Pages)
+
+GitHub Pages serves static files, so the Pages workflow sets
+`NEXT_PUBLIC_STATIC_EXPORT=true` to build a static export into `out/`. Set that
+env var locally if you need the static build (`out/`) instead of the default
+full Next.js build (`.next/`).
 
 
 ## Architecture

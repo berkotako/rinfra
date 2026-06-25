@@ -56,6 +56,9 @@ jobs:
 
       - name: Build static export
         env:
+          # GitHub Pages serves static files, so opt into the static export
+          # (the default build is a full Next.js app for Vercel).
+          NEXT_PUBLIC_STATIC_EXPORT: "true"
           # Project Pages are served from /<repo>; set the base path so assets
           # and links resolve. Change this if the repository is renamed.
           NEXT_PUBLIC_BASE_PATH: /rinfra

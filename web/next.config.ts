@@ -8,12 +8,11 @@ import type { NextConfig } from "next";
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
 
 // Output mode:
-//  - default: static export (`out/`). Required for GitHub Pages, and deploys
-//    cleanly to Vercel as a static site (the demo runs entirely on mock data, no
-//    backend), matching the build that ships to Pages today.
-//  - set NEXT_PUBLIC_SSR=true to build a full Next.js app (SSR / API routes) on
-//    Vercel instead.
-const staticExport = process.env.NEXT_PUBLIC_SSR !== "true";
+//  - default: a full Next.js app (SSR / API routes / serverless + edge). This is
+//    the Vercel deployment target.
+//  - set NEXT_PUBLIC_STATIC_EXPORT=true to build a static export (`out/`) instead
+//    — required for GitHub Pages (the Pages workflow sets it).
+const staticExport = process.env.NEXT_PUBLIC_STATIC_EXPORT === "true";
 
 const nextConfig: NextConfig = {
   ...(staticExport ? { output: "export" as const } : {}),
