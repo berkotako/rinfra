@@ -3,6 +3,9 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rinfra/rinfra/internal/audit"
@@ -160,5 +163,65 @@ func NewRouter(svc Services, log *slog.Logger) http.Handler {
 		r.Post("/runs/{id}/detection", h.recordDetection)
 	})
 
+	// All-in-one mode: when RINFRA_WEB_DIR points at the built web console (the
+	// Next.js static export), serve it from this same origin so the frontend and
+	// API run in one container. API paths (/api/v1, /healthz) go to the chi router
+	// above; everything else serves static files (the SPA shell + assets are
+	// public — the browser authenticates via /api/v1/auth/login), so static
+	// serving sits OUTSIDE the auth/CORS middleware on purpose.
+	if dir := os.Getenv("RINFRA_WEB_DIR"); dir != "" {
+		static := staticHandler(dir)
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.URL.Path == "/healthz" || strings.HasPrefix(req.URL.Path, "/api/v1") {
+				r.ServeHTTP(w, req)
+				return
+			}
+			static.ServeHTTP(w, req)
+		})
+	}
+
 	return r
+}
+
+// staticHandler serves the Next.js static export from dir, with a 404.html
+// fallback for unmatched paths (the export emits one). Directory requests are
+// served their index.html by the underlying FileServer.
+func staticHandler(dir string) http.Handler {
+	fs := http.FileServer(http.Dir(dir))
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		full := filepath.Join(dir, filepath.Clean(req.URL.Path))
+		// Confine to dir (defense-in-depth against traversal).
+		if rel, err := filepath.Rel(dir, full); err != nil || strings.HasPrefix(rel, "..") {
+			http.NotFound(w, req)
+			return
+		}
+		fi, err := os.Stat(full)
+		if err != nil {
+			serveStaticFallback(w, req, dir)
+			return
+		}
+		if fi.IsDir() {
+			if _, err := os.Stat(filepath.Join(full, "index.html")); err != nil {
+				serveStaticFallback(w, req, dir)
+				return
+			}
+		}
+		fs.ServeHTTP(w, req)
+	})
+}
+
+// serveStaticFallback serves the export's 404.html (404) when present, else its
+// index.html (SPA fallback).
+func serveStaticFallback(w http.ResponseWriter, req *http.Request, dir string) {
+	if p := filepath.Join(dir, "404.html"); fileExists(p) {
+		w.WriteHeader(http.StatusNotFound)
+		http.ServeFile(w, req, p)
+		return
+	}
+	http.ServeFile(w, req, filepath.Join(dir, "index.html"))
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }

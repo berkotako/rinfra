@@ -36,3 +36,6 @@ web/tsconfig.tsbuildinfo
 
 # C2 live-validation harness (keys, local state)
 .harness/
+
+# Go build output (built by `go build ./cmd/rinfra-server`)
+/rinfra-server
