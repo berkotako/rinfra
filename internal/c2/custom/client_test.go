@@ -15,11 +15,13 @@ import (
 // token seen on each call and the last exec request body so tests can assert
 // round-tripping and authentication.
 type customAPIServer struct {
-	token        string
-	bearerSeen   string
-	lastExecBody string
-	lastListener map[string]any
-	failExec     bool
+	token           string
+	bearerSeen      string
+	lastExecBody    string
+	lastListener    map[string]any
+	failExec        bool
+	killedSession   string
+	stoppedListener string
 }
 
 func (s *customAPIServer) start(t *testing.T) *httptest.Server {
@@ -49,9 +51,25 @@ func (s *customAPIServer) start(t *testing.T) *httptest.Server {
 		})
 	})
 
-	// POST /api/v1/sessions/{id}/exec
+	// DELETE /api/v1/listeners/{id}
+	mux.HandleFunc("/api/v1/listeners/", func(w http.ResponseWriter, r *http.Request) {
+		s.bearerSeen = r.Header.Get("Authorization")
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		s.stoppedListener = strings.TrimPrefix(r.URL.Path, "/api/v1/listeners/")
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// POST /api/v1/sessions/{id}/exec and DELETE /api/v1/sessions/{id}
 	mux.HandleFunc("/api/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
 		s.bearerSeen = r.Header.Get("Authorization")
+		if r.Method == http.MethodDelete {
+			s.killedSession = strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if !strings.HasSuffix(r.URL.Path, "/exec") {
 			http.NotFound(w, r)
 			return
@@ -160,6 +178,26 @@ func TestHTTPClient_Execute_ErrorStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("error = %v, want it to mention status 404", err)
+	}
+}
+
+func TestHTTPClient_Cleanup(t *testing.T) {
+	s := &customAPIServer{token: "tok"}
+	srv := s.start(t)
+	defer srv.Close()
+	c := newHTTPCustomClient(srv.URL, "tok")
+
+	if err := c.KillSession(context.Background(), "s1"); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+	if s.killedSession != "s1" {
+		t.Errorf("killed session = %q, want s1", s.killedSession)
+	}
+	if err := c.StopListener(context.Background(), "https-443"); err != nil {
+		t.Fatalf("StopListener: %v", err)
+	}
+	if s.stoppedListener != "https-443" {
+		t.Errorf("stopped listener = %q, want https-443", s.stoppedListener)
 	}
 }
 

@@ -261,7 +261,7 @@ func (o *operator) Execute(ctx context.Context, callbackID string, t domain.Tech
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecFailed,
-			Output:            sanitize(output),
+			Output:            deploy.Sanitize(output),
 			StartedAt:         start,
 			FinishedAt:        fin,
 			Err:               err.Error(),
@@ -271,7 +271,7 @@ func (o *operator) Execute(ctx context.Context, callbackID string, t domain.Tech
 	return domain.Result{
 		TechniqueAttackID: t.AttackID,
 		Status:            domain.ExecSuccess,
-		Output:            sanitize(output),
+		Output:            deploy.Sanitize(output),
 		StartedAt:         start,
 		FinishedAt:        fin,
 	}, nil
@@ -324,7 +324,7 @@ func (o *operator) Revert(ctx context.Context, callbackID string, t domain.Techn
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecFailed,
-			Output:            sanitize(output),
+			Output:            deploy.Sanitize(output),
 			StartedAt:         start,
 			FinishedAt:        fin,
 			Err:               err.Error(),
@@ -333,7 +333,7 @@ func (o *operator) Revert(ctx context.Context, callbackID string, t domain.Techn
 	return domain.Result{
 		TechniqueAttackID: t.AttackID,
 		Status:            domain.ExecSuccess,
-		Output:            sanitize(output),
+		Output:            deploy.Sanitize(output),
 		StartedAt:         start,
 		FinishedAt:        fin,
 	}, nil
@@ -400,26 +400,6 @@ func mythicC2ProfileForProtocol(protocol string) string {
 	default:
 		return "http"
 	}
-}
-
-// sanitize removes ANSI escape codes and trims whitespace from tool output.
-func sanitize(s string) string {
-	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if r == 'm' {
-				inEscape = false
-			}
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
 }
 
 // paramsToJSON is a helper for building Mythic task parameter JSON.

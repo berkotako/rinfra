@@ -21,6 +21,9 @@
 //	    req:  {"command"}
 //	    resp: {"output"}
 //
+//	DELETE /api/v1/sessions/{id}      — terminate an implant session
+//	DELETE /api/v1/listeners/{id}     — remove a listener
+//
 // Any non-2xx response is surfaced as a Go error. Control() constructs the live
 // client against the deployed teamserver; tests inject a fake via
 // NewOperatorWithClient or stand up an httptest server (client_test.go).
@@ -36,6 +39,7 @@ package custom
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -57,12 +61,18 @@ const (
 	// redirector — operators reach it directly over the engagement's control
 	// channel.
 	customOperatorAPIPort = 9443
-	// customReleaseURL is the URL of the official framework release archive.
-	// Operator: set this to the actual release URL + pin the checksum.
-	customReleaseURL = "https://example.com/custom-framework/releases/latest/server_linux"
-	customSHA256     = "0000000000000000000000000000000000000000000000000000000000000000"
-	customDestPath   = "/usr/local/bin/custom-server"
-	customUnit       = "custom-server"
+	customDestPath        = "/usr/local/bin/custom-server"
+	customUnit            = "custom-server"
+)
+
+// Operator-supplied install coordinates for the in-house framework. RInfra does
+// not hardcode a release URL/checksum (the binary is the operator's own); set
+// these per engagement. When EnvCustomReleaseURL is unset the install template
+// skips its download/verify step and the operator's image/ExtraSetup is expected
+// to provide the binary at customDestPath.
+const (
+	EnvCustomReleaseURL = "RINFRA_CUSTOM_RELEASE_URL"
+	EnvCustomSHA256     = "RINFRA_CUSTOM_SHA256"
 )
 
 type provider struct{}
@@ -78,14 +88,16 @@ func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) 
 
 func deployCustom(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2.Config) (c2.Teamserver, error) {
 	params := deploy.InstallParams{
-		ReleaseURL:  customReleaseURL,
-		SHA256:      customSHA256,
+		// Operator-supplied (env); empty ReleaseURL ⇒ the template skips download
+		// and the binary is expected to be present (baked image / ExtraSetup).
+		ReleaseURL:  os.Getenv(EnvCustomReleaseURL),
+		SHA256:      os.Getenv(EnvCustomSHA256),
 		DestPath:    customDestPath,
 		SystemdUnit: customUnit,
 		ServiceUser: "nobody",
 		ExecStart:   fmt.Sprintf("%s --port %d", customDestPath, customPort),
 		ExtraSetup: []string{
-			"echo '[rinfra-custom] Custom framework installed from official release'",
+			"echo '[rinfra-custom] Custom framework install (operator-supplied release)'",
 		},
 	}
 
@@ -138,6 +150,10 @@ type CustomClient interface {
 	Execute(ctx context.Context, sessionID, command string) (string, error)
 	Sessions(ctx context.Context) ([]CustomSession, error)
 	StartListener(ctx context.Context, protocol, host string, port int) error
+	// KillSession terminates an implant session: DELETE /api/v1/sessions/{id}.
+	KillSession(ctx context.Context, sessionID string) error
+	// StopListener removes a listener: DELETE /api/v1/listeners/{id}.
+	StopListener(ctx context.Context, listenerID string) error
 }
 
 // CustomSession is an active session.
@@ -237,7 +253,23 @@ func renderCustomPrimitive(p c2.Primitive) (string, error) {
 		return "ps", nil
 	case c2.PrimPowerShell:
 		return fmt.Sprintf("powershell %s", p.Arg("script")), nil
+	case c2.PrimShell:
+		return fmt.Sprintf("shell %s", p.Arg("command")), nil
+	case c2.PrimNetConnections:
+		return "netstat", nil
+	case c2.PrimNetConfig:
+		return "ipconfig", nil
+	case c2.PrimFileList:
+		path := p.Arg("path")
+		if path == "" {
+			path = "."
+		}
+		return fmt.Sprintf("ls %s", path), nil
 	default:
+		// Read-only discovery built-ins run verbatim via the shell primitive.
+		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
+			return "shell " + cmd, nil
+		}
 		return "", fmt.Errorf("custom: unsupported primitive %q", p.Kind)
 	}
 }

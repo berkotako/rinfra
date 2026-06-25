@@ -402,7 +402,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecFailed,
-			Output:            sanitize(output),
+			Output:            deploy.Sanitize(output),
 			StartedAt:         start,
 			FinishedAt:        fin,
 			Err:               err.Error(),
@@ -412,7 +412,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	return domain.Result{
 		TechniqueAttackID: t.AttackID,
 		Status:            domain.ExecSuccess,
-		Output:            sanitize(output),
+		Output:            deploy.Sanitize(output),
 		StartedAt:         start,
 		FinishedAt:        fin,
 	}, nil
@@ -455,7 +455,7 @@ func (o *operator) Revert(ctx context.Context, sessionID string, t domain.Techni
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecFailed,
-			Output:            sanitize(output),
+			Output:            deploy.Sanitize(output),
 			StartedAt:         start,
 			FinishedAt:        fin,
 			Err:               err.Error(),
@@ -464,7 +464,7 @@ func (o *operator) Revert(ctx context.Context, sessionID string, t domain.Techni
 	return domain.Result{
 		TechniqueAttackID: t.AttackID,
 		Status:            domain.ExecSuccess,
-		Output:            sanitize(output),
+		Output:            deploy.Sanitize(output),
 		StartedAt:         start,
 		FinishedAt:        fin,
 	}, nil
@@ -529,25 +529,6 @@ func msfPayloadForProtocol(protocol string) string {
 	default:
 		return "windows/x64/meterpreter/reverse_https"
 	}
-}
-
-func sanitize(s string) string {
-	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if r == 'm' {
-				inEscape = false
-			}
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
 }
 
 // generateRPCPassword returns a per-engagement msfrpcd RPC password as 32 hex
