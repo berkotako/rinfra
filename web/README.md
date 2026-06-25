@@ -33,6 +33,24 @@ make web-build
 make web-lint
 ```
 
+## Deploy to Vercel
+
+This app deploys to Vercel out of the box (it's a mock-data demo — no backend).
+
+In the Vercel project settings:
+
+- **Root Directory**: `web` (the app is not at the repo root — this is the one
+  setting that's easy to miss).
+- **Framework Preset**: Next.js (auto-detected).
+- Leave **`NEXT_PUBLIC_BASE_PATH` unset** — that's only for the GitHub Pages
+  sub-path; on Vercel the app serves from the domain root.
+
+By default the build is a static export (`output: "export"`), which Vercel serves
+as a static site — matching the build that ships to GitHub Pages. To use full
+Next.js features (SSR / API routes) on Vercel instead, set the env var
+`NEXT_PUBLIC_SSR=true`. Security headers are applied via `web/vercel.json`.
+
+
 ## Architecture
 
 ```
