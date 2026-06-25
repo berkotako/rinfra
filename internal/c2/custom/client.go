@@ -105,6 +105,26 @@ func (c *httpCustomClient) Execute(ctx context.Context, sessionID, command strin
 	return resp.Output, nil
 }
 
+// KillSession terminates an implant session.
+// DELETE /api/v1/sessions/{id}
+func (c *httpCustomClient) KillSession(ctx context.Context, sessionID string) error {
+	path := "/api/v1/sessions/" + url.PathEscape(sessionID)
+	if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
+		return fmt.Errorf("custom: kill session: %w", err)
+	}
+	return nil
+}
+
+// StopListener removes a listener.
+// DELETE /api/v1/listeners/{id}
+func (c *httpCustomClient) StopListener(ctx context.Context, listenerID string) error {
+	path := "/api/v1/listeners/" + url.PathEscape(listenerID)
+	if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
+		return fmt.Errorf("custom: stop listener: %w", err)
+	}
+	return nil
+}
+
 // do performs an authenticated JSON request. reqBody, if non-nil, is marshaled
 // as the request body; out, if non-nil, receives the decoded 2xx response.
 // Non-2xx responses are returned as Go errors that include the status and any

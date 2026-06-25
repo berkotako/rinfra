@@ -284,7 +284,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecFailed,
-			Output:            sanitize(output),
+			Output:            deploy.Sanitize(output),
 			StartedAt:         start,
 			FinishedAt:        fin,
 			Err:               err.Error(),
@@ -293,7 +293,7 @@ func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Techn
 	return domain.Result{
 		TechniqueAttackID: t.AttackID,
 		Status:            domain.ExecSuccess,
-		Output:            sanitize(output),
+		Output:            deploy.Sanitize(output),
 		StartedAt:         start,
 		FinishedAt:        fin,
 	}, nil
@@ -320,7 +320,7 @@ func (o *operator) Revert(ctx context.Context, sessionID string, t domain.Techni
 		return domain.Result{
 			TechniqueAttackID: t.AttackID,
 			Status:            domain.ExecFailed,
-			Output:            sanitize(output),
+			Output:            deploy.Sanitize(output),
 			StartedAt:         start,
 			FinishedAt:        fin,
 			Err:               err.Error(),
@@ -329,7 +329,7 @@ func (o *operator) Revert(ctx context.Context, sessionID string, t domain.Techni
 	return domain.Result{
 		TechniqueAttackID: t.AttackID,
 		Status:            domain.ExecSuccess,
-		Output:            sanitize(output),
+		Output:            deploy.Sanitize(output),
 		StartedAt:         start,
 		FinishedAt:        fin,
 	}, nil
@@ -409,28 +409,6 @@ func renderSliverPrimitive(p c2.Primitive) (string, error) {
 		}
 		return "", fmt.Errorf("sliver: unsupported primitive %q", p.Kind)
 	}
-}
-
-// sanitize removes raw binary/escape sequences from framework output before
-// storing in the audit log / Result.Output.
-func sanitize(s string) string {
-	// Strip ANSI escape codes.
-	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if r == 'm' {
-				inEscape = false
-			}
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
 }
 
 // escapeShell does minimal shell-quoting on a parameter to prevent injection.

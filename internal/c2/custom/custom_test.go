@@ -25,6 +25,35 @@ func (f *FakeCustomClient) Sessions(_ context.Context) ([]custompkg.CustomSessio
 	return []custompkg.CustomSession{{ID: "s1", Hostname: "host1", Username: "user1"}}, nil
 }
 func (f *FakeCustomClient) StartListener(_ context.Context, _, _ string, _ int) error { return nil }
+func (f *FakeCustomClient) KillSession(_ context.Context, _ string) error             { return nil }
+func (f *FakeCustomClient) StopListener(_ context.Context, _ string) error            { return nil }
+
+// TestOperator_Execute_ExpandedPrimitives verifies the broadened renderer now
+// executes shell, file-list, and read-only discovery techniques (previously
+// reported ExecUnsupported), with the rendered command reaching the client.
+func TestOperator_Execute_ExpandedPrimitives(t *testing.T) {
+	for _, tc := range []struct{ name, attackID, wantCmdContains string }{
+		{"shell", "T1059.003", "shell"},           // PrimShell
+		{"file_list", "T1083", "ls"},              // PrimFileList
+		{"net_config", "T1016", "ipconfig"},       // PrimNetConfig
+		{"remote_discovery", "T1018", "net view"}, // discovery built-in via shell
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &FakeCustomClient{execResult: "ok"}
+			op := custompkg.NewOperatorWithClient(c2.Teamserver{}, client)
+			res, err := op.Execute(context.Background(), "s1", domain.Technique{AttackID: tc.attackID})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if res.Status != domain.ExecSuccess {
+				t.Errorf("status = %v, want ExecSuccess (primitive should now render)", res.Status)
+			}
+			if !strings.Contains(client.lastCmd, tc.wantCmdContains) {
+				t.Errorf("rendered command %q should contain %q", client.lastCmd, tc.wantCmdContains)
+			}
+		})
+	}
+}
 
 func TestTier(t *testing.T) {
 	p, err := c2.Get("custom")
