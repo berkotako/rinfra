@@ -84,8 +84,8 @@ means the framework is deploy-and-operate-manually. See `docs/SUPPORT_MATRIX.md`
 | Tier | Meaning | Frameworks |
 |------|---------|------------|
 | Orchestrated | Deploy + redirector + automated emulation via `Operator` | Sliver, Mythic, Metasploit, custom |
-| Scripted | Deploy + redirector + partial automation | Havoc, PoshC2 |
-| Fronted | Deploy + redirector only; human operates | Cobalt Strike, Brute Ratel C4 |
+| Scripted | Deploy + redirector + partial automation | PoshC2 |
+| Fronted | Deploy + redirector only; human operates | Havoc, Cobalt Strike, Brute Ratel C4 |
 
 Emulation automation only lights up on Orchestrated/Scripted tiers. Cobalt
 Strike and Brute Ratel are provisioned and fronted; the operator drives them by
@@ -128,10 +128,10 @@ per-adapter `switch t.AttackID` tables):
 2. **Renderers** — each `Operator.Execute` adapter has a small
    `renderXxxPrimitive(c2.Primitive)` switching over the closed primitive set
    and emitting that framework's native command(s). Framework-specific defaults
-   live here (e.g. `file_list` root is `.` on Sliver/Havoc/PoshC2, `C:\` on
+   live here (e.g. `file_list` root is `.` on Sliver/PoshC2, `C:\` on
    Metasploit); universal defaults (`whoami`, `RInfraTest`) live in the catalog.
    A framework that doesn't implement a primitive returns `ExecUnsupported` (no
-   fabricated attempt). Scripted-tier allowlists (Havoc/PoshC2) are **derived**
+   fabricated attempt). The Scripted-tier allowlist (PoshC2) is **derived**
    from "catalog × renderer", not hand-maintained.
 3. **Fact-aware sequencing** (`internal/emulation` `FactStore`/`Planner`) — a run
    is executed by an "atomic planner": techniques run in scenario order, but each
@@ -179,7 +179,7 @@ Implement in this sequence; each step should compile and be testable.
 4. **Orchestration engine** — canvas topology -> Pulumi program -> provision,
    with transactional teardown + state reconciliation.
 5. **C2 abstraction** — `C2Provider` + **Sliver and Mythic (Orchestrated)**
-   first, then a Havoc (Scripted) and Cobalt Strike (Fronted) deploy path.
+   first, then a PoshC2 (Scripted) and Cobalt Strike (Fronted) deploy path.
 6. **Emulation engine** — run `domain.Scenario` via the `Operator` interface;
    wrap Atomic Red Team / Caldera abilities as the procedure source.
 
@@ -187,8 +187,9 @@ Implement in this sequence; each step should compile and be testable.
 methods are wired to their official SDKs (godo / aws-sdk-go-v2 /
 google.golang.org/api / azure-sdk-for-go) and unit-tested; all eight C2
 frameworks have real clients (Sliver gRPC, Mythic GraphQL, Metasploit
-msgpack-RPC, Havoc/PoshC2 SSH-CLI, Custom REST, Cobalt Strike / Brute Ratel
-fronted) over a shared live SSH runner; msfvenom generation is real. Built on
+msgpack-RPC, PoshC2 SSH-CLI, Custom REST; Havoc, Cobalt Strike, and Brute Ratel
+fronted — deploy + redirector, human-operated) over a shared live SSH runner;
+msfvenom generation is real. Built on
 top since: capability-based technique routing (`service.Route` —
 technique→capable in-scope agent), an honest BAS status taxonomy
 (executed/attempted-failed/manual/unsupported/blocked-by-scope/not-run, so

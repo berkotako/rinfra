@@ -1,120 +1,109 @@
-// Package havoc adapts the Havoc C2 framework to RInfra. Scripted-tier: Havoc
-// has a teamserver API and a Python scripting interface, but automating against
-// it is less stable than a first-class gRPC or REST API, so RInfra supports a
-// curated subset of techniques. Techniques outside that subset are returned with
-// ExecUnsupported and an explanatory message.
+// Package havoc adapts the Havoc C2 framework to RInfra. Fronted-tier: RInfra
+// deploys the Havoc teamserver and stands up its redirector, then a human
+// operates it with their own Havoc client.
+//
+// # Why Fronted, not Scripted
+//
+// Havoc has NO headless/scriptable operator CLI. Its only programmatic operator
+// surface is an undocumented JSON-over-WebSocket API on the teamserver
+// (wss://host:40056/havoc/): only the auth, listener-create, and agent-compile
+// messages are publicly known (from the archived havoc-py library and CVE
+// research); the session-list and command-exec event IDs are not documented and
+// can't be validated without a live teamserver. Rather than ship an
+// unvalidated, reverse-engineered exec client that would report misleading
+// results, RInfra treats Havoc as Fronted: Control() returns (nil, false) and
+// the emulation engine records every technique as ExecManualRequired. A real
+// WebSocket operator client (→ Scripted) is a future upgrade gated on being able
+// to validate the protocol against a live Havoc teamserver.
 //
 // # Posture
 //
-// This adapter DEPLOYS and DRIVES the upstream Havoc release. It does not
-// implement Havoc, implants, payloads, or evasion. Deploy fetches the official
-// Havoc release from GitHub at a pinned version.
-//
-// # Scripted operator API
-//
-// HavocClient is the interface over Havoc's scripting layer. The live
-// implementation (cliHavocClient) drives the upstream Havoc client binary on the
-// teamserver host over the shared SSH Runner and parses its textual output;
-// tests inject a FakeHavocClient.
-//
-// # PoshC2 note
-//
-// PoshC2 is also Scripted-tier and follows the same pattern (see
-// internal/c2/poshc2). PoshC2 does not expose a modern scripting API, so its
-// operator returns ExecUnsupported for most techniques. See poshc2.go for the
-// lighter stub and its documented seams.
+// This adapter DEPLOYS and FRONTS the upstream Havoc release. It does not
+// implement Havoc, implants, payloads, or evasion. Havoc has no signed release
+// tarball, so Deploy builds the teamserver from a pinned git ref of the official
+// repository entirely within the install script (no download/checksum step).
 package havoc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	"github.com/rinfra/rinfra/internal/domain"
-	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 func init() { c2.Register(&provider{}) }
 
 const (
-	havocVersion    = "0.7"
-	havocReleaseURL = "https://github.com/HavocFramework/Havoc/archive/refs/tags/" + havocVersion + ".tar.gz"
-	havocSHA256     = "placeholder-operator-should-verify-from-havoc-release-page"
-	havocPort       = 40056 // default Havoc teamserver port
+	// havocRepo / havocRef: Havoc publishes no signed release artifacts and no
+	// git tags, so the teamserver is built from source at a pinned, IMMUTABLE
+	// commit SHA (not a mutable branch — two deploys of the same RInfra commit
+	// must build identical upstream code). To upgrade: review a newer commit on
+	// HavocFramework/Havoc main and update this SHA.
+	havocRepo = "https://github.com/HavocFramework/Havoc"
+	havocRef  = "c84f7755a8b1c0f737576bdd3a0e982a296012f1"
+	havocPort = 40056 // default Havoc teamserver operator port
 )
 
 type provider struct{}
 
 func (p *provider) Name() string         { return "havoc" }
-func (p *provider) Tier() c2.SupportTier { return c2.TierScripted }
+func (p *provider) Tier() c2.SupportTier { return c2.TierFronted }
 
-// Capabilities reports Havoc's routing metadata: Windows demons over HTTPS, with
-// the technique allowlist DERIVED from the shared catalog — every catalog
-// technique whose primitive renderHavocPrimitive supports. This keeps the
-// Scripted-tier automated subset in sync with the renderer automatically,
-// instead of a separately maintained list.
-func (p *provider) Capabilities() c2.Capabilities {
-	return c2.Capabilities{
-		Platforms:         []string{"windows"},
-		Techniques:        supportedAttackIDs(),
-		ListenerProtocols: []string{"https"},
-	}
-}
-
-// supportedAttackIDs returns the catalog techniques Havoc can run automatically:
-// those that compile to a primitive renderHavocPrimitive renders.
-func supportedAttackIDs() []string {
-	var ids []string
-	for _, id := range ttp.Default().AttackIDs() {
-		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
-		if !ok || err != nil {
-			continue
-		}
-		if _, rok := renderHavocPrimitive(prim); rok {
-			ids = append(ids, id)
-		}
-	}
-	return ids
-}
-
-// Deploy installs the upstream Havoc teamserver release on the node via SSH.
+// Deploy builds and starts the upstream Havoc teamserver on the node via SSH.
 func (p *provider) Deploy(ctx context.Context, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
-	runner := runnerFromNode(node)
-	return deployHavoc(ctx, runner, node, cfg)
+	return deployHavoc(ctx, runnerFromNode(node), node, cfg)
 }
 
-func deployHavoc(ctx context.Context, runner deploy.Runner, node domain.Node, _ c2.Config) (c2.Teamserver, error) {
+func deployHavoc(ctx context.Context, runner deploy.Runner, node domain.Node, cfg c2.Config) (c2.Teamserver, error) {
+	// Operator credentials for the teamserver profile. Operator-supplied via
+	// Config.Extra; otherwise a RANDOM per-deploy secret is generated (never a
+	// shared default — the teamserver binds 0.0.0.0:40056 and a known default
+	// would be an open door before the operator rotates it).
+	operatorPass := cfg.Extra["operator_password"]
+	if operatorPass == "" {
+		pw, err := randomSecret()
+		if err != nil {
+			return c2.Teamserver{}, fmt.Errorf("havoc.Deploy: generate operator password: %w", err)
+		}
+		operatorPass = pw
+	}
+
+	// Havoc's teamserver is built from source (no release binary). Build deps +
+	// an immutable-commit checkout + `make ts-build` (produces ./havoc) all run
+	// in ExtraSetup; the install template skips its download/checksum block
+	// because ReleaseURL is empty. The profile carries the operator secret, so it
+	// is written 0600 in a 0700 dir, and the install script self-deletes (see the
+	// deploy template) so the secret does not linger world-readable in /tmp.
+	profile := havocProfile(operatorPass)
 	extraSetup := []string{
-		"apt-get install -y cmake libssl-dev pkg-config libboost-all-dev mingw-w64 nasm python3-dev || true",
-		fmt.Sprintf("mkdir -p /opt/havoc && cd /opt/havoc && curl -fsSL %s | tar xz --strip-components=1", havocReleaseURL),
-		"cd /opt/havoc/teamserver && go build -o /usr/local/bin/havoc-teamserver . || true",
-		"echo '[rinfra-havoc] Havoc teamserver built from official release'",
-		// Write a default profile for headless operation.
-		`cat > /etc/havoc/teamserver.yaml << 'EOF'
-# RInfra-generated Havoc teamserver config.
-# Operator: customise listeners and malleable C2 profile as needed.
-Teamserver:
-  Host: 0.0.0.0
-  Port: ` + fmt.Sprintf("%d", havocPort) + `
-Listeners:
-  - Name: default
-    Protocol: https
-    Host: 0.0.0.0
-    Port: 443
-EOF`,
+		"export DEBIAN_FRONTEND=noninteractive",
+		"apt-get update -y || true",
+		"apt-get install -y git build-essential cmake make golang-go nasm mingw-w64 " +
+			"pkg-config libssl-dev libboost-all-dev python3-dev curl || true",
+		// Fetch exactly the pinned commit (depth 1) and check it out — immutable.
+		"rm -rf /opt/havoc && git init -q /opt/havoc",
+		fmt.Sprintf("cd /opt/havoc && git remote add origin %s", havocRepo),
+		fmt.Sprintf("cd /opt/havoc && git fetch --depth 1 origin %s", havocRef),
+		"cd /opt/havoc && git checkout -q FETCH_HEAD",
+		"cd /opt/havoc && make ts-build", // builds the teamserver binary -> /opt/havoc/havoc
+		"install -d -m 0700 /etc/havoc",
+		"umask 077 && cat > /etc/havoc/havoc.yaotl <<'YAOTL'\n" + profile + "\nYAOTL",
+		"chmod 600 /etc/havoc/havoc.yaotl",
+		"echo '[rinfra-havoc] Havoc teamserver built from source at pinned commit'",
 	}
 
 	params := deploy.InstallParams{
-		ReleaseURL:  havocReleaseURL,
-		SHA256:      havocSHA256,
-		DestPath:    "/usr/local/bin/havoc-teamserver",
+		// No ReleaseURL/SHA256: Havoc has no signed release; built in ExtraSetup.
+		DestPath:    "/opt/havoc/havoc",
 		SystemdUnit: "havoc-teamserver",
 		ServiceUser: "root",
-		ExecStart:   fmt.Sprintf("/usr/local/bin/havoc-teamserver server --profile /etc/havoc/teamserver.yaml"),
-		ExtraSetup:  extraSetup,
+		// Run from /opt/havoc so the teamserver finds its data/ directory.
+		ExecStart:  "/bin/bash -c 'cd /opt/havoc && ./havoc server --profile /etc/havoc/havoc.yaotl'",
+		ExtraSetup: extraSetup,
 	}
 
 	if err := deploy.RunInstall(ctx, runner, params); err != nil {
@@ -125,17 +114,43 @@ EOF`,
 		Host:           node.PublicIP,
 		Port:           havocPort,
 		Status:         "running",
-		ConnectionInfo: fmt.Sprintf("Havoc teamserver @ %s:%d (operator connects via Havoc client)", node.PublicIP, havocPort),
+		ConnectionInfo: fmt.Sprintf("Havoc teamserver @ %s:%d (operator connects with the Havoc client)", node.PublicIP, havocPort),
 	}, nil
 }
 
-// RedirectorConfig emits an nginx reverse-proxy config fronting the Havoc
-// HTTPS listener. Reverse-proxy + categorized-domain (NOT CDN fronting).
-func (p *provider) RedirectorConfig(prof domain.Profile) (string, error) {
-	return havocRedirectorConfig(prof)
+// havocProfile renders a starter Havoc teamserver profile in Yaotl (HCL), the
+// format the teamserver expects (NOT YAML). The operator refines listeners and
+// the malleable C2 profile via their client.
+func havocProfile(operatorPass string) string {
+	return fmt.Sprintf(`# RInfra-generated Havoc teamserver profile (Yaotl/HCL).
+# Operator: refine listeners and the malleable C2 profile as needed.
+Teamserver {
+    Host = "0.0.0.0"
+    Port = %d
 }
 
-func havocRedirectorConfig(prof domain.Profile) (string, error) {
+Operators {
+    user "rinfra" {
+        Password = "%s"
+    }
+}
+
+Listeners {
+    Http {
+        Name     = "rinfra-https"
+        Hosts    = ["0.0.0.0"]
+        HostBind = "0.0.0.0"
+        PortBind = 443
+        PortConn = 443
+        Secure   = true
+    }
+}
+`, havocPort, operatorPass)
+}
+
+// RedirectorConfig emits an nginx reverse-proxy config fronting the Havoc HTTPS
+// listener. Reverse-proxy + categorized-domain (NOT CDN fronting).
+func (p *provider) RedirectorConfig(prof domain.Profile) (string, error) {
 	params := deploy.NginxParams{
 		UpstreamHost: "127.0.0.1",
 		UpstreamPort: 443,
@@ -155,307 +170,22 @@ func havocRedirectorConfig(prof domain.Profile) (string, error) {
 	return cfg, nil
 }
 
-// Control returns a scripted Operator for Havoc. The operator supports a
-// curated subset of techniques; others return ExecUnsupported.
-func (p *provider) Control(ts c2.Teamserver) (c2.Operator, bool) {
-	client := newCLIHavocClient(deploy.NewNodeRunner(ts.Host), ts.Host, ts.Port)
-	return &operator{ts: ts, client: client}, true
-}
-
-// HavocClient is the minimal interface over Havoc's scripting layer.
-// The live implementation runs Havoc's Python API bridge or uses the websocket
-// API exposed by the teamserver; tests inject a fake.
-type HavocClient interface {
-	// Execute runs a shell command on an active demon session.
-	Execute(ctx context.Context, sessionID, command string) (string, error)
-	// Sessions returns active demon sessions.
-	Sessions(ctx context.Context) ([]HavocSession, error)
-	// StartListener starts a listener on the teamserver.
-	StartListener(ctx context.Context, protocol, host string, port int) error
-}
-
-// HavocSession is an active demon session.
-type HavocSession struct {
-	ID       string
-	Hostname string
-	Username string
-	OS       string
-	Arch     string
-}
-
-// NewOperatorWithClient returns a Havoc Operator with the given client injected.
-func NewOperatorWithClient(ts c2.Teamserver, client HavocClient) c2.Operator {
-	return &operator{ts: ts, client: client}
-}
-
-type operator struct {
-	ts     c2.Teamserver
-	client HavocClient
-}
-
-func (o *operator) StartListener(ctx context.Context, spec c2.ListenerSpec) error {
-	port := 443
-	if spec.Protocol == "dns" {
-		port = 53
-	}
-	return o.client.StartListener(ctx, spec.Protocol, spec.Bind, port)
-}
-
-func (o *operator) Sessions(ctx context.Context) ([]c2.Session, error) {
-	raw, err := o.client.Sessions(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("havoc: sessions: %w", err)
-	}
-	out := make([]c2.Session, 0, len(raw))
-	for _, s := range raw {
-		out = append(out, c2.Session{
-			ID:   s.ID,
-			Host: s.Hostname,
-			User: s.Username,
-			Metadata: map[string]string{
-				"os":   s.OS,
-				"arch": s.Arch,
-			},
-		})
-	}
-	return out, nil
-}
-
-// Execute translates a portable domain.Technique into a Havoc scripted command.
-// Techniques outside the supportedTechniques set return ExecUnsupported with an
-// explanatory message — this is the correct Scripted-tier behaviour.
-func (o *operator) Execute(ctx context.Context, sessionID string, t domain.Technique) (domain.Result, error) {
-	start := time.Now()
-
-	cmd, ok := techniqueToHavocCommand(t)
-	if !ok {
-		// Outside the subset Havoc's scripting API reliably exposes (no catalog
-		// mapping, or a primitive Havoc doesn't render) — Scripted-tier means the
-		// operator drives it manually.
-		return domain.Result{
-			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecUnsupported,
-			Output: fmt.Sprintf("havoc (scripted-tier): technique %s is outside the supported subset; "+
-				"operator should execute manually", t.AttackID),
-			StartedAt:  start,
-			FinishedAt: time.Now(),
-		}, nil
-	}
-
-	output, err := o.client.Execute(ctx, sessionID, cmd)
-	fin := time.Now()
-	if err != nil {
-		return domain.Result{
-			TechniqueAttackID: t.AttackID,
-			Status:            domain.ExecFailed,
-			Output:            sanitize(output),
-			StartedAt:         start,
-			FinishedAt:        fin,
-			Err:               err.Error(),
-		}, nil
-	}
-
-	return domain.Result{
-		TechniqueAttackID: t.AttackID,
-		Status:            domain.ExecSuccess,
-		Output:            sanitize(output),
-		StartedAt:         start,
-		FinishedAt:        fin,
-	}, nil
-}
-
-// techniqueToHavocCommand compiles a portable Technique to a Havoc demon command
-// via the shared catalog (ttp.Compile) + renderHavocPrimitive. ok=false means
-// the technique is outside Havoc's reliably-scriptable subset — either it has no
-// catalog mapping or it compiles to a primitive Havoc doesn't render. This
-// derives the Scripted-tier support set from the catalog instead of a separate
-// hand-maintained allowlist.
-func techniqueToHavocCommand(t domain.Technique) (string, bool) {
-	prim, ok, err := ttp.Compile(t)
-	if !ok || err != nil {
-		return "", false
-	}
-	return renderHavocPrimitive(prim)
-}
-
-// renderHavocPrimitive renders a portable primitive into a Havoc demon command.
-// ok=false for primitives outside Havoc's reliably-scriptable subset (e.g.
-// download, scheduled task, registry persistence) — the operator runs those by
-// hand.
-func renderHavocPrimitive(p c2.Primitive) (string, bool) {
-	switch p.Kind {
-	case c2.PrimPowerShell:
-		return fmt.Sprintf("powershell %s", p.Arg("script")), true
-	case c2.PrimShell:
-		return fmt.Sprintf("shell %s", p.Arg("command")), true
-	case c2.PrimSysInfo:
-		return "sysinfo", true
-	case c2.PrimProcessList:
-		return "ps", true
-	case c2.PrimNetConnections:
-		return "netstat", true
-	case c2.PrimNetConfig:
-		return "ipconfig", true
-	case c2.PrimFileList:
-		path := p.Arg("path")
-		if path == "" {
-			path = "."
-		}
-		return fmt.Sprintf("dir %s", path), true
-	default:
-		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
-			return "shell " + cmd, true
-		}
-		return "", false
-	}
-}
-
-func sanitize(s string) string {
-	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if r == 'm' {
-				inEscape = false
-			}
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
+// Control returns (nil, false): Havoc is Fronted-tier (see package doc). The
+// emulation engine records every technique as ExecManualRequired.
+func (p *provider) Control(_ c2.Teamserver) (c2.Operator, bool) {
+	return nil, false
 }
 
 func runnerFromNode(node domain.Node) deploy.Runner {
 	return deploy.NewNodeRunner(node.PublicIP)
 }
 
-// cliHavocClient is the live HavocClient. It drives the upstream Havoc client
-// (the `havoc` operator binary, invoked headless with `havoc client ...`) on the
-// teamserver host through a deploy.Runner and parses its textual stdout. RInfra
-// composes the upstream tool here: every command string below targets Havoc's
-// own client CLI — RInfra authors no implants, payloads, or evasion. The client
-// connects to the teamserver over loopback on the host, so host/port describe
-// the local teamserver endpoint the Havoc client attaches to.
-type cliHavocClient struct {
-	runner deploy.Runner
-	host   string
-	port   int
-}
-
-// newCLIHavocClient constructs a live CLI-backed HavocClient. runner executes
-// commands on the teamserver host (production: deploy.NewNodeRunner); host/port
-// identify the teamserver endpoint the Havoc client connects to.
-func newCLIHavocClient(runner deploy.Runner, host string, port int) *cliHavocClient {
-	if port == 0 {
-		port = havocPort
+// randomSecret returns a URL-safe random string for use as a per-deploy
+// teamserver operator password (24 bytes of crypto/rand entropy).
+func randomSecret() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
 	}
-	return &cliHavocClient{runner: runner, host: host, port: port}
-}
-
-// clientInvoke builds the `havoc client` invocation prefix that connects to the
-// local teamserver before running a sub-command. The Havoc client attaches over
-// loopback on the teamserver host itself.
-func (c *cliHavocClient) clientInvoke(sub string) string {
-	return fmt.Sprintf("havoc client --host 127.0.0.1 --port %d %s", c.port, sub)
-}
-
-// Execute runs a demon command on an active session via the Havoc client and
-// returns the demon's textual output.
-func (c *cliHavocClient) Execute(ctx context.Context, sessionID, command string) (string, error) {
-	cmd := c.clientInvoke(fmt.Sprintf("demon %s exec %s", shellQuote(sessionID), command))
-	out, err := c.runner.Run(ctx, cmd)
-	if err != nil {
-		return out, fmt.Errorf("havoc: client exec on demon %s: %w", sessionID, err)
-	}
-	return out, nil
-}
-
-// Sessions lists active demon sessions by parsing the Havoc client's
-// `demon list` output.
-func (c *cliHavocClient) Sessions(ctx context.Context) ([]HavocSession, error) {
-	out, err := c.runner.Run(ctx, c.clientInvoke("demon list"))
-	if err != nil {
-		return nil, fmt.Errorf("havoc: client demon list: %w", err)
-	}
-	return parseHavocSessions(out), nil
-}
-
-// StartListener creates a listener on the teamserver via the Havoc client.
-func (c *cliHavocClient) StartListener(ctx context.Context, protocol, host string, port int) error {
-	if host == "" {
-		host = "0.0.0.0"
-	}
-	sub := fmt.Sprintf("listener add --name rinfra-%s --protocol %s --host %s --port %d",
-		protocol, protocol, host, port)
-	if _, err := c.runner.Run(ctx, c.clientInvoke(sub)); err != nil {
-		return fmt.Errorf("havoc: client listener add: %w", err)
-	}
-	return nil
-}
-
-// parseHavocSessions parses the tabular output of `havoc client demon list`.
-// Each demon row is whitespace/pipe separated:
-//
-//	ID | Hostname | Username | OS | Arch
-//
-// Header lines, separators, and blanks are skipped. Parsing is lenient: a row
-// with fewer fields fills what it can.
-func parseHavocSessions(out string) []HavocSession {
-	var sessions []HavocSession
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Skip a header or separator row.
-		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "id") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "=") {
-			continue
-		}
-		fields := splitColumns(line)
-		if len(fields) == 0 {
-			continue
-		}
-		s := HavocSession{ID: fields[0]}
-		if len(fields) > 1 {
-			s.Hostname = fields[1]
-		}
-		if len(fields) > 2 {
-			s.Username = fields[2]
-		}
-		if len(fields) > 3 {
-			s.OS = fields[3]
-		}
-		if len(fields) > 4 {
-			s.Arch = fields[4]
-		}
-		sessions = append(sessions, s)
-	}
-	return sessions
-}
-
-// splitColumns splits a Havoc/PoshC2 table row on pipes or runs of whitespace.
-func splitColumns(line string) []string {
-	var raw []string
-	if strings.Contains(line, "|") {
-		raw = strings.Split(line, "|")
-	} else {
-		raw = strings.Fields(line)
-	}
-	out := make([]string, 0, len(raw))
-	for _, f := range raw {
-		if f = strings.TrimSpace(f); f != "" {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-// shellQuote single-quotes s for safe use as a shell argument.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
