@@ -103,7 +103,19 @@ _Last updated: 2026-06-22._
   `switch t.AttackID`); Scripted-tier allowlists are derived from
   catalog × renderer. The closed set now includes read-only discovery
   primitives (remote-system / account / permission-group / service / share
-  discovery) backed by safe Windows built-ins (`c2.DiscoveryCommand`).
+  discovery) backed by safe Windows built-ins (`c2.DiscoveryCommand`). The
+  catalog ships **100 ATT&CK techniques** — every entry resolves to a read-only
+  enumeration primitive (a native built-in / cloud-CLI list/query rendered on
+  every framework with a shell) and a **quote-free** default command (the
+  Metasploit renderer wraps it as `-a '-c "<cmd>"'`, so any quote breaks it;
+  `TestCatalog_DefaultsAreQuoteFree` enforces this catalog-wide). **Mapping
+  caveat:** several entries reuse a persistence/collection/defense-evasion
+  ATT&CK ID for the read-only *reconnaissance* of that artifact (e.g. T1560.001
+  lists archive files rather than archiving, T1547.x reads an autostart key
+  rather than writing it). State-creating execution of those techniques needs
+  new write-capable primitives plus `c2.Reverter` cleanup wiring — deliberately
+  out of scope for safe auto-add (no orphaned artifacts), and the recommended
+  next increment.
 - **Fact-aware chaining** (`internal/emulation` `FactStore`/`Planner`): a run is
   an atomic planner — a technique's output is parsed into a per-run fact store
   (routable IPs → `host.ip`), later techniques substitute `${fact.key}` into

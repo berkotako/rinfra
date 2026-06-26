@@ -248,3 +248,655 @@ techniques:
       script:
         from: command
         default: reg query HKCU\Software\Microsoft\Office\16.0\Outlook\Profiles /s
+
+  # --- Workflow-authored read-only enumeration TTPs (panel: 5 red teamers + 1 SWE) ---
+  # All reuse the powershell/shell primitive (render on every framework), are
+  # read-only native built-ins (no state, no cleanup), and quote-free.
+
+  - attack_id: "T1016.001"
+    name: "System Network Configuration Discovery: Internet Connection Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'ping -n 1 8.8.8.8'
+
+  - attack_id: "T1016.002"
+    name: "System Network Configuration Discovery: Wi-Fi Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'netsh wlan show profiles'
+
+  - attack_id: "T1614"
+    name: "System Location Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-TimeZone | Select-Object Id, DisplayName, BaseUtcOffset'
+
+  - attack_id: "T1497.001"
+    name: "Virtualization/Sandbox Evasion: System Checks"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-CimInstance Win32_ComputerSystem | Select-Object Model, Manufacturer, NumberOfLogicalProcessors, TotalPhysicalMemory'
+
+  - attack_id: "T1497.003"
+    name: "Virtualization/Sandbox Evasion: Time Based Evasion"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-Date; (Get-Date).Ticks'
+
+  - attack_id: "T1622"
+    name: "Debugger Evasion"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-CimInstance Win32_Process | Where-Object Name -in ntsd.exe,cdb.exe,windbg.exe,ollydbg.exe,x64dbg.exe | Select-Object Name,ProcessId'
+
+  - attack_id: "T1010"
+    name: "Application Window Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-Process | Where-Object MainWindowTitle | Select-Object Name, Id, MainWindowTitle'
+
+  - attack_id: "T1120"
+    name: "Peripheral Device Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-PnpDevice -PresentOnly | Select-Object Class,FriendlyName,InstanceId | Sort-Object Class'
+
+  - attack_id: "T1046"
+    name: "Network Service Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort'
+
+  - attack_id: "T1590.001"
+    name: "Gather Victim Network Information: Domain Properties"
+    tactic: reconnaissance
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'nltest /dclist:'
+
+  - attack_id: "T1590.002"
+    name: "Gather Victim Network Information: DNS"
+    tactic: reconnaissance
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'nltest /dsgetdc:.'
+
+  - attack_id: "T1590.004"
+    name: "Gather Victim Network Information: Network Topology"
+    tactic: reconnaissance
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'route print'
+
+  - attack_id: "T1590.005"
+    name: "Gather Victim Network Information: IP Addresses"
+    tactic: reconnaissance
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'ipconfig /all'
+
+  - attack_id: "T1592.001"
+    name: "Gather Victim Host Information: Hardware"
+    tactic: reconnaissance
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer,Model,TotalPhysicalMemory,NumberOfProcessors'
+
+  - attack_id: "T1563"
+    name: "Remote Service Session Hijacking"
+    tactic: lateral-movement
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'qwinsta'
+
+  - attack_id: "T1563.002"
+    name: "Remote Service Session Hijacking: RDP Hijacking"
+    tactic: lateral-movement
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'query session'
+
+  - attack_id: "T1652"
+    name: "Device Driver Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'driverquery /fo csv'
+
+  - attack_id: "T1087.004"
+    name: "Account Discovery: Cloud Account"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem $env:USERPROFILE\.aws -ErrorAction SilentlyContinue | Select-Object Name,FullName'
+
+  - attack_id: "T1069.003"
+    name: "Permission Groups Discovery: Cloud Groups"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem $env:USERPROFILE\.azure -ErrorAction SilentlyContinue | Select-Object Name,FullName'
+
+  - attack_id: "T1538"
+    name: "Cloud Service Dashboard"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'az account list --output table'
+
+  - attack_id: "T1526"
+    name: "Cloud Service Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'az resource list --output table'
+
+  - attack_id: "T1580"
+    name: "Cloud Infrastructure Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'aws ec2 describe-instances --query Reservations[].Instances[].[InstanceId,InstanceType,State.Name,PublicIpAddress] --output table'
+
+  - attack_id: "T1619"
+    name: "Cloud Storage Object Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'aws s3 ls'
+
+  - attack_id: "T1613"
+    name: "Container and Resource Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'az container list --output table'
+
+  - attack_id: "T1069"
+    name: "Permission Groups Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'dsquery group -limit 0'
+
+  - attack_id: "T1087"
+    name: "Account Discovery"
+    tactic: discovery
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'dsquery user -limit 0'
+
+  - attack_id: "T1615"
+    name: "Group Policy Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-GPO -All | Select-Object DisplayName,GpoStatus,CreationTime,ModificationTime'
+
+  - attack_id: "T1558.003"
+    name: "Steal or Forge Kerberos Tickets: Kerberoasting"
+    tactic: credential-access
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ADUser -Filter {ServicePrincipalName -ne $null} -Properties ServicePrincipalName | Select-Object Name,ServicePrincipalName'
+
+  - attack_id: "T1558.004"
+    name: "Steal or Forge Kerberos Tickets: AS-REP Roasting"
+    tactic: credential-access
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true} -Properties DoesNotRequirePreAuth | Select-Object Name,SamAccountName'
+
+  - attack_id: "T1078.002"
+    name: "Valid Accounts: Domain Accounts"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ADUser -Filter {Enabled -eq true} -Properties LastLogonDate | Select-Object Name,SamAccountName,LastLogonDate | Sort-Object LastLogonDate -Descending'
+
+  - attack_id: "T1552.006"
+    name: "Unsecured Credentials: Group Policy Preferences"
+    tactic: credential-access
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem \\$env:USERDNSDOMAIN\SYSVOL -Recurse -Filter Groups.xml -ErrorAction SilentlyContinue | Select-Object FullName'
+
+  - attack_id: "T1555"
+    name: "Credentials from Password Stores"
+    tactic: credential-access
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'cmdkey /list'
+
+  - attack_id: "T1555.004"
+    name: "Credentials from Password Stores: Windows Credential Manager"
+    tactic: credential-access
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'vaultcmd /list'
+
+  - attack_id: "T1555.003"
+    name: "Credentials from Password Stores: Credentials from Web Browsers"
+    tactic: credential-access
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem $env:LOCALAPPDATA\Google\Chrome\User*\Default -Filter Login*Data -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime'
+
+  - attack_id: "T1552.001"
+    name: "Unsecured Credentials: Credentials In Files"
+    tactic: credential-access
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem $env:USERPROFILE -Recurse -Include *.xml,*.ini,*.txt -ErrorAction SilentlyContinue | Select-String -Pattern password -SimpleMatch | Select-Object Path, LineNumber'
+
+  - attack_id: "T1552.002"
+    name: "Unsecured Credentials: Credentials in Registry"
+    tactic: credential-access
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'reg query HKLM\SOFTWARE\OpenSSH'
+
+  - attack_id: "T1552.004"
+    name: "Unsecured Credentials: Private Keys"
+    tactic: credential-access
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem C:\Users -Recurse -Include *.pem,*.key,*.pfx,*.p12,*.ppk -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime'
+
+  - attack_id: "T1115"
+    name: "Clipboard Data"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-Clipboard'
+
+  - attack_id: "T1039"
+    name: "Data from Network Shared Drive"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem \\$env:COMPUTERNAME\C$ -ErrorAction SilentlyContinue | Select-Object Name,FullName,LastWriteTime'
+
+  - attack_id: "T1119"
+    name: "Automated Collection"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem C:\Users -Recurse -Include *.docx,*.xlsx,*.pdf -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime,Length'
+
+  - attack_id: "T1113"
+    name: "Screen Capture"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-CimInstance Win32_DesktopMonitor | Select-Object Name,ScreenWidth,ScreenHeight'
+
+  - attack_id: "T1074.001"
+    name: "Data Staged: Local Data Staging"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem $env:TEMP -ErrorAction SilentlyContinue | Select-Object Name,FullName,LastWriteTime,Length | Sort-Object LastWriteTime -Descending'
+
+  - attack_id: "T1560.001"
+    name: "Archive Collected Data: Archive via Utility"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem C:\Users -Recurse -Include *.zip,*.7z,*.rar,*.tar -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime,Length'
+
+  - attack_id: "T1053.002"
+    name: "Scheduled Task/Job: At"
+    tactic: persistence
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'schtasks /query /fo LIST /v'
+
+  - attack_id: "T1543.003"
+    name: "Create or Modify System Process: Windows Service"
+    tactic: persistence
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'sc query type= all state= all'
+
+  - attack_id: "T1547.004"
+    name: "Boot or Logon Autostart Execution: Winlogon Helper DLL"
+    tactic: persistence
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Winlogon'
+
+  - attack_id: "T1547.009"
+    name: "Boot or Logon Autostart Execution: Shortcut Modification"
+    tactic: persistence
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem $env:APPDATA\Microsoft\Windows\Start*Menu\Programs\Startup'
+
+  - attack_id: "T1546.003"
+    name: "Event Triggered Execution: Windows Management Instrumentation Event Subscription"
+    tactic: persistence
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-CimInstance -Namespace root\subscription -ClassName __EventFilter | Select-Object Name, Query'
+
+  - attack_id: "T1546.012"
+    name: "Event Triggered Execution: Image File Execution Options Injection"
+    tactic: persistence
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Image*'
+
+  - attack_id: "T1562.001"
+    name: "Impair Defenses: Disable or Modify Tools"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-MpPreference | Select-Object DisableRealtimeMonitoring, DisableBehaviorMonitoring, DisableIOAVProtection, DisableScriptScanning'
+
+  - attack_id: "T1562.004"
+    name: "Impair Defenses: Disable or Modify System Firewall"
+    tactic: defense-evasion
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'netsh advfirewall show allprofiles state'
+
+  - attack_id: "T1562.006"
+    name: "Impair Defenses: Indicator Blocking"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-MpPreference | Select-Object ExclusionPath, ExclusionExtension, ExclusionProcess, ExclusionIpAddress'
+
+  - attack_id: "T1547.010"
+    name: "Boot or Logon Autostart Execution: Port Monitors"
+    tactic: persistence
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'reg query HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors'
+
+  - attack_id: "T1547.014"
+    name: "Boot or Logon Autostart Execution: Active Setup"
+    tactic: persistence
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem HKLM:\SOFTWARE\Microsoft\Active*Setup\Installed*Components'
+
+  - attack_id: "T1059.004"
+    name: "Command and Scripting Interpreter: Unix Shell"
+    tactic: execution
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'id'
+
+  - attack_id: "T1059.006"
+    name: "Command and Scripting Interpreter: Python"
+    tactic: execution
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'python3 --version'
+
+  - attack_id: "T1070.003"
+    name: "Indicator Removal: Clear Command History"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-Content (Get-PSReadlineOption).HistorySavePath -ErrorAction SilentlyContinue | Select-Object -Last 20'
+
+  - attack_id: "T1134"
+    name: "Access Token Manipulation"
+    tactic: defense-evasion
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'whoami /all'
+
+  - attack_id: "T1134.001"
+    name: "Access Token Manipulation: Token Impersonation/Theft"
+    tactic: defense-evasion
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'whoami /priv'
+
+  - attack_id: "T1530"
+    name: "Data from Cloud Storage"
+    tactic: collection
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'aws s3api list-buckets --output table'
+
+  - attack_id: "T1213"
+    name: "Data from Information Repositories"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem \\$env:LOGONSERVER\SYSVOL -ErrorAction SilentlyContinue | Select-Object Name,FullName'
+
+  - attack_id: "T1025"
+    name: "Data from Removable Media"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-Volume | Where-Object DriveType -eq Removable | Select-Object DriveLetter,FileSystemLabel,Size'
+
+  - attack_id: "T1602"
+    name: "Data from Configuration Repository"
+    tactic: collection
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'wmic computersystem get Name,Domain,Workgroup'
+
+  - attack_id: "T1219"
+    name: "Remote Access Software"
+    tactic: command-and-control
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-Process | Where-Object Name -in teamviewer,anydesk,vncviewer,radmin | Select-Object Name,Id,Path'
+
+  - attack_id: "T1027"
+    name: "Obfuscated Files or Information"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem $env:TEMP -Recurse -Include *.ps1,*.bat,*.vbs -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime'
+
+  - attack_id: "T1553.004"
+    name: "Subvert Trust Controls: Install Root Certificate"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem Cert:\LocalMachine\Root | Select-Object Subject,Thumbprint,NotAfter | Sort-Object NotAfter'
+
+  - attack_id: "T1547.006"
+    name: "Boot or Logon Autostart Execution: Kernel Modules and Extensions"
+    tactic: persistence
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'sc query type= driver state= running'
+
+  - attack_id: "T1078.001"
+    name: "Valid Accounts: Default Accounts"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-LocalUser | Where-Object {$_.Name -in Administrator,Guest,DefaultAccount} | Select-Object Name,Enabled,LastLogon'
+
+  - attack_id: "T1078.003"
+    name: "Valid Accounts: Local Accounts"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-LocalUser | Select-Object Name,Enabled,PasswordLastSet,LastLogon'
+
+  - attack_id: "T1649"
+    name: "Steal or Forge Authentication Certificates"
+    tactic: credential-access
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-ChildItem Cert:\CurrentUser\My | Select-Object Subject,Thumbprint,NotAfter'
+
+  - attack_id: "T1564.002"
+    name: "Hide Artifacts: Hidden Users"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-LocalUser | Select-Object Name,Enabled,Description | Sort-Object Name'
+
+  - attack_id: "T1564.003"
+    name: "Hide Artifacts: Hidden Window"
+    tactic: defense-evasion
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: 'Get-Process | Where-Object MainWindowHandle -eq 0 | Select-Object Name,Id,StartTime'

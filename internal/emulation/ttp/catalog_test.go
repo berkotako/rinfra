@@ -128,13 +128,16 @@ func TestDefaultCatalog_LoadedAndConsistent(t *testing.T) {
 	}
 }
 
-// TestCompile_EnumerationEntries checks the read-only enumeration TTPs added to
-// the catalog resolve to a powershell primitive with a default command (so they
-// render on every framework that supports PrimPowerShell).
+// TestCompile_EnumerationEntries spot-checks that a sample of the read-only
+// enumeration TTPs resolve to a powershell primitive with a default command (so
+// they render on every framework that supports PrimPowerShell).
 func TestCompile_EnumerationEntries(t *testing.T) {
 	ids := []string{
 		"T1087.002", "T1069.002", "T1482", "T1201", "T1033", "T1124",
 		"T1012", "T1518.001", "T1518", "T1614.001", "T1217", "T1087.003",
+		// Panel-authored read-only enumeration batch (28 -> 100).
+		"T1016.001", "T1046", "T1134", "T1555", "T1552.001", "T1115",
+		"T1547.004", "T1546.012", "T1562.001", "T1078.003",
 	}
 	for _, id := range ids {
 		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
@@ -142,18 +145,36 @@ func TestCompile_EnumerationEntries(t *testing.T) {
 			t.Errorf("%s: Compile ok=%v err=%v, want a clean mapping", id, ok, err)
 			continue
 		}
-		if prim.Kind != c2.PrimPowerShell {
-			t.Errorf("%s: primitive = %q, want powershell", id, prim.Kind)
+		// Read-only enumeration renders through a shell on every framework, as
+		// either a PowerShell script or a native shell command.
+		if prim.Kind != c2.PrimPowerShell && prim.Kind != c2.PrimShell {
+			t.Errorf("%s: primitive = %q, want powershell or shell", id, prim.Kind)
 		}
-		script := prim.Arg("script")
-		if script == "" {
-			t.Errorf("%s: expected a default script command", id)
+		if prim.Arg("script") == "" && prim.Arg("command") == "" {
+			t.Errorf("%s: expected a default script/command", id)
 		}
-		// Quote-free: the Metasploit renderer wraps the script as -a '-c "<script>"',
-		// so an inner quote (single or double) breaks the command. Keep the
-		// enumeration defaults quote-free so they render on every framework.
-		if strings.ContainsAny(script, `"'`) {
-			t.Errorf("%s: default script %q must not contain quotes (breaks the Metasploit renderer)", id, script)
+	}
+}
+
+// TestCatalog_DefaultsAreQuoteFree guards the whole catalog: every powershell/
+// shell default command must be quote-free. The Metasploit renderer wraps the
+// command as -a '-c "<cmd>"', so any inner quote (single breaks the outer -a
+// '...', double breaks the inner -c "...") breaks the command — keeping every
+// default quote-free is what lets a single catalog entry render on every
+// framework. This auto-covers new entries so the invariant can't silently rot.
+func TestCatalog_DefaultsAreQuoteFree(t *testing.T) {
+	for _, id := range ttp.Default().AttackIDs() {
+		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
+		if !ok || err != nil {
+			continue // resolution is covered by TestCompile_EveryCatalogEntryResolves
+		}
+		if prim.Kind != c2.PrimPowerShell && prim.Kind != c2.PrimShell {
+			continue
+		}
+		for _, key := range []string{"script", "command"} {
+			if v := prim.Arg(key); strings.ContainsAny(v, `"'`) {
+				t.Errorf("%s: default %s %q must not contain quotes (breaks the Metasploit renderer)", id, key, v)
+			}
 		}
 	}
 }
