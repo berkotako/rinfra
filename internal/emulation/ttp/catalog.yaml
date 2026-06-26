@@ -11,6 +11,7 @@
 #   attack_id: "T1059.001"        # ATT&CK technique ID (dispatch key; required)
 #   name:      "..."              # human-readable (optional, documentation)
 #   tactic:    execution          # ATT&CK tactic slug (optional, documentation)
+#   risk:      safe               # danger tag (required): safe | caution | dangerous
 #   primitive: powershell         # one of the c2.PrimitiveKind values (required)
 #   args:                         # optional; resolved into Primitive.Args
 #     <arg_name>:
@@ -18,12 +19,26 @@
 #       default:  <value>         # used when the input is absent/empty (optional)
 #       required: true            # error if unresolved (optional, default false)
 #
+# risk is a senior-red-team-panel assessment of each technique's REALISTIC
+# operational risk (detection footprint, credential/data exposure, blast radius,
+# OPSEC/authorization sensitivity); the most conservative lens wins. It is
+# metadata only — it does NOT gate execution today (every technique here is
+# read-only enumeration) — but a scope policy or the UI can warn on caution/
+# dangerous before an operator runs a sensitive technique in a live engagement.
+#   safe      — routine read-only recon; negligible footprint and scope.
+#   caution   — read-only but sensitive: credential/AD/cloud/security-tool
+#               surfaces, remote shares, or heavy recursive scans.
+#   dangerous — adversary-equivalent (cloud-IAM/metadata or plaintext-secret
+#               exposure, domain-wide AD dumps, Kerberoasting) OR backed by a
+#               state-changing primitive (registry_run_key, scheduled_task).
+#
 # No payload content, shellcode, or exploit material belongs in this file — only
 # the portable verb + the parameters the technique supplies.
 techniques:
   - attack_id: "T1059.001"
     name: "Command and Scripting Interpreter: PowerShell"
     tactic: execution
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -33,6 +48,7 @@ techniques:
   - attack_id: "T1059.003"
     name: "Command and Scripting Interpreter: Windows Command Shell"
     tactic: execution
+    risk: safe
     primitive: shell
     args:
       command:
@@ -42,26 +58,31 @@ techniques:
   - attack_id: "T1082"
     name: "System Information Discovery"
     tactic: discovery
+    risk: safe
     primitive: sysinfo
 
   - attack_id: "T1057"
     name: "Process Discovery"
     tactic: discovery
+    risk: safe
     primitive: process_list
 
   - attack_id: "T1049"
     name: "System Network Connections Discovery"
     tactic: discovery
+    risk: safe
     primitive: net_connections
 
   - attack_id: "T1016"
     name: "System Network Configuration Discovery"
     tactic: discovery
+    risk: safe
     primitive: net_config
 
   - attack_id: "T1083"
     name: "File and Directory Discovery"
     tactic: discovery
+    risk: caution
     primitive: file_list
     args:
       # No default here: the listing root is framework-specific (e.g. "." on
@@ -73,6 +94,7 @@ techniques:
   - attack_id: "T1005"
     name: "Data from Local System"
     tactic: collection
+    risk: caution
     primitive: download
     args:
       path:
@@ -82,6 +104,7 @@ techniques:
   - attack_id: "T1053.005"
     name: "Scheduled Task/Job: Scheduled Task"
     tactic: persistence
+    risk: dangerous
     primitive: scheduled_task
     args:
       task_name:
@@ -91,6 +114,7 @@ techniques:
   - attack_id: "T1547.001"
     name: "Boot or Logon Autostart Execution: Registry Run Keys"
     tactic: persistence
+    risk: dangerous
     primitive: registry_run_key
     args:
       registry_key:
@@ -105,26 +129,31 @@ techniques:
   - attack_id: "T1018"
     name: "Remote System Discovery"
     tactic: discovery
+    risk: caution
     primitive: remote_system_discovery
 
   - attack_id: "T1087.001"
     name: "Account Discovery: Local Account"
     tactic: discovery
+    risk: safe
     primitive: account_discovery
 
   - attack_id: "T1069.001"
     name: "Permission Groups Discovery: Local Groups"
     tactic: discovery
+    risk: safe
     primitive: permission_group_discovery
 
   - attack_id: "T1007"
     name: "System Service Discovery"
     tactic: discovery
+    risk: safe
     primitive: service_discovery
 
   - attack_id: "T1135"
     name: "Network Share Discovery"
     tactic: discovery
+    risk: caution
     primitive: network_share_discovery
 
   # --- Read-only enumeration TTPs ---
@@ -139,6 +168,7 @@ techniques:
   - attack_id: "T1087.002"
     name: "Account Discovery: Domain Account"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -148,6 +178,7 @@ techniques:
   - attack_id: "T1069.002"
     name: "Permission Groups Discovery: Domain Groups"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -160,6 +191,7 @@ techniques:
   - attack_id: "T1482"
     name: "Domain Trust Discovery"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -169,6 +201,7 @@ techniques:
   - attack_id: "T1201"
     name: "Password Policy Discovery"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -178,6 +211,7 @@ techniques:
   - attack_id: "T1033"
     name: "System Owner/User Discovery"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -187,6 +221,7 @@ techniques:
   - attack_id: "T1124"
     name: "System Time Discovery"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -196,6 +231,7 @@ techniques:
   - attack_id: "T1012"
     name: "Query Registry"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -205,6 +241,7 @@ techniques:
   - attack_id: "T1518.001"
     name: "Security Software Discovery"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -214,6 +251,7 @@ techniques:
   - attack_id: "T1518"
     name: "Software Discovery"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -223,6 +261,7 @@ techniques:
   - attack_id: "T1614.001"
     name: "System Location Discovery: System Language Discovery"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -232,6 +271,7 @@ techniques:
   - attack_id: "T1217"
     name: "Browser Information Discovery"
     tactic: collection
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -243,6 +283,7 @@ techniques:
   - attack_id: "T1087.003"
     name: "Account Discovery: Email Account"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -256,6 +297,7 @@ techniques:
   - attack_id: "T1016.001"
     name: "System Network Configuration Discovery: Internet Connection Discovery"
     tactic: discovery
+    risk: caution
     primitive: shell
     args:
       command:
@@ -265,6 +307,7 @@ techniques:
   - attack_id: "T1016.002"
     name: "System Network Configuration Discovery: Wi-Fi Discovery"
     tactic: discovery
+    risk: caution
     primitive: shell
     args:
       command:
@@ -274,6 +317,7 @@ techniques:
   - attack_id: "T1614"
     name: "System Location Discovery"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -283,6 +327,7 @@ techniques:
   - attack_id: "T1497.001"
     name: "Virtualization/Sandbox Evasion: System Checks"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -292,6 +337,7 @@ techniques:
   - attack_id: "T1497.003"
     name: "Virtualization/Sandbox Evasion: Time Based Evasion"
     tactic: defense-evasion
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -301,6 +347,7 @@ techniques:
   - attack_id: "T1622"
     name: "Debugger Evasion"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -310,6 +357,7 @@ techniques:
   - attack_id: "T1010"
     name: "Application Window Discovery"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -319,6 +367,7 @@ techniques:
   - attack_id: "T1120"
     name: "Peripheral Device Discovery"
     tactic: discovery
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -328,6 +377,7 @@ techniques:
   - attack_id: "T1046"
     name: "Network Service Discovery"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -337,6 +387,7 @@ techniques:
   - attack_id: "T1590.001"
     name: "Gather Victim Network Information: Domain Properties"
     tactic: reconnaissance
+    risk: caution
     primitive: shell
     args:
       command:
@@ -346,6 +397,7 @@ techniques:
   - attack_id: "T1590.002"
     name: "Gather Victim Network Information: DNS"
     tactic: reconnaissance
+    risk: caution
     primitive: shell
     args:
       command:
@@ -355,6 +407,7 @@ techniques:
   - attack_id: "T1590.004"
     name: "Gather Victim Network Information: Network Topology"
     tactic: reconnaissance
+    risk: safe
     primitive: shell
     args:
       command:
@@ -364,6 +417,7 @@ techniques:
   - attack_id: "T1590.005"
     name: "Gather Victim Network Information: IP Addresses"
     tactic: reconnaissance
+    risk: safe
     primitive: shell
     args:
       command:
@@ -373,6 +427,7 @@ techniques:
   - attack_id: "T1592.001"
     name: "Gather Victim Host Information: Hardware"
     tactic: reconnaissance
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -382,6 +437,7 @@ techniques:
   - attack_id: "T1563"
     name: "Remote Service Session Hijacking"
     tactic: lateral-movement
+    risk: caution
     primitive: shell
     args:
       command:
@@ -391,6 +447,7 @@ techniques:
   - attack_id: "T1563.002"
     name: "Remote Service Session Hijacking: RDP Hijacking"
     tactic: lateral-movement
+    risk: caution
     primitive: shell
     args:
       command:
@@ -400,6 +457,7 @@ techniques:
   - attack_id: "T1652"
     name: "Device Driver Discovery"
     tactic: discovery
+    risk: safe
     primitive: shell
     args:
       command:
@@ -409,6 +467,7 @@ techniques:
   - attack_id: "T1087.004"
     name: "Account Discovery: Cloud Account"
     tactic: discovery
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -418,6 +477,7 @@ techniques:
   - attack_id: "T1069.003"
     name: "Permission Groups Discovery: Cloud Groups"
     tactic: discovery
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -427,6 +487,7 @@ techniques:
   - attack_id: "T1538"
     name: "Cloud Service Dashboard"
     tactic: discovery
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -436,6 +497,7 @@ techniques:
   - attack_id: "T1526"
     name: "Cloud Service Discovery"
     tactic: discovery
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -445,6 +507,7 @@ techniques:
   - attack_id: "T1580"
     name: "Cloud Infrastructure Discovery"
     tactic: discovery
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -454,6 +517,7 @@ techniques:
   - attack_id: "T1619"
     name: "Cloud Storage Object Discovery"
     tactic: discovery
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -463,6 +527,7 @@ techniques:
   - attack_id: "T1613"
     name: "Container and Resource Discovery"
     tactic: discovery
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -472,6 +537,7 @@ techniques:
   - attack_id: "T1069"
     name: "Permission Groups Discovery"
     tactic: discovery
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -481,6 +547,7 @@ techniques:
   - attack_id: "T1087"
     name: "Account Discovery"
     tactic: discovery
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -490,6 +557,7 @@ techniques:
   - attack_id: "T1615"
     name: "Group Policy Discovery"
     tactic: discovery
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -499,6 +567,7 @@ techniques:
   - attack_id: "T1558.003"
     name: "Steal or Forge Kerberos Tickets: Kerberoasting"
     tactic: credential-access
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -508,6 +577,7 @@ techniques:
   - attack_id: "T1558.004"
     name: "Steal or Forge Kerberos Tickets: AS-REP Roasting"
     tactic: credential-access
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -517,6 +587,7 @@ techniques:
   - attack_id: "T1078.002"
     name: "Valid Accounts: Domain Accounts"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -526,6 +597,7 @@ techniques:
   - attack_id: "T1552.006"
     name: "Unsecured Credentials: Group Policy Preferences"
     tactic: credential-access
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -535,6 +607,7 @@ techniques:
   - attack_id: "T1555"
     name: "Credentials from Password Stores"
     tactic: credential-access
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -544,6 +617,7 @@ techniques:
   - attack_id: "T1555.004"
     name: "Credentials from Password Stores: Windows Credential Manager"
     tactic: credential-access
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -553,6 +627,7 @@ techniques:
   - attack_id: "T1555.003"
     name: "Credentials from Password Stores: Credentials from Web Browsers"
     tactic: credential-access
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -562,6 +637,7 @@ techniques:
   - attack_id: "T1552.001"
     name: "Unsecured Credentials: Credentials In Files"
     tactic: credential-access
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -571,6 +647,7 @@ techniques:
   - attack_id: "T1552.002"
     name: "Unsecured Credentials: Credentials in Registry"
     tactic: credential-access
+    risk: caution
     primitive: shell
     args:
       command:
@@ -580,6 +657,7 @@ techniques:
   - attack_id: "T1552.004"
     name: "Unsecured Credentials: Private Keys"
     tactic: credential-access
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -589,6 +667,7 @@ techniques:
   - attack_id: "T1115"
     name: "Clipboard Data"
     tactic: collection
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -598,6 +677,7 @@ techniques:
   - attack_id: "T1039"
     name: "Data from Network Shared Drive"
     tactic: collection
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -607,6 +687,7 @@ techniques:
   - attack_id: "T1119"
     name: "Automated Collection"
     tactic: collection
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -616,6 +697,7 @@ techniques:
   - attack_id: "T1113"
     name: "Screen Capture"
     tactic: collection
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -625,6 +707,7 @@ techniques:
   - attack_id: "T1074.001"
     name: "Data Staged: Local Data Staging"
     tactic: collection
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -634,6 +717,7 @@ techniques:
   - attack_id: "T1560.001"
     name: "Archive Collected Data: Archive via Utility"
     tactic: collection
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -643,6 +727,7 @@ techniques:
   - attack_id: "T1053.002"
     name: "Scheduled Task/Job: At"
     tactic: persistence
+    risk: safe
     primitive: shell
     args:
       command:
@@ -652,6 +737,7 @@ techniques:
   - attack_id: "T1543.003"
     name: "Create or Modify System Process: Windows Service"
     tactic: persistence
+    risk: safe
     primitive: shell
     args:
       command:
@@ -661,6 +747,7 @@ techniques:
   - attack_id: "T1547.004"
     name: "Boot or Logon Autostart Execution: Winlogon Helper DLL"
     tactic: persistence
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -670,6 +757,7 @@ techniques:
   - attack_id: "T1547.009"
     name: "Boot or Logon Autostart Execution: Shortcut Modification"
     tactic: persistence
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -679,6 +767,7 @@ techniques:
   - attack_id: "T1546.003"
     name: "Event Triggered Execution: Windows Management Instrumentation Event Subscription"
     tactic: persistence
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -688,6 +777,7 @@ techniques:
   - attack_id: "T1546.012"
     name: "Event Triggered Execution: Image File Execution Options Injection"
     tactic: persistence
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -697,6 +787,7 @@ techniques:
   - attack_id: "T1562.001"
     name: "Impair Defenses: Disable or Modify Tools"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -706,6 +797,7 @@ techniques:
   - attack_id: "T1562.004"
     name: "Impair Defenses: Disable or Modify System Firewall"
     tactic: defense-evasion
+    risk: caution
     primitive: shell
     args:
       command:
@@ -715,6 +807,7 @@ techniques:
   - attack_id: "T1562.006"
     name: "Impair Defenses: Indicator Blocking"
     tactic: defense-evasion
+    risk: dangerous
     primitive: powershell
     args:
       script:
@@ -724,6 +817,7 @@ techniques:
   - attack_id: "T1547.010"
     name: "Boot or Logon Autostart Execution: Port Monitors"
     tactic: persistence
+    risk: caution
     primitive: shell
     args:
       command:
@@ -733,6 +827,7 @@ techniques:
   - attack_id: "T1547.014"
     name: "Boot or Logon Autostart Execution: Active Setup"
     tactic: persistence
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -742,6 +837,7 @@ techniques:
   - attack_id: "T1059.004"
     name: "Command and Scripting Interpreter: Unix Shell"
     tactic: execution
+    risk: safe
     primitive: shell
     args:
       command:
@@ -751,6 +847,7 @@ techniques:
   - attack_id: "T1059.006"
     name: "Command and Scripting Interpreter: Python"
     tactic: execution
+    risk: safe
     primitive: shell
     args:
       command:
@@ -760,6 +857,7 @@ techniques:
   - attack_id: "T1070.003"
     name: "Indicator Removal: Clear Command History"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -769,6 +867,7 @@ techniques:
   - attack_id: "T1134"
     name: "Access Token Manipulation"
     tactic: defense-evasion
+    risk: safe
     primitive: shell
     args:
       command:
@@ -778,6 +877,7 @@ techniques:
   - attack_id: "T1134.001"
     name: "Access Token Manipulation: Token Impersonation/Theft"
     tactic: defense-evasion
+    risk: safe
     primitive: shell
     args:
       command:
@@ -787,6 +887,7 @@ techniques:
   - attack_id: "T1530"
     name: "Data from Cloud Storage"
     tactic: collection
+    risk: dangerous
     primitive: shell
     args:
       command:
@@ -796,6 +897,7 @@ techniques:
   - attack_id: "T1213"
     name: "Data from Information Repositories"
     tactic: collection
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -805,6 +907,7 @@ techniques:
   - attack_id: "T1025"
     name: "Data from Removable Media"
     tactic: collection
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -814,6 +917,7 @@ techniques:
   - attack_id: "T1602"
     name: "Data from Configuration Repository"
     tactic: collection
+    risk: safe
     primitive: shell
     args:
       command:
@@ -823,6 +927,7 @@ techniques:
   - attack_id: "T1219"
     name: "Remote Access Software"
     tactic: command-and-control
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -832,6 +937,7 @@ techniques:
   - attack_id: "T1027"
     name: "Obfuscated Files or Information"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -841,6 +947,7 @@ techniques:
   - attack_id: "T1553.004"
     name: "Subvert Trust Controls: Install Root Certificate"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -850,6 +957,7 @@ techniques:
   - attack_id: "T1547.006"
     name: "Boot or Logon Autostart Execution: Kernel Modules and Extensions"
     tactic: persistence
+    risk: caution
     primitive: shell
     args:
       command:
@@ -859,6 +967,7 @@ techniques:
   - attack_id: "T1078.001"
     name: "Valid Accounts: Default Accounts"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -868,6 +977,7 @@ techniques:
   - attack_id: "T1078.003"
     name: "Valid Accounts: Local Accounts"
     tactic: defense-evasion
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -877,6 +987,7 @@ techniques:
   - attack_id: "T1649"
     name: "Steal or Forge Authentication Certificates"
     tactic: credential-access
+    risk: caution
     primitive: powershell
     args:
       script:
@@ -886,6 +997,7 @@ techniques:
   - attack_id: "T1564.002"
     name: "Hide Artifacts: Hidden Users"
     tactic: defense-evasion
+    risk: safe
     primitive: powershell
     args:
       script:
@@ -895,8 +1007,41 @@ techniques:
   - attack_id: "T1564.003"
     name: "Hide Artifacts: Hidden Window"
     tactic: defense-evasion
+    risk: safe
     primitive: powershell
     args:
       script:
         from: command
         default: 'Get-Process | Where-Object MainWindowHandle -eq 0 | Select-Object Name,Id,StartTime'
+
+  # --- Top-up to 100+ real entries (read-only; panel-reviewed) ---
+
+  - attack_id: "T1552.005"
+    name: "Unsecured Credentials: Cloud Instance Metadata API"
+    tactic: credential-access
+    risk: dangerous
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'curl -s http://169.254.169.254/latest/meta-data/'
+
+  - attack_id: "T1552.003"
+    name: "Unsecured Credentials: Bash History"
+    tactic: credential-access
+    risk: dangerous
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'cat $HOME/.bash_history'
+
+  - attack_id: "T1547.002"
+    name: "Boot or Logon Autostart Execution: Authentication Package"
+    tactic: persistence
+    risk: caution
+    primitive: shell
+    args:
+      command:
+        from: command
+        default: 'reg query HKLM\SYSTEM\CurrentControlSet\Control\Lsa'
