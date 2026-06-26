@@ -1,6 +1,7 @@
 package ttp_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rinfra/rinfra/internal/c2"
@@ -144,8 +145,15 @@ func TestCompile_EnumerationEntries(t *testing.T) {
 		if prim.Kind != c2.PrimPowerShell {
 			t.Errorf("%s: primitive = %q, want powershell", id, prim.Kind)
 		}
-		if prim.Arg("script") == "" {
+		script := prim.Arg("script")
+		if script == "" {
 			t.Errorf("%s: expected a default script command", id)
+		}
+		// Quote-free: the Metasploit renderer wraps the script as -a '-c "<script>"',
+		// so an inner quote (single or double) breaks the command. Keep the
+		// enumeration defaults quote-free so they render on every framework.
+		if strings.ContainsAny(script, `"'`) {
+			t.Errorf("%s: default script %q must not contain quotes (breaks the Metasploit renderer)", id, script)
 		}
 	}
 }
