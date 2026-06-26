@@ -126,3 +126,42 @@ func TestDefaultCatalog_LoadedAndConsistent(t *testing.T) {
 		t.Error("Has() should be false for an unmapped ID")
 	}
 }
+
+// TestCompile_EnumerationEntries checks the read-only enumeration TTPs added to
+// the catalog resolve to a powershell primitive with a default command (so they
+// render on every framework that supports PrimPowerShell).
+func TestCompile_EnumerationEntries(t *testing.T) {
+	ids := []string{
+		"T1087.002", "T1069.002", "T1482", "T1201", "T1033", "T1124",
+		"T1012", "T1518.001", "T1518", "T1614.001", "T1217", "T1087.003",
+	}
+	for _, id := range ids {
+		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
+		if err != nil || !ok {
+			t.Errorf("%s: Compile ok=%v err=%v, want a clean mapping", id, ok, err)
+			continue
+		}
+		if prim.Kind != c2.PrimPowerShell {
+			t.Errorf("%s: primitive = %q, want powershell", id, prim.Kind)
+		}
+		if prim.Arg("script") == "" {
+			t.Errorf("%s: expected a default script command", id)
+		}
+	}
+}
+
+// TestCompile_EveryCatalogEntryResolves guards the whole catalog: every mapped
+// ATT&CK ID compiles to a valid primitive (mapping found; a non-nil error is only
+// allowed for entries with a required input that has no default).
+func TestCompile_EveryCatalogEntryResolves(t *testing.T) {
+	for _, id := range ttp.Default().AttackIDs() {
+		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})
+		if !ok {
+			t.Errorf("%s: no mapping (ok=false)", id)
+			continue
+		}
+		if err == nil && prim.Kind == "" {
+			t.Errorf("%s: compiled to an empty primitive kind", id)
+		}
+	}
+}

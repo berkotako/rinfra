@@ -126,3 +126,120 @@ techniques:
     name: "Network Share Discovery"
     tactic: discovery
     primitive: network_share_discovery
+
+  # --- Read-only enumeration TTPs ---
+  #
+  # These reuse the existing `powershell` primitive (rendered by every framework),
+  # so they are pure catalog additions — no Go changes, available everywhere. Each
+  # runs a benign, native Windows enumeration built-in (net/reg/whoami/nltest/
+  # PowerShell cmdlet). They are READ-ONLY: no state is created, so no Reverter
+  # cleanup is needed (consistent with the "leave no orphaned artifacts"
+  # invariant). The command is operator-overridable via the `command` input.
+  # Domain-aware account/group enumeration (the most-requested AD coverage gap).
+  - attack_id: "T1087.002"
+    name: "Account Discovery: Domain Account"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: net user /domain
+
+  - attack_id: "T1069.002"
+    name: "Permission Groups Discovery: Domain Groups"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: net group "Domain Admins" /domain
+
+  - attack_id: "T1482"
+    name: "Domain Trust Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: nltest /domain_trusts
+
+  - attack_id: "T1201"
+    name: "Password Policy Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: net accounts
+
+  - attack_id: "T1033"
+    name: "System Owner/User Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: whoami /all
+
+  - attack_id: "T1124"
+    name: "System Time Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: w32tm /query /status
+
+  - attack_id: "T1012"
+    name: "Query Registry"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+
+  - attack_id: "T1518.001"
+    name: "Security Software Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: Get-MpComputerStatus | Select-Object AMRunningMode, AntivirusEnabled, RealTimeProtectionEnabled
+
+  - attack_id: "T1518"
+    name: "Software Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" | Select-Object DisplayName
+
+  - attack_id: "T1614.001"
+    name: "System Location Discovery: System Language Discovery"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: Get-WinSystemLocale
+
+  - attack_id: "T1217"
+    name: "Browser Information Discovery"
+    tactic: collection
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: Get-ChildItem -Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Bookmarks" -ErrorAction SilentlyContinue
+
+  - attack_id: "T1087.003"
+    name: "Account Discovery: Email Account"
+    tactic: discovery
+    primitive: powershell
+    args:
+      script:
+        from: command
+        default: reg query "HKCU\Software\Microsoft\Office\16.0\Outlook\Profiles" /s
