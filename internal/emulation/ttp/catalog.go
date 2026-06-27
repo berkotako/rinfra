@@ -36,11 +36,18 @@ type argBinding struct {
 
 // entry is one technique→primitive mapping in the catalog.
 type entry struct {
-	AttackID  string                `yaml:"attack_id"`
-	Name      string                `yaml:"name"`
-	Tactic    string                `yaml:"tactic"`
-	Primitive string                `yaml:"primitive"`
-	Args      map[string]argBinding `yaml:"args"`
+	AttackID  string `yaml:"attack_id"`
+	Name      string `yaml:"name"`
+	Tactic    string `yaml:"tactic"`
+	Primitive string `yaml:"primitive"`
+	// Risk is the operator-facing danger tag (safe|caution|dangerous), assigned
+	// by a senior red-team panel reviewing each technique's realistic risk
+	// (detection footprint, credential/data exposure, blast radius, OPSEC/
+	// authorization sensitivity) — most-conservative lens wins. It does not gate
+	// execution today; it is metadata a scope policy or UI can warn on before an
+	// operator runs a sensitive technique in a live (authorized) environment.
+	Risk string                `yaml:"risk"`
+	Args map[string]argBinding `yaml:"args"`
 }
 
 type catalogFile struct {
@@ -72,6 +79,20 @@ var validPrimitives = map[c2.PrimitiveKind]bool{
 	c2.PrimPermissionGroupDiscovery: true,
 	c2.PrimServiceDiscovery:         true,
 	c2.PrimShareDiscovery:           true,
+}
+
+// Risk levels a catalog entry may declare. Every entry must set one (an empty
+// or unknown risk fails to load) so the danger tag can never silently default.
+const (
+	RiskSafe      = "safe"      // routine read-only recon; negligible footprint/scope
+	RiskCaution   = "caution"   // read-only but sensitive: cred/AD/cloud/security-tool surfaces
+	RiskDangerous = "dangerous" // state-changing, destructive, or adversary-equivalent risk
+)
+
+var validRisks = map[string]bool{
+	RiskSafe:      true,
+	RiskCaution:   true,
+	RiskDangerous: true,
 }
 
 // builtin is the embedded catalog, loaded once at package init.
@@ -108,6 +129,9 @@ func load(fsys embed.FS) (*Catalog, error) {
 		}
 		if !validPrimitives[c2.PrimitiveKind(e.Primitive)] {
 			return nil, fmt.Errorf("technique %s: unknown primitive %q", e.AttackID, e.Primitive)
+		}
+		if !validRisks[e.Risk] {
+			return nil, fmt.Errorf("technique %s: risk %q must be one of safe|caution|dangerous", e.AttackID, e.Risk)
 		}
 		entries[e.AttackID] = e
 	}
@@ -163,6 +187,17 @@ func (c *Catalog) Lookup(attackID string) (name, tactic string, ok bool) {
 		return "", "", false
 	}
 	return e.Name, e.Tactic, true
+}
+
+// Risk returns the danger tag (safe|caution|dangerous) for an ATT&CK ID. ok is
+// false when the ID is not mapped. Consumers (scope policies, UI) use it to warn
+// before running a sensitive technique in a live environment.
+func (c *Catalog) Risk(attackID string) (risk string, ok bool) {
+	e, ok := c.entries[attackID]
+	if !ok {
+		return "", false
+	}
+	return e.Risk, true
 }
 
 // AttackIDs returns the ATT&CK IDs the catalog maps, unsorted.

@@ -1,0 +1,21 @@
+# Build context for Dockerfile.allinone (the single-container image that bundles
+# the web console + the Go API). BuildKit prefers this file over the global
+# .dockerignore when building with `-f Dockerfile.allinone`, so — unlike the
+# global ignore — it MUST keep web/ (the all-in-one image builds the console
+# from source). It only drops things that bloat the context or never belong in
+# an image.
+.git
+.github
+docs
+*.md
+.env
+.env.*
+postgres_data
+
+# Web build artifacts / deps (re-created inside the image by `npm ci`/`build`).
+web/node_modules
+web/.next
+web/out
+
+# Local IaC state, if any leaked into the checkout.
+.rinfra

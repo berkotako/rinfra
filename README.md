@@ -215,6 +215,22 @@ The install script generates `RINFRA_MASTER_KEY` into a local `.env` (see
 `.env.example`). Live cloud provisioning additionally needs the Pulumi CLI;
 see `cmd/rinfra-server` docs and `docs/RUNBOOK_DO.md`.
 
+### Remote droplet (DigitalOcean, single host with HTTPS)
+
+To host the platform on a fresh cloud VM rather than locally, use the
+DigitalOcean installer — it provisions Docker, swap, the firewall, and the
+**all-in-one** image (API + console on one origin) behind Caddy with automatic
+Let's Encrypt TLS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berkotako/rinfra/main/deploy/digitalocean/install.sh \
+  | bash -s -- --domain console.example.com
+```
+
+See [`deploy/digitalocean/README.md`](deploy/digitalocean/README.md) for sizing,
+options, updates, and enabling live provisioning. The same single-host pattern
+works on any Ubuntu VM (other clouds, on-prem).
+
 ### IaC backend (Pulumi or Terraform)
 
 Infrastructure can be provisioned by either **Pulumi** (default; embedded Go

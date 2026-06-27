@@ -103,7 +103,31 @@ _Last updated: 2026-06-22._
   `switch t.AttackID`); Scripted-tier allowlists are derived from
   catalog × renderer. The closed set now includes read-only discovery
   primitives (remote-system / account / permission-group / service / share
-  discovery) backed by safe Windows built-ins (`c2.DiscoveryCommand`).
+  discovery) backed by safe Windows built-ins (`c2.DiscoveryCommand`). The
+  catalog ships **102 ATT&CK techniques** — every entry resolves to a read-only
+  enumeration primitive (a native built-in / cloud-CLI list/query rendered on
+  every framework with a shell) and a **quote-free** default command (the
+  Metasploit renderer wraps it as `-a '-c "<cmd>"'`, so any quote breaks it;
+  `TestCatalog_DefaultsAreQuoteFree` enforces this catalog-wide).
+- **Per-technique risk tag** (`risk:` — required field, closed set
+  `safe|caution|dangerous`, validated at load, exposed via `Catalog.Risk(id)`):
+  a senior-red-team panel rated every technique's *realistic* operational risk
+  across four lenses — detection footprint, credential/data exposure, blast
+  radius/scope-creep, and OPSEC/authorization sensitivity — with the most
+  conservative lens winning. Current split: **34 safe / 44 caution / 24
+  dangerous**. `dangerous` covers adversary-equivalent reads (cloud-IAM/metadata
+  and plaintext-secret exposure, domain-wide AD dumps, Kerberoasting) and the
+  two state-changing primitives (`registry_run_key`, `scheduled_task`). The tag
+  is metadata only — it does **not** gate execution today (everything here is
+  read-only) — but a scope policy or the UI can warn before an operator runs a
+  caution/dangerous technique in a live (authorized) engagement; wiring it into
+  scope enforcement is the natural next increment.
+- **Mapping caveat:** several entries reuse a persistence/collection/defense-
+  evasion ATT&CK ID for the read-only *reconnaissance* of that artifact (e.g.
+  T1560.001 lists archive files rather than archiving, T1547.x reads an
+  autostart key rather than writing it). State-creating execution of those
+  techniques needs new write-capable primitives plus `c2.Reverter` cleanup
+  wiring — deliberately out of scope for safe auto-add (no orphaned artifacts).
 - **Fact-aware chaining** (`internal/emulation` `FactStore`/`Planner`): a run is
   an atomic planner — a technique's output is parsed into a per-run fact store
   (routable IPs → `host.ip`), later techniques substitute `${fact.key}` into
