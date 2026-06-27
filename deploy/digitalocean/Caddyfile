@@ -1,0 +1,27 @@
+# RInfra reverse proxy.
+#
+# RINFRA_SITE_ADDRESS controls the site:
+#   - a domain (e.g. console.example.com) → Caddy auto-provisions a Let's Encrypt
+#     cert and serves HTTPS on :443 (with an HTTP→HTTPS redirect on :80).
+#   - the default ":80"                   → plain HTTP on port 80 (no cert; fine
+#     for first boot / IP-only access, but log in over an SSH tunnel or add a
+#     domain before exposing credentials).
+#
+# Everything is proxied to the all-in-one app, which serves BOTH the web console
+# and the /api/v1 API on one origin — so no per-path routing is needed here.
+{$RINFRA_SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# SSE (engagement events) and the operator web shell (WebSocket) must not be
+	# buffered; reverse_proxy streams both transparently.
+	reverse_proxy app:8080
+
+	header {
+		# Conservative hardening; harmless over plain HTTP, meaningful over HTTPS.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
