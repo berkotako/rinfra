@@ -49,10 +49,12 @@ func newFakeDO(t *testing.T) (*provider, *fakeDO) {
 		f.record(r)
 		w.WriteHeader(http.StatusNoContent)
 	})
-	// Firewalls: list returns one tagged FW; create/update/delete succeed.
+	// Firewalls: list returns one engagement-named FW; create/update/delete succeed.
+	// The name (rinfra-fw-<engShort>-<nodeShort>) is how SweepOrphans identifies a
+	// node's firewall — DO firewall Tags are a droplet-target selector, not metadata.
 	mux.HandleFunc("GET /v2/firewalls", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
-		w.Write([]byte(`{"firewalls":[{"id":"fw-1","name":"old","tags":["rinfra:eng-1"]}],"links":{},"meta":{"total":1}}`))
+		w.Write([]byte(`{"firewalls":[{"id":"fw-1","name":"rinfra-fw-eng-1-node-1"}],"links":{},"meta":{"total":1}}`))
 	})
 	mux.HandleFunc("POST /v2/firewalls", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
@@ -147,7 +149,7 @@ func TestConfigureIngress_CreatesFirewall(t *testing.T) {
 	if err := p.ConfigureIngress(t.Context(), testCreds(), node, rules); err != nil {
 		t.Fatalf("ConfigureIngress: %v", err)
 	}
-	// The node's firewall name doesn't match the existing "old" FW, so it creates.
+	// The node-9 firewall name doesn't match the listed node-1 FW, so it creates.
 	if !f.hit("POST", "/v2/firewalls") {
 		t.Error("expected a firewall to be created")
 	}

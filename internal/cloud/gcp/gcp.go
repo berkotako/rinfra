@@ -57,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -244,10 +245,10 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 		project := creds.Raw[CredKeyProject]
 
 		for _, n := range nodes {
-			nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
+			nodeName := fmt.Sprintf("rinfra-%s-%s", shortID(engagementID), shortID(n.ID))
 			// GCP network tag for firewall targeting — must be lowercase, start with letter.
-			netTag := "rinfra-" + n.ID[:8]
-			engTag := "rinfra-" + engagementID[:8]
+			netTag := "rinfra-" + shortID(n.ID)
+			engTag := "rinfra-" + shortID(engagementID)
 
 			machineType := n.Spec.Size
 			if machineType == "" {
@@ -326,7 +327,7 @@ func (p *provider) ProvisionNode(_ context.Context, _ cloud.Credentials, _ domai
 	return domain.Node{}, fmt.Errorf("gcp.ProvisionNode: use orchestration.Engine.Deploy for real provisioning")
 }
 
-// ConfigureIngress creates a GCP VPC Firewall Rule for a node.
+// ConfigureIngress creates GCP VPC Firewall Rules for a node.
 //
 // GCP VPC Firewall Rules are global within a VPC network and use target tags
 // to identify which instances they apply to. This is fundamentally different
@@ -338,13 +339,18 @@ func (p *provider) ProvisionNode(_ context.Context, _ cloud.Credentials, _ domai
 //   - Deny rules are dropped (VPC Firewall deny rules are a separate GCP
 //     construct with explicit priority ordering; the default-deny posture is
 //     achieved by not creating allow rules).
-//   - SourceCIDR → SourceRanges on the Firewall Rule.
 //   - Direction is always INGRESS.
 //
-// The rule targets the node via its network tag ("rinfra-<nodeID[:8]>", matching
-// BuildProgram). The firewall is upserted: if a rule of the same name already
-// exists it is patched, otherwise it is inserted. The returned compute Operation
-// is not polled to completion (see package doc).
+// One firewall is emitted PER DISTINCT SourceCIDR, each carrying only the ports
+// that source is allowed to reach. This preserves the source→port binding: a
+// topology of "443 from anywhere" + "22 from the office CIDR" must NOT collapse
+// into "22 and 443 from anywhere and the office" (which would expose SSH to the
+// internet). Sources are processed in a stable sorted order so firewall names
+// are deterministic across re-applies.
+//
+// Each firewall targets the node via its network tag ("rinfra-<nodeID[:8]>",
+// matching BuildProgram) and is upserted (patch if present, else insert). The
+// returned compute Operation is not polled to completion (see package doc).
 func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials, node domain.Node, rules []domain.Rule) error {
 	if node.ProviderRef == "" {
 		return fmt.Errorf("gcp.ConfigureIngress: node %s has no ProviderRef (not yet provisioned)", node.ID)
@@ -358,9 +364,9 @@ func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials
 	}
 	proj := project(creds)
 
-	// Collect source ranges from allow rules; default to anywhere if unset.
-	var sources []string
-	seen := map[string]bool{}
+	// Group allow rules by source CIDR so each firewall exposes only the ports
+	// that source is entitled to. Deny rules are skipped (default-deny).
+	bySource := make(map[string][]domain.Rule)
 	for _, r := range rules {
 		if !r.Allow {
 			continue
@@ -369,46 +375,73 @@ func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials
 		if src == "" {
 			src = "0.0.0.0/0"
 		}
-		if !seen[src] {
-			seen[src] = true
-			sources = append(sources, src)
+		bySource[src] = append(bySource[src], r)
+	}
+	sources := make([]string, 0, len(bySource))
+	for src := range bySource {
+		sources = append(sources, src)
+	}
+	sort.Strings(sources) // deterministic firewall naming across re-applies
+
+	targetTag := "rinfra-" + shortID(node.ID)
+	for i, src := range sources {
+		var allowed []*compute.FirewallAllowed
+		for _, a := range buildGCPFirewallAllows(bySource[src]) {
+			allowed = append(allowed, &compute.FirewallAllowed{
+				IPProtocol: a.Protocol,
+				Ports:      a.Ports,
+			})
+		}
+		if len(allowed) == 0 {
+			continue
+		}
+		fwName := fmt.Sprintf("%s-%d", firewallName(node.ID), i)
+		fw := &compute.Firewall{
+			Name:         fwName,
+			Network:      "global/networks/default",
+			Direction:    "INGRESS",
+			TargetTags:   []string{targetTag},
+			SourceRanges: []string{src},
+			Allowed:      allowed,
+			// Carry the engagement so SweepOrphans can match by description.
+			Description: TagPrefix + node.EngagementID,
+		}
+
+		// Upsert: patch if the named rule exists, else insert.
+		if _, err := svc.Firewalls.Get(proj, fwName).Context(ctx).Do(); err == nil {
+			if _, err := svc.Firewalls.Patch(proj, fwName, fw).Context(ctx).Do(); err != nil {
+				return fmt.Errorf("gcp.ConfigureIngress: patch firewall %s: %w", fwName, err)
+			}
+			continue
+		} else if !isNotFound(err) {
+			return fmt.Errorf("gcp.ConfigureIngress: get firewall %s: %w", fwName, err)
+		}
+		if _, err := svc.Firewalls.Insert(proj, fw).Context(ctx).Do(); err != nil {
+			return fmt.Errorf("gcp.ConfigureIngress: insert firewall %s: %w", fwName, err)
 		}
 	}
-	if len(sources) == 0 {
-		sources = []string{"0.0.0.0/0"}
-	}
 
-	var allowed []*compute.FirewallAllowed
-	for _, a := range buildGCPFirewallAllows(rules) {
-		allowed = append(allowed, &compute.FirewallAllowed{
-			IPProtocol: a.Protocol,
-			Ports:      a.Ports,
-		})
+	// Delete any stale per-source firewalls left by a previous apply with MORE
+	// sources. GCP firewall rules are additive, so a leftover higher-index rule
+	// (e.g. rinfra-fw-<node>-1 after shrinking from two source CIDRs to one) would
+	// keep allowing the removed source — defeating the per-source isolation. Remove
+	// every rinfra-fw-<node>-* firewall for this node that isn't in the desired set
+	// (an empty desired set — no allow rules — deletes them all).
+	desired := make(map[string]bool, len(sources))
+	for i := range sources {
+		desired[fmt.Sprintf("%s-%d", firewallName(node.ID), i)] = true
 	}
-
-	fwName := firewallName(node.ID)
-	fw := &compute.Firewall{
-		Name:         fwName,
-		Network:      "global/networks/default",
-		Direction:    "INGRESS",
-		TargetTags:   []string{"rinfra-" + shortID(node.ID)},
-		SourceRanges: sources,
-		Allowed:      allowed,
-		// Carry the engagement so SweepOrphans can match by description.
-		Description: TagPrefix + node.EngagementID,
+	stalePrefix := firewallName(node.ID) + "-"
+	list, err := svc.Firewalls.List(proj).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("gcp.ConfigureIngress: list firewalls for stale cleanup: %w", err)
 	}
-
-	// Upsert: patch if the named rule exists, else insert.
-	if _, err := svc.Firewalls.Get(proj, fwName).Context(ctx).Do(); err == nil {
-		if _, err := svc.Firewalls.Patch(proj, fwName, fw).Context(ctx).Do(); err != nil {
-			return fmt.Errorf("gcp.ConfigureIngress: patch firewall %s: %w", fwName, err)
+	for _, fw := range list.Items {
+		if strings.HasPrefix(fw.Name, stalePrefix) && !desired[fw.Name] {
+			if _, err := svc.Firewalls.Delete(proj, fw.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+				return fmt.Errorf("gcp.ConfigureIngress: delete stale firewall %s: %w", fw.Name, err)
+			}
 		}
-		return nil
-	} else if !isNotFound(err) {
-		return fmt.Errorf("gcp.ConfigureIngress: get firewall %s: %w", fwName, err)
-	}
-	if _, err := svc.Firewalls.Insert(proj, fw).Context(ctx).Do(); err != nil {
-		return fmt.Errorf("gcp.ConfigureIngress: insert firewall %s: %w", fwName, err)
 	}
 	return nil
 }
@@ -634,16 +667,34 @@ func (p *provider) Destroy(ctx context.Context, creds cloud.Credentials, node do
 
 	zone, name := instanceZoneName(node)
 	op, err := svc.Instances.Delete(proj, zone, name).Context(ctx).Do()
-	if err != nil {
-		if isNotFound(err) {
-			return nil // already gone — idempotent
-		}
+	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("gcp.Destroy: delete instance %s in %s: %w", name, zone, err)
 	}
-	// Poll to completion so teardown only reports success once the instance is
-	// actually gone, not merely enqueued for deletion.
-	if err := waitOp(ctx, svc, proj, op); err != nil {
-		return fmt.Errorf("gcp.Destroy: await delete of instance %s in %s: %w", name, zone, err)
+	if err == nil {
+		// Poll to completion so teardown only reports success once the instance is
+		// actually gone, not merely enqueued for deletion.
+		if err := waitOp(ctx, svc, proj, op); err != nil {
+			return fmt.Errorf("gcp.Destroy: await delete of instance %s in %s: %w", name, zone, err)
+		}
+	}
+
+	// Release the node's dedicated regional static Address (created by
+	// BuildProgram / AssignStaticIP, named rinfra-<engShort>-<nodeShort>-ip).
+	// Deleting only the instance would orphan the billed reserved address — the
+	// same leak that bites a single-node partial-deploy rollback. Node-scoped, so
+	// engagement siblings are untouched.
+	if node.ID != "" && node.EngagementID != "" {
+		region := regionFromZone(zone)
+		addrName := fmt.Sprintf("rinfra-%s-%s-ip", shortID(node.EngagementID), shortID(node.ID))
+		aop, aerr := svc.Addresses.Delete(proj, region, addrName).Context(ctx).Do()
+		if aerr != nil && !isNotFound(aerr) {
+			return fmt.Errorf("gcp.Destroy: delete address %s in %s: %w", addrName, region, aerr)
+		}
+		if aerr == nil {
+			if werr := waitOp(ctx, svc, proj, aop); werr != nil {
+				return fmt.Errorf("gcp.Destroy: await delete of address %s in %s: %w", addrName, region, werr)
+			}
+		}
 	}
 	return nil
 }

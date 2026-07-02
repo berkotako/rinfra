@@ -42,6 +42,15 @@ func (s *InfraService) ReapExpired(ctx context.Context, now time.Time) ([]string
 		if reapable == 0 {
 			continue
 		}
+		// Start the teardown FIRST; only audit once it actually kicked off. Auditing
+		// before the call meant a sweep that couldn't start the teardown (e.g. a job
+		// already running) re-recorded infra.auto_teardown on every tick, spamming
+		// the append-only log with events for a teardown that never began.
+		if _, err := s.Teardown(ctx, e.ID, reaperActor); err != nil {
+			// e.g. a job is already running for this engagement — try again next sweep.
+			s.log.Warn("reaper: teardown failed", "engagement", e.ID, "err", err)
+			continue
+		}
 		_ = s.audit.Record(ctx, audit.Event{
 			EngagementID: e.ID,
 			Actor:        reaperActor,
@@ -50,11 +59,6 @@ func (s *InfraService) ReapExpired(ctx context.Context, now time.Time) ([]string
 			Detail:       fmt.Sprintf("activity window closed (status=%s); reaping %d standing node(s)", e.Status, reapable),
 			At:           now.UTC(),
 		})
-		if _, err := s.Teardown(ctx, e.ID, reaperActor); err != nil {
-			// e.g. a job is already running for this engagement — try again next sweep.
-			s.log.Warn("reaper: teardown failed", "engagement", e.ID, "err", err)
-			continue
-		}
 		reaped = append(reaped, e.ID)
 	}
 	return reaped, nil

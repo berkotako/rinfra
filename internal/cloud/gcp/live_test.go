@@ -140,8 +140,9 @@ func gcpTestCreds() cloud.Credentials {
 }
 
 func TestConfigureIngress_InsertsFirewall(t *testing.T) {
-	// Firewall Get returns 404 -> Insert path.
-	p, f := newFakeGCP(t, map[string]bool{"/global/firewalls/rinfra-fw-node-9": true})
+	// Firewall Get returns 404 -> Insert path. One source CIDR → one firewall,
+	// suffixed "-0" (firewalls are now emitted per distinct source CIDR).
+	p, f := newFakeGCP(t, map[string]bool{"/global/firewalls/rinfra-fw-node-9-0": true})
 	node := domain.Node{ID: "node-9", EngagementID: "eng-1", ProviderRef: "rinfra-eng-1-node-9", Spec: domain.NodeSpec{Region: "us-central1-a"}}
 	rules := []domain.Rule{{Protocol: "tcp", Port: 443, SourceCIDR: "0.0.0.0/0", Allow: true}}
 	if err := p.ConfigureIngress(t.Context(), gcpTestCreds(), node, rules); err != nil {
@@ -160,8 +161,37 @@ func TestConfigureIngress_PatchesExistingFirewall(t *testing.T) {
 	if err := p.ConfigureIngress(t.Context(), gcpTestCreds(), node, rules); err != nil {
 		t.Fatalf("ConfigureIngress: %v", err)
 	}
-	if !f.hit("PATCH", "/global/firewalls/rinfra-fw-node-9") {
+	if !f.hit("PATCH", "/global/firewalls/rinfra-fw-node-9-0") {
 		t.Error("expected a firewall patch when the rule already exists")
+	}
+}
+
+// TestConfigureIngress_PerSourceFirewalls verifies that rules with distinct
+// source CIDRs produce separate firewalls, so a restricted source's ports are
+// not exposed to every source (no source×port cross-product).
+func TestConfigureIngress_PerSourceFirewalls(t *testing.T) {
+	// Both firewall names 404 → both take the Insert path.
+	p, f := newFakeGCP(t, map[string]bool{
+		"/global/firewalls/rinfra-fw-node-9-0": true,
+		"/global/firewalls/rinfra-fw-node-9-1": true,
+	})
+	node := domain.Node{ID: "node-9", EngagementID: "eng-1", ProviderRef: "rinfra-eng-1-node-9", Spec: domain.NodeSpec{Region: "us-central1-a"}}
+	rules := []domain.Rule{
+		{Protocol: "tcp", Port: 443, SourceCIDR: "0.0.0.0/0", Allow: true},
+		{Protocol: "tcp", Port: 22, SourceCIDR: "10.0.0.0/8", Allow: true},
+	}
+	if err := p.ConfigureIngress(t.Context(), gcpTestCreds(), node, rules); err != nil {
+		t.Fatalf("ConfigureIngress: %v", err)
+	}
+	// Two distinct sources → two firewall POSTs.
+	posts := 0
+	for _, h := range f.hits {
+		if strings.HasPrefix(h, "POST ") && strings.HasSuffix(h, "/global/firewalls") {
+			posts++
+		}
+	}
+	if posts != 2 {
+		t.Errorf("expected 2 per-source firewall inserts, got %d", posts)
 	}
 }
 
@@ -300,5 +330,50 @@ func TestSweepOrphans_NoOrphanInvariant(t *testing.T) {
 		if strings.HasPrefix(h, "DELETE ") {
 			t.Errorf("no-orphan sweep should delete nothing, but issued: %s", h)
 		}
+	}
+}
+
+// TestConfigureIngress_DeletesStaleFirewalls verifies that shrinking a node's
+// ingress from two source CIDRs to one deletes the now-obsolete higher-index
+// firewall, so a removed source is not left permanently allowed.
+func TestConfigureIngress_DeletesStaleFirewalls(t *testing.T) {
+	f := &fakeGCP{notFound: map[string]bool{}}
+	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.record(r)
+		switch {
+		// Firewall LIST (no trailing name) — report a leftover two-firewall set
+		// from a previous apply with two sources.
+		case strings.HasSuffix(r.URL.Path, "/global/firewalls") && r.Method == http.MethodGet:
+			w.Write([]byte(`{"items":[` +
+				`{"name":"rinfra-fw-node-9-0","description":"rinfra-eng-1"},` +
+				`{"name":"rinfra-fw-node-9-1","description":"rinfra-eng-1"}]}`))
+		// Per-name firewall GET (upsert probe) — 404 so the current rule inserts.
+		case strings.Contains(r.URL.Path, "/global/firewalls/") && r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":{"code":404,"message":"notFound"}}`))
+		case strings.Contains(r.URL.Path, "/global/firewalls") && r.Method == http.MethodPost:
+			w.Write([]byte(operationJSON))
+		case strings.Contains(r.URL.Path, "/global/firewalls/") && r.Method == http.MethodDelete:
+			w.Write([]byte(operationJSON))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":{"code":404,"message":"x"}}`))
+		}
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	p := &provider{baseEndpoint: ts.URL + "/"}
+
+	node := domain.Node{ID: "node-9", EngagementID: "eng-1", ProviderRef: "rinfra-eng-1-node-9", Spec: domain.NodeSpec{Region: "us-central1-a"}}
+	// One source now → only rinfra-fw-node-9-0 is desired; -1 is stale.
+	rules := []domain.Rule{{Protocol: "tcp", Port: 443, SourceCIDR: "0.0.0.0/0", Allow: true}}
+	if err := p.ConfigureIngress(t.Context(), gcpTestCreds(), node, rules); err != nil {
+		t.Fatalf("ConfigureIngress: %v", err)
+	}
+	if !f.hit("DELETE", "/global/firewalls/rinfra-fw-node-9-1") {
+		t.Error("expected the stale higher-index firewall rinfra-fw-node-9-1 to be deleted")
+	}
+	if f.hit("DELETE", "/global/firewalls/rinfra-fw-node-9-0") {
+		t.Error("the still-desired firewall rinfra-fw-node-9-0 must NOT be deleted")
 	}
 }

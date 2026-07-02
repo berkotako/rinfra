@@ -68,9 +68,12 @@ func TestBuildAzureNSGRules(t *testing.T) {
 			wantLen: 3,
 			check: func(t *testing.T, got []azureNSGRule) {
 				for i, rule := range got {
-					expectedPriority := 100 + i*10
+					expectedPriority := nsgRuleBasePriority + i*10
 					if rule.Priority != expectedPriority {
 						t.Errorf("rule[%d].Priority = %d, want %d", i, rule.Priority, expectedPriority)
+					}
+					if rule.Priority <= 100 {
+						t.Errorf("rule[%d].Priority = %d must be above the baked-in allow-ssh (100)", i, rule.Priority)
 					}
 				}
 			},

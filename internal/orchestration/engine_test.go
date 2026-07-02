@@ -8,13 +8,17 @@ import (
 	"github.com/rinfra/rinfra/internal/domain"
 )
 
-// TestStackName verifies the stack naming convention.
+// TestStackName verifies the stack naming convention: one stack per
+// (engagement, provider) so mixed-cloud engagements don't share Pulumi state.
 func TestStackName(t *testing.T) {
-	id := "abc123"
-	got := stackName(id)
-	want := "rinfra-abc123"
+	got := stackName("abc123", domain.CloudAWS)
+	want := "rinfra-abc123-aws"
 	if got != want {
-		t.Errorf("stackName(%q) = %q, want %q", id, got, want)
+		t.Errorf("stackName = %q, want %q", got, want)
+	}
+	// Different providers on the same engagement must get distinct stacks.
+	if a, b := stackName("e", domain.CloudAWS), stackName("e", domain.CloudDigitalOcean); a == b {
+		t.Errorf("stackName must differ per provider, both = %q", a)
 	}
 }
 

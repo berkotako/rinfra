@@ -33,6 +33,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -149,7 +150,12 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 			continue
 		}
 		env := credEnv(providerCreds)
-		if err := e.run(ctx, dir, env, "init", "-input=false", "-no-color"); err != nil {
+		// `init` fetches provider plugins from the registry, so a transient
+		// network/registry blip should be retried like apply/destroy — otherwise a
+		// momentary hiccup fails the whole deploy before any resource is touched.
+		if err := retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
+			return e.run(ctx, dir, env, "init", "-input=false", "-no-color")
+		}); err != nil {
 			results = append(results, errResults(providerNodes, fmt.Errorf("terraform init: %w", err))...)
 			continue
 		}
@@ -181,11 +187,25 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 
 // Teardown runs `terraform destroy` per provider group, then sweeps tagged
 // orphans via the provider's cloud.Sweeper. Idempotent.
+//
+// It returns a non-nil error if any provider's destroy or sweep failed — a
+// failed teardown must not be reported as success (the caller would mark nodes
+// destroyed and complete the engagement over still-live cloud resources). A
+// missing config/state is not an error (nothing to destroy).
 func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []domain.Node, creds map[domain.CloudProviderType]cloud.Credentials) error {
+	var errs []error
 	for providerType, providerNodes := range groupByProvider(nodes) {
 		providerCreds, ok := creds[providerType]
 		if !ok {
-			e.log.Warn("terraform: no creds for teardown", "provider", providerType)
+			// Missing creds is only a failure if something was provisioned. A deploy
+			// that failed on missing creds before writing any config/state leaves
+			// nodes with no ProviderRef and nothing to destroy — don't wedge teardown.
+			if anyProvisioned(providerNodes) {
+				e.log.Warn("terraform: no creds for teardown of provisioned nodes", "provider", providerType)
+				errs = append(errs, fmt.Errorf("no credentials for cloud %q (cannot destroy provisioned resources)", providerType))
+			} else {
+				e.log.Info("terraform: no creds but nothing provisioned; nothing to destroy", "provider", providerType)
+			}
 			continue
 		}
 		dir := e.workDir(engagementID, providerType)
@@ -196,6 +216,7 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 				return e.run(ctx, dir, env, "destroy", "-auto-approve", "-input=false", "-no-color")
 			}); err != nil {
 				e.log.Error("terraform: destroy error", "engagement", engagementID, "provider", providerType, "err", err)
+				errs = append(errs, fmt.Errorf("terraform destroy for cloud %q: %w", providerType, err))
 			}
 		} else {
 			e.log.Info("terraform: no config for teardown (already destroyed?)", "engagement", engagementID, "provider", providerType)
@@ -203,11 +224,12 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 		if sweeper, ok := cloud.GetSweeper(providerType); ok {
 			if err := sweeper.SweepOrphans(ctx, providerCreds, engagementID); err != nil {
 				e.log.Error("terraform: sweep orphans error", "engagement", engagementID, "provider", providerType, "err", err)
+				errs = append(errs, fmt.Errorf("sweep orphans for cloud %q: %w", providerType, err))
 			}
 		}
 		_ = providerNodes
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // writeConfig serializes cfg to <dir>/main.tf.json.
@@ -288,6 +310,17 @@ func groupByProvider(nodes []domain.Node) map[domain.CloudProviderType][]domain.
 		out[n.Spec.Cloud] = append(out[n.Spec.Cloud], n)
 	}
 	return out
+}
+
+// anyProvisioned reports whether any node carries a ProviderRef (real resources
+// exist that a teardown must reach).
+func anyProvisioned(nodes []domain.Node) bool {
+	for _, n := range nodes {
+		if n.ProviderRef != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func errResults(nodes []domain.Node, err error) []orchestration.NodeResult {
