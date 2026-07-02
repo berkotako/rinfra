@@ -304,6 +304,10 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 		}
 
 		rgName := resourceGroupName(engagementID)
+		// The resource group needs a home region; use the first node's region (or
+		// the default). Each node's own resources, however, are placed in that
+		// node's region below — a resource group can span regions, so a node with a
+		// different Spec.Region must NOT be silently relocated into the RG's region.
 		location := DefaultLocation
 		if len(nodes) > 0 && nodes[0].Spec.Region != "" {
 			location = nodes[0].Spec.Region
@@ -329,6 +333,12 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			if size == "" {
 				size = DefaultSize
 			}
+			// Honor each node's own region; fall back to the RG's region only when
+			// the node doesn't specify one.
+			nodeLocation := pulumi.String(location).ToStringOutput()
+			if n.Spec.Region != "" {
+				nodeLocation = pulumi.String(n.Spec.Region).ToStringOutput()
+			}
 
 			nodeTags := pulumi.StringMap{
 				"rinfra":      pulumi.String(engagementID),
@@ -339,7 +349,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			pip, err := paznetwork.NewPublicIp(ctx, nodeName+"-pip", &paznetwork.PublicIpArgs{
 				Name:              pulumi.String(nodeName + "-pip"),
 				ResourceGroupName: rg.Name,
-				Location:          rg.Location,
+				Location:          nodeLocation,
 				AllocationMethod:  pulumi.String("Static"),
 				Tags:              nodeTags,
 			})
@@ -354,7 +364,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			nsg, err := paznetwork.NewNetworkSecurityGroup(ctx, nodeName+"-nsg", &paznetwork.NetworkSecurityGroupArgs{
 				Name:              pulumi.String(nodeName + "-nsg"),
 				ResourceGroupName: rg.Name,
-				Location:          rg.Location,
+				Location:          nodeLocation,
 				// Default: allow SSH so operators can access the node.
 				SecurityRules: paznetwork.NetworkSecurityGroupSecurityRuleArray{
 					paznetwork.NetworkSecurityGroupSecurityRuleArgs{
@@ -379,7 +389,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			nic, err := paznetwork.NewNetworkInterface(ctx, nodeName+"-nic", &paznetwork.NetworkInterfaceArgs{
 				Name:              pulumi.String(nodeName + "-nic"),
 				ResourceGroupName: rg.Name,
-				Location:          rg.Location,
+				Location:          nodeLocation,
 				IpConfigurations: paznetwork.NetworkInterfaceIpConfigurationArray{
 					paznetwork.NetworkInterfaceIpConfigurationArgs{
 						Name:                       pulumi.String("ipconfig1"),
@@ -409,7 +419,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 			vm, err := pazcompute.NewLinuxVirtualMachine(ctx, nodeName, &pazcompute.LinuxVirtualMachineArgs{
 				Name:                          pulumi.String(nodeName),
 				ResourceGroupName:             rg.Name,
-				Location:                      rg.Location,
+				Location:                      nodeLocation,
 				Size:                          pulumi.String(size),
 				AdminUsername:                 pulumi.String(AdminUsername),
 				DisablePasswordAuthentication: pulumi.Bool(true),
@@ -532,10 +542,17 @@ func toSecurityRuleProtocol(proto string) *armnetwork.SecurityRuleProtocol {
 	return &v
 }
 
+// nsgRuleBasePriority is where ConfigureIngress-managed rules START. It is above
+// the priority (100) of the allow-ssh rule BuildProgram bakes into every NSG, so
+// the first managed rule does not collide with it — Azure rejects two rules with
+// the same priority + direction on one NSG.
+const nsgRuleBasePriority = 200
+
 // buildAzureNSGRules converts domain.Rule to Azure NSG security rule descriptors.
 // Azure-specific shape:
 //   - Access is "Allow" or "Deny" (explicit, not just by omission).
-//   - Priority is assigned sequentially starting at 100 (100 = highest priority).
+//   - Priority is assigned sequentially starting at nsgRuleBasePriority (lower =
+//     higher priority), leaving room below for the baked-in allow-ssh rule.
 //   - DestinationPortRange is a string, not from/to pair.
 //   - SourceAddressPrefix carries the CIDR.
 func buildAzureNSGRules(rules []domain.Rule) []azureNSGRule {
@@ -551,7 +568,7 @@ func buildAzureNSGRules(rules []domain.Rule) []azureNSGRule {
 		}
 		out = append(out, azureNSGRule{
 			Name:                 fmt.Sprintf("rule-%d", i+1),
-			Priority:             100 + i*10, // 100, 110, 120, …
+			Priority:             nsgRuleBasePriority + i*10, // 200, 210, 220, …
 			Direction:            "Inbound",
 			Access:               access,
 			Protocol:             toAzureProtocol(r.Protocol),

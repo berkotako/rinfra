@@ -165,8 +165,12 @@ $HOME/.rinfra/pulumi-state/
   .pulumi/
     stacks/
       rinfra/
-        rinfra-<engagement-id>.json
+        rinfra-<engagement-id>-digitalocean.json
 ```
+
+There is one stack per `(engagement, provider)` —
+`rinfra-<engagement-id>-<provider>` — so a mixed-cloud engagement keeps each
+provider's state isolated (the DO stack is suffixed `-digitalocean`).
 
 After successful teardown, the stack file should be empty or not present.
 

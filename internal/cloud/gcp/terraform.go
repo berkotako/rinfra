@@ -20,9 +20,9 @@ func (p *provider) BuildConfig(engagementID string, creds cloud.Credentials, nod
 	outputs := map[string]any{}
 
 	for _, n := range nodes {
-		nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
-		netTag := "rinfra-" + n.ID[:8]
-		engTag := "rinfra-" + engagementID[:8]
+		nodeName := fmt.Sprintf("rinfra-%s-%s", shortID(engagementID), shortID(n.ID))
+		netTag := "rinfra-" + shortID(n.ID)
+		engTag := "rinfra-" + shortID(engagementID)
 		machineType := n.Spec.Size
 		if machineType == "" {
 			machineType = DefaultMachineType

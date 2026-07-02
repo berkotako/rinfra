@@ -18,7 +18,7 @@ func (p *provider) BuildConfig(engagementID string, _ cloud.Credentials, nodes [
 
 	for _, n := range nodes {
 		nodeTag := TagPrefix + "node:" + n.ID
-		nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
+		nodeName := fmt.Sprintf("rinfra-%s-%s", shortID(engagementID), shortID(n.ID))
 		size := n.Spec.Size
 		if size == "" {
 			size = "s-1vcpu-1gb"

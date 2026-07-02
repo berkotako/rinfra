@@ -52,7 +52,17 @@ them as invariants; never weaken them to make a feature easier.
   nodes live, those nodes are rolled back (per-node `Destroy`, audited
   `infra.rollback`) so a half-finished deploy leaves no live orphans — only the
   nodes *this* deploy provisioned are touched; `RINFRA_DEPLOY_ROLLBACK=off`
-  opts into fix-forward instead.
+  opts into fix-forward instead. Per-node `Destroy` is **node-scoped-complete**:
+  AWS/GCP delete not just the instance but its dedicated Elastic/static IP and
+  security group (matched by the per-node tag), so a rollback never orphans a
+  billed address. A **failed teardown is never reported as success**: both IaC
+  engines return the destroy/sweep error, and `runTeardown` then leaves the nodes
+  `failed` (reapable) rather than `destroyed` and does NOT complete the engagement,
+  so the reaper and a later teardown retry them instead of hiding live orphans.
+  Provisioning is isolated **per cloud**: the Pulumi backend uses one stack per
+  `(engagement, provider)` (`rinfra-<eng>-<provider>`), and each deploy sends the
+  provider its FULL desired node set, so a mixed-cloud engagement or an
+  incremental re-deploy never destroys a sibling's live infrastructure.
 
 ## Architecture
 
@@ -75,7 +85,17 @@ Control plane (this repo, Go)
 across clouds. Compute abstracts cleanly; **networking does not** —
 `ConfigureIngress` and DNS are where AWS security groups, GCP VPC firewall rules,
 DO cloud firewalls, and Azure NSGs genuinely diverge. Implement those per
-provider deliberately; a wrong ingress rule is a dead engagement.
+provider deliberately; a wrong ingress rule is a dead engagement. `ConfigureIngress`
+is **applied on every deploy**: after a node comes live, `InfraService` derives
+default inbound rules from the node's role (`service.nodeIngressRules` — SSH on
+all; 80/443 on redirectors/payload hosts; the C2 listener port on C2 servers) and
+calls `ConfigureIngress` best-effort (a failure marks the node `degraded`, not
+failed). Divergence traps to remember: DO firewall `Tags` are a droplet **target
+selector** (a per-node firewall is targeted by `DropletIDs` only and named
+`rinfra-fw-<eng>-<node>` so the sweep can find it); Azure NSG rules from
+`ConfigureIngress` start at priority 200 to clear the baked-in allow-ssh at 100;
+GCP emits one firewall **per source CIDR** so a restricted source's ports aren't
+unioned onto `0.0.0.0/0`.
 
 **`c2.C2Provider`** (`internal/c2/provider.go`) — uniform deploy + fronting, but
 **control is tiered**. `Control()` returns `(Operator, ok bool)`; `ok=false`

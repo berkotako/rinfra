@@ -8,10 +8,16 @@ must be implemented deliberately.
 
 | Provider | Ingress model | Notes |
 |----------|---------------|-------|
-| DigitalOcean | Cloud Firewall | Implement first: most permissive AUP, cheapest to iterate |
-| AWS | Security groups / VPC rules | Enterprise buyer lives here; strictest AUP |
-| GCP | VPC firewall rules | |
-| Azure | Network Security Groups (NSGs) | |
+| DigitalOcean | Cloud Firewall | Implement first: most permissive AUP, cheapest to iterate. Per-node firewall targets by `DropletIDs` only, named `rinfra-fw-<eng>-<node>` (DO firewall `Tags` are a droplet-target selector, not metadata). |
+| AWS | Security groups / VPC rules | Enterprise buyer lives here; strictest AUP. Teardown waits out `DependencyViolation`/`InUse` before releasing the EIP + deleting the SG. |
+| GCP | VPC firewall rules | One firewall **per source CIDR** so a restricted source's ports aren't unioned onto `0.0.0.0/0`. |
+| Azure | Network Security Groups (NSGs) | `ConfigureIngress` rules start at priority 200, above the baked-in allow-ssh (100). |
+
+Ingress is **applied automatically on deploy**: after a node comes live,
+`InfraService` derives role-based default inbound rules (SSH everywhere; 80/443 on
+redirectors/payload hosts; the C2 listener port on C2 servers) and calls
+`ConfigureIngress`. A failure marks the node `degraded` (possibly unreachable)
+rather than failing the whole deploy.
 
 Provisioning always uses the **customer's** per-engagement credentials. RInfra
 never hosts attacker infra on its own tenancy.

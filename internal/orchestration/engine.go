@@ -14,11 +14,21 @@
 //
 // # Stack naming
 //
-// One Pulumi stack per engagement: rinfra-<engagement-id>.
+// One Pulumi stack per engagement AND provider: rinfra-<engagement-id>-<provider>.
+// The provider is part of the name because Pulumi treats an inline program as the
+// COMPLETE desired state of its stack; a mixed-cloud engagement builds one program
+// per provider group, so sharing a stack name would make the second group's
+// stack.Up delete the first group's resources (absent from the second program).
+// Per-(engagement, provider) stacks keep each cloud's state isolated — matching
+// the Terraform backend's per-provider working directory.
 // State is stored in a local file backend rooted at PULUMI_BACKEND_DIR
 // (default: $HOME/.rinfra/pulumi-state). PULUMI_CONFIG_PASSPHRASE (or
 // PULUMI_CONFIG_PASSPHRASE_FILE) must be set; both are documented in
 // cmd/rinfra-server.
+//
+// The service layer supplies the FULL desired node set for each provider (its
+// pending nodes plus the already-standing ones), not just the newly-pending
+// nodes, so an incremental re-deploy converges instead of destroying live nodes.
 //
 // # Resource tagging
 //
@@ -38,6 +48,7 @@ package orchestration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -135,9 +146,15 @@ func (e *Engine) RegisterBuilder(providerType domain.CloudProviderType, b Progra
 	e.builders[providerType] = b
 }
 
-// stackName returns the canonical Pulumi stack name for an engagement.
-func stackName(engagementID string) string {
-	return "rinfra-" + engagementID
+// stackName returns the canonical Pulumi stack name for an engagement's nodes on
+// a single cloud provider. The provider is part of the name because Pulumi treats
+// an inline program as the COMPLETE desired state of its stack: a mixed-cloud
+// engagement builds one program per provider group, so sharing a stack name would
+// make the second group's stack.Up delete the first group's resources (they are
+// absent from the second program). One stack per (engagement, provider) keeps each
+// cloud's state isolated — mirroring the Terraform backend's per-provider workdir.
+func stackName(engagementID string, providerType domain.CloudProviderType) string {
+	return "rinfra-" + engagementID + "-" + string(providerType)
 }
 
 // buildEnvVars merges the provider credential env vars with the Pulumi
@@ -193,7 +210,7 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 		program := builder.BuildProgram(engagementID, providerCreds, providerNodes)
 		envVars := e.buildEnvVars(providerCreds)
 
-		sName := stackName(engagementID)
+		sName := stackName(engagementID, providerType)
 		projectName := "rinfra"
 
 		stack, err := auto.UpsertStackInlineSource(ctx, sName, projectName, program, auto.EnvVars(envVars))
@@ -238,25 +255,34 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 // Teardown runs stack.Destroy for the engagement and then calls SweepOrphans
 // to remove any tagged resources that escaped Pulumi state. It is safe to
 // call even if no stack exists (idempotent).
+//
+// It returns a non-nil error if any provider's stack.Destroy or SweepOrphans
+// failed: a failed teardown must NOT be reported as success, or the caller marks
+// the nodes destroyed and completes the engagement over still-live cloud
+// resources (the exact orphan the guaranteed-teardown promise exists to prevent).
+// A missing stack is not an error — there is nothing to destroy.
 func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []domain.Node, creds map[domain.CloudProviderType]cloud.Credentials) error {
 	byProvider := groupByProvider(nodes)
 
+	var errs []error
 	for providerType, providerNodes := range byProvider {
 		builder, ok := e.builders[providerType]
 		if !ok {
 			e.log.Warn("orchestration: no builder for teardown", "provider", providerType)
+			errs = append(errs, fmt.Errorf("no builder for cloud %q", providerType))
 			continue
 		}
 
 		providerCreds, ok := creds[providerType]
 		if !ok {
 			e.log.Warn("orchestration: no creds for teardown", "provider", providerType)
+			errs = append(errs, fmt.Errorf("no credentials for cloud %q (cannot destroy stack or sweep)", providerType))
 			continue
 		}
 
 		program := builder.BuildProgram(engagementID, providerCreds, providerNodes)
 		envVars := e.buildEnvVars(providerCreds)
-		sName := stackName(engagementID)
+		sName := stackName(engagementID, providerType)
 		projectName := "rinfra"
 
 		stack, err := auto.SelectStackInlineSource(ctx, sName, projectName, program, auto.EnvVars(envVars))
@@ -270,7 +296,9 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 			})
 			if err != nil {
 				e.log.Error("orchestration: stack destroy error", "engagement", engagementID, "err", err)
-				// Continue to sweep phase — best-effort cleanup.
+				errs = append(errs, fmt.Errorf("destroy stack for cloud %q: %w", providerType, err))
+				// Continue to sweep phase — best-effort cleanup — but the error is
+				// still surfaced so the caller doesn't declare teardown a success.
 			}
 		}
 
@@ -278,11 +306,12 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 		if sweeper, ok := cloud.GetSweeper(providerType); ok {
 			if err := sweeper.SweepOrphans(ctx, providerCreds, engagementID); err != nil {
 				e.log.Error("orchestration: sweep orphans error", "engagement", engagementID, "provider", providerType, "err", err)
+				errs = append(errs, fmt.Errorf("sweep orphans for cloud %q: %w", providerType, err))
 			}
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // groupByProvider partitions nodes by their Spec.Cloud value.

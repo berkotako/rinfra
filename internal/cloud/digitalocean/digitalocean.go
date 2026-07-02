@@ -99,6 +99,97 @@ func (p *provider) client(token string) (*godo.Client, error) {
 	return c, nil
 }
 
+// doPerPage is the page size for every DO list call. The DO API caps a single
+// page well below the number of resources a large engagement can hold, so every
+// list MUST page to the end — otherwise SweepOrphans silently misses orphans
+// past the first page and the upserts create duplicates.
+const doPerPage = 200
+
+// listAllFirewalls returns every firewall across all pages.
+func listAllFirewalls(ctx context.Context, client *godo.Client) ([]godo.Firewall, error) {
+	var out []godo.Firewall
+	opt := &godo.ListOptions{PerPage: doPerPage}
+	for {
+		page, resp, err := client.Firewalls.List(ctx, opt)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, page...)
+		next, done, err := nextPage(resp)
+		if err != nil || done {
+			return out, err
+		}
+		opt.Page = next
+	}
+}
+
+// listAllDropletsByTag returns every droplet carrying tag across all pages.
+func listAllDropletsByTag(ctx context.Context, client *godo.Client, tag string) ([]godo.Droplet, error) {
+	var out []godo.Droplet
+	opt := &godo.ListOptions{PerPage: doPerPage}
+	for {
+		page, resp, err := client.Droplets.ListByTag(ctx, tag, opt)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, page...)
+		next, done, err := nextPage(resp)
+		if err != nil || done {
+			return out, err
+		}
+		opt.Page = next
+	}
+}
+
+// listAllReservedIPs returns every reserved IP across all pages.
+func listAllReservedIPs(ctx context.Context, client *godo.Client) ([]godo.ReservedIP, error) {
+	var out []godo.ReservedIP
+	opt := &godo.ListOptions{PerPage: doPerPage}
+	for {
+		page, resp, err := client.ReservedIPs.List(ctx, opt)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, page...)
+		next, done, err := nextPage(resp)
+		if err != nil || done {
+			return out, err
+		}
+		opt.Page = next
+	}
+}
+
+// listAllDomainRecords returns every record in a DO domain across all pages.
+func listAllDomainRecords(ctx context.Context, client *godo.Client, zone string) ([]godo.DomainRecord, error) {
+	var out []godo.DomainRecord
+	opt := &godo.ListOptions{PerPage: doPerPage}
+	for {
+		page, resp, err := client.Domains.Records(ctx, zone, opt)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, page...)
+		next, done, err := nextPage(resp)
+		if err != nil || done {
+			return out, err
+		}
+		opt.Page = next
+	}
+}
+
+// nextPage reports the next page number to request (and done=true when the
+// current page is the last), from a godo response's pagination links.
+func nextPage(resp *godo.Response) (next int, done bool, err error) {
+	if resp == nil || resp.Links == nil || resp.Links.IsLastPage() {
+		return 0, true, nil
+	}
+	cur, err := resp.Links.CurrentPage()
+	if err != nil {
+		return 0, true, err
+	}
+	return cur + 1, false, nil
+}
+
 // dropletID parses a node's ProviderRef (the numeric Droplet ID) to an int.
 func dropletID(ref string) (int, error) {
 	id, err := strconv.Atoi(ref)
@@ -115,6 +206,21 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// firewallName is the deterministic, engagement-scoped Cloud Firewall name for a
+// node. The engagement is encoded so SweepOrphans can find a node's firewall by
+// name — DO firewall Tags are a droplet-TARGET selector, not metadata, so they
+// can't be used to label a per-node firewall without attaching it to every
+// tagged droplet.
+func firewallName(engagementID, nodeID string) string {
+	return "rinfra-fw-" + shortID(engagementID) + "-" + shortID(nodeID)
+}
+
+// firewallPrefix is the name prefix shared by all of an engagement's per-node
+// firewalls, used by SweepOrphans to delete them.
+func firewallPrefix(engagementID string) string {
+	return "rinfra-fw-" + shortID(engagementID) + "-"
 }
 
 var _ cloud.CloudProvider = (*provider)(nil)
@@ -135,7 +241,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 
 		for _, n := range nodes {
 			nodeTag := TagPrefix + "node:" + n.ID
-			nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
+			nodeName := fmt.Sprintf("rinfra-%s-%s", shortID(engagementID), shortID(n.ID))
 			image := DefaultImage
 			size := n.Spec.Size
 			if size == "" {
@@ -207,7 +313,7 @@ func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials
 		return err
 	}
 
-	fwName := "rinfra-fw-" + shortID(node.ID)
+	fwName := firewallName(node.EngagementID, node.ID)
 	fr := &godo.FirewallRequest{
 		Name:         fwName,
 		InboundRules: godoInboundRules(rules),
@@ -217,8 +323,12 @@ func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials
 			{Protocol: "udp", PortRange: "all", Destinations: &godo.Destinations{Addresses: []string{"0.0.0.0/0", "::/0"}}},
 			{Protocol: "icmp", Destinations: &godo.Destinations{Addresses: []string{"0.0.0.0/0", "::/0"}}},
 		},
+		// Target ONLY this node's droplet. Do NOT set Tags: in DO the firewall
+		// Tags field applies the firewall to every droplet carrying the tag, so
+		// tagging with the engagement tag would attach this per-node firewall to
+		// all of the engagement's droplets and union everyone's ingress onto
+		// everyone. SweepOrphans finds the firewall by its engagement-scoped name.
 		DropletIDs: []int{id},
-		Tags:       []string{TagPrefix + node.EngagementID},
 	}
 
 	// Upsert: update the node's firewall if it already exists, else create it.
@@ -253,7 +363,7 @@ func godoInboundRules(rules []domain.Rule) []godo.InboundRule {
 
 // findFirewallByName returns the firewall with the given name, or nil if none.
 func (p *provider) findFirewallByName(ctx context.Context, client *godo.Client, name string) (*godo.Firewall, error) {
-	fws, _, err := client.Firewalls.List(ctx, &godo.ListOptions{PerPage: 200})
+	fws, err := listAllFirewalls(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("digitalocean: list firewalls: %w", err)
 	}
@@ -342,8 +452,10 @@ func (p *provider) ManageDNS(ctx context.Context, creds cloud.Credentials, rec d
 		Data: rec.Value,
 		TTL:  rec.TTL,
 	}
-	// Upsert by (Type, Name): edit a matching record, else create one.
-	records, _, err := client.Domains.Records(ctx, rec.Zone, &godo.ListOptions{PerPage: 200})
+	// Upsert by (Type, Name): edit a matching record, else create one. Paginate
+	// the full record set so a zone with >200 records doesn't miss the existing
+	// record and create a duplicate on every deploy.
+	records, err := listAllDomainRecords(ctx, client, rec.Zone)
 	if err != nil {
 		return fmt.Errorf("digitalocean.ManageDNS: list records: %w", err)
 	}
@@ -400,12 +512,11 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 		return err
 	}
 	engTag := TagPrefix + engagementID
-	opt := &godo.ListOptions{PerPage: 200}
 	var errs []error
 
 	// 1. Enumerate this engagement's Droplets first (do NOT delete yet).
 	deleted := map[int]bool{}
-	droplets, _, err := client.Droplets.ListByTag(ctx, engTag, opt)
+	droplets, err := listAllDropletsByTag(ctx, client, engTag)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list droplets: %w", err))
 	}
@@ -418,7 +529,7 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 	//    them — once a Droplet is gone, DO reports its Reserved IP as unassigned
 	//    (Droplet == nil), which would let the IP survive teardown (orphan).
 	var ripsToRelease []string
-	rips, _, err := client.ReservedIPs.List(ctx, opt)
+	rips, err := listAllReservedIPs(ctx, client)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list reserved IPs: %w", err))
 	}
@@ -437,13 +548,15 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 		}
 	}
 
-	// 4. Firewalls carrying the engagement tag.
-	fws, _, err := client.Firewalls.List(ctx, opt)
+	// 4. Firewalls for this engagement, matched by their engagement-scoped name
+	//    (per-node firewalls are deliberately untagged — see ConfigureIngress).
+	fws, err := listAllFirewalls(ctx, client)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list firewalls: %w", err))
 	}
+	fwPrefix := firewallPrefix(engagementID)
 	for _, fw := range fws {
-		if containsString(fw.Tags, engTag) {
+		if strings.HasPrefix(fw.Name, fwPrefix) {
 			if resp, err := client.Firewalls.Delete(ctx, fw.ID); err != nil && !isNotFound(resp) {
 				errs = append(errs, fmt.Errorf("delete firewall %s: %w", fw.ID, err))
 			}
@@ -464,16 +577,6 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 // isNotFound reports whether a godo response is a 404 (already-deleted).
 func isNotFound(resp *godo.Response) bool {
 	return resp != nil && resp.StatusCode == 404
-}
-
-// containsString reports whether xs contains want.
-func containsString(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
 }
 
 // PerNodeDestroy marks this provider's Destroy as node-scoped (see cloud.PerNodeDestroyer).

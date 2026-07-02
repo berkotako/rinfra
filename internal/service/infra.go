@@ -427,17 +427,42 @@ func redirectorTarget(t domain.Topology, redirectorID string, byID map[string]do
 // target's listener string ("host:port" or ":port") if present, else the
 // conventional default for the redirector subtype.
 func upstreamPort(subtype string, target domain.Node) int {
-	if l := target.Canvas.Listener; l != "" {
-		if i := strings.LastIndex(l, ":"); i >= 0 && i < len(l)-1 {
-			if p, err := strconv.Atoi(l[i+1:]); err == nil && p > 0 && p <= 65535 {
-				return p
-			}
-		}
+	if p, ok := parseListenerPort(target.Canvas.Listener); ok {
+		return p
 	}
 	if strings.EqualFold(subtype, "https") {
 		return 443
 	}
 	return 80
+}
+
+// parseListenerPort extracts the TCP port from a listener string such as
+// "0.0.0.0:443", ":8443", "[::1]:443", or "https://host:443/beacon". Returns
+// ok=false when no valid port (1–65535) is present. Bracketed IPv6 and a
+// trailing path are handled so an IPv6 listener isn't mis-split on an inner ":".
+func parseListenerPort(l string) (int, bool) {
+	l = strings.TrimSpace(l)
+	if l == "" {
+		return 0, false
+	}
+	if i := strings.Index(l, "://"); i >= 0 { // drop a scheme ("https://…")
+		l = l[i+3:]
+	}
+	if i := strings.IndexByte(l, '/'); i >= 0 { // drop any trailing path
+		l = l[:i]
+	}
+	if j := strings.LastIndex(l, "]:"); j >= 0 { // bracketed IPv6 → port after "]:"
+		l = l[j+1:]
+	}
+	i := strings.LastIndex(l, ":")
+	if i < 0 || i >= len(l)-1 {
+		return 0, false
+	}
+	p, err := strconv.Atoi(l[i+1:])
+	if err != nil || p <= 0 || p > 65535 {
+		return 0, false
+	}
+	return p, true
 }
 
 // SaveTopology persists a topology. Nodes that are live or draining may not be
@@ -488,7 +513,15 @@ func topologyProblems(t domain.Topology, eng domain.Engagement) []string {
 	}
 
 	nodeByID := make(map[string]domain.Node, len(t.Nodes))
+	seenID := make(map[string]bool, len(t.Nodes))
 	for _, n := range t.Nodes {
+		if n.ID != "" && seenID[n.ID] {
+			// Duplicate IDs collide in the IaC program (same Pulumi URN / Terraform
+			// resource key), silently dropping one node and pointing both results at
+			// one box. Reject before provisioning.
+			problems = append(problems, fmt.Sprintf("duplicate node id %q", n.ID))
+		}
+		seenID[n.ID] = true
 		nodeByID[n.ID] = n
 	}
 
@@ -635,6 +668,101 @@ func (s *InfraService) Deploy(ctx context.Context, engagementID string, actor st
 // for fix-forward instead (the operator then tears down manually).
 func rollbackEnabled() bool {
 	return os.Getenv("RINFRA_DEPLOY_ROLLBACK") != "off"
+}
+
+// desiredEngineNodes returns the COMPLETE set of engine-routed nodes that should
+// exist for the surviving providers: the pending nodes being deployed now PLUS
+// the engagement's already-standing engine nodes. Pulumi treats an inline
+// program as the whole desired state of its stack, so a re-deploy that declares
+// only the new nodes would destroy the already-live ones — this set prevents
+// that. Only providers present in credsMap (creds available) are included, and
+// destroyed/failed nodes are excluded (Pulumi won't recreate them; their partial
+// resources are reclaimed by the tag sweep).
+func desiredEngineNodes(nodes []domain.Node, activeProv Provisioner, credsMap map[domain.CloudProviderType]cloud.Credentials, pendingIDs map[string]bool) []domain.Node {
+	if activeProv == nil {
+		return nil
+	}
+	var out []domain.Node
+	for _, n := range nodes {
+		if _, ok := credsMap[n.Spec.Cloud]; !ok {
+			continue
+		}
+		prov, err := cloud.Get(n.Spec.Cloud)
+		if err != nil {
+			continue
+		}
+		if _, ok := prov.(orchestration.ProgramBuilder); !ok {
+			continue
+		}
+		if pendingIDs[n.ID] {
+			out = append(out, n)
+			continue
+		}
+		switch n.Status {
+		case domain.NodeLive, domain.NodeProvisioning, domain.NodeDraining:
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// nodeIngressRules derives the default inbound rules for a node from its role.
+// Provisioned infrastructure must be reachable — a security group / firewall with
+// no ingress blocks everything, including the SSH the redirector-apply step
+// needs. These defaults open only what the role requires; operators can tighten
+// them afterward via ConfigureIngress.
+func nodeIngressRules(node domain.Node) []domain.Rule {
+	// SSH for management + redirector-apply on every node.
+	rules := []domain.Rule{{Protocol: "tcp", Port: 22, SourceCIDR: "0.0.0.0/0", Allow: true}}
+	switch node.Spec.Type {
+	case domain.NodeRedirector, domain.NodePayloadHost:
+		rules = append(rules,
+			domain.Rule{Protocol: "tcp", Port: 80, SourceCIDR: "0.0.0.0/0", Allow: true},
+			domain.Rule{Protocol: "tcp", Port: 443, SourceCIDR: "0.0.0.0/0", Allow: true},
+		)
+	case domain.NodeC2Server:
+		port := 443 // common C2 HTTPS listener default
+		if p, ok := parseListenerPort(node.Canvas.Listener); ok {
+			port = p
+		}
+		rules = append(rules, domain.Rule{Protocol: "tcp", Port: port, SourceCIDR: "0.0.0.0/0", Allow: true})
+	}
+	return rules
+}
+
+// configureNodeIngress applies the node's role-derived default ingress on its
+// provider. Best-effort: a failure leaves the node live but marks it degraded
+// (it may be unreachable) and is audited, rather than failing the whole deploy —
+// closing the gap where nodes came up with no inbound rules at all.
+func (s *InfraService) configureNodeIngress(ctx context.Context, engagementID string, node *domain.Node, creds cloud.Credentials) {
+	prov, err := cloud.Get(node.Spec.Cloud)
+	if err != nil {
+		return
+	}
+	rules := nodeIngressRules(*node)
+	if err := prov.ConfigureIngress(ctx, creds, *node, rules); err != nil {
+		s.log.Warn("configure ingress failed; node may be unreachable", "node", node.ID, "cloud", node.Spec.Cloud, "err", err)
+		node.Health = domain.HealthDegraded
+		_ = s.infra.UpdateNodeStatus(ctx, node.ID, node.Status, domain.HealthDegraded)
+		s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(node)})
+		_ = s.audit.Record(ctx, audit.Event{
+			EngagementID: engagementID,
+			Actor:        "system",
+			Action:       "infra.ingress.failed",
+			Target:       node.ID,
+			Detail:       fmt.Sprintf("configure ingress failed (cloud=%s): %v", node.Spec.Cloud, err),
+			At:           time.Now().UTC(),
+		})
+		return
+	}
+	_ = s.audit.Record(ctx, audit.Event{
+		EngagementID: engagementID,
+		Actor:        "system",
+		Action:       "infra.ingress",
+		Target:       node.ID,
+		Detail:       fmt.Sprintf("ingress configured (cloud=%s, %d rule(s))", node.Spec.Cloud, len(rules)),
+		At:           time.Now().UTC(),
+	})
 }
 
 // rollbackProvisioned destroys the nodes a failed deploy DID bring live, in
@@ -812,7 +940,24 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 		}
 
 		if len(engineNodes) > 0 {
-			// Transition all engine nodes to provisioning.
+			// pendingIDs are the nodes THIS deploy is bringing up (to transition,
+			// report, and roll back on failure). Already-live nodes are handled
+			// separately below — never rolled back, only refreshed.
+			pendingIDs := make(map[string]bool, len(engineNodes))
+			for _, n := range engineNodes {
+				pendingIDs[n.ID] = true
+			}
+
+			// programNodes is the COMPLETE desired state for the engine stacks: the
+			// pending nodes PLUS the engagement's already-standing engine nodes on the
+			// surviving providers. Pulumi treats the inline program as the whole
+			// stack, so omitting already-live nodes would make this Up destroy them —
+			// breaking incremental re-deploy. Only providers we hold creds for are
+			// included (credsMap), so a node whose provider lost creds is never sent.
+			programNodes := desiredEngineNodes(t.Nodes, activeProv, credsMap, pendingIDs)
+
+			// Transition the pending nodes to provisioning (already-live nodes keep
+			// their status).
 			for _, n := range engineNodes {
 				np := nodeByID[n.ID]
 				np.Status = domain.NodeProvisioning
@@ -820,9 +965,10 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 				s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
 			}
 
-			results, err := activeProv.Deploy(ctx, engagementID, engineNodes, credsMap)
+			results, err := activeProv.Deploy(ctx, engagementID, programNodes, credsMap)
 			if err != nil {
-				// Whole-engine error — mark all remaining engine nodes failed.
+				// Whole-engine error — mark only the PENDING nodes failed; do not
+				// downgrade already-live siblings that this deploy did not touch.
 				for _, n := range engineNodes {
 					np := nodeByID[n.ID]
 					np.Status = domain.NodeFailed
@@ -835,6 +981,16 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 				for _, r := range results {
 					np, ok := nodeByID[r.NodeID]
 					if !ok {
+						continue
+					}
+					if !pendingIDs[r.NodeID] {
+						// Already-live node re-declared for desired state. Refresh its
+						// ref/IP if the provider reported them; never fail or roll it back.
+						if r.Err == nil && (r.ProviderRef != "" || r.PublicIP != "") {
+							np.ProviderRef = r.ProviderRef
+							np.PublicIP = r.PublicIP
+							_ = s.persistNodeFields(ctx, np)
+						}
 						continue
 					}
 					if r.Err != nil {
@@ -853,6 +1009,7 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 						_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeLive, domain.HealthHealthy)
 						s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
 						liveNodes = append(liveNodes, np)
+						s.configureNodeIngress(ctx, engagementID, np, credsMap[np.Spec.Cloud])
 					}
 				}
 			}
@@ -902,6 +1059,7 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 		_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeLive, domain.HealthHealthy)
 		s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
 		liveNodes = append(liveNodes, n)
+		s.configureNodeIngress(ctx, engagementID, n, directCreds)
 	}
 
 	// Partial-failure rollback: if any node failed, tear down the nodes this
@@ -1069,19 +1227,28 @@ func (s *InfraService) runTeardown(ctx context.Context, engagementID, jobID, act
 			credsMap[pt] = creds
 		}
 
-		if engineErr := activeProv.Teardown(ctx, engagementID, engineNodes, credsMap); engineErr != nil {
+		engineErr := activeProv.Teardown(ctx, engagementID, engineNodes, credsMap)
+		if engineErr != nil {
 			s.log.Error("engine.Teardown error", "engagement", engagementID, "err", engineErr)
-			// Best-effort: continue to mark nodes destroyed anyway.
 			anyFailed = true
 		}
 
-		// Mark engine nodes destroyed.
+		// On success, mark the engine nodes destroyed. On failure, leave them
+		// FAILED (reapable) — NOT destroyed — so the reaper and any later teardown
+		// retry them. Marking a node destroyed after a failed stack-destroy/sweep
+		// would hide still-live cloud resources from every future cleanup (the
+		// reaper and runTeardown both skip destroyed nodes), which is exactly the
+		// orphan the guaranteed-teardown promise exists to prevent.
+		endStatus := domain.NodeDestroyed
+		if engineErr != nil {
+			endStatus = domain.NodeFailed
+		}
 		for i := range t.Nodes {
 			n := &t.Nodes[i]
 			for _, en := range engineNodes {
 				if n.ID == en.ID {
-					n.Status = domain.NodeDestroyed
-					_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeDestroyed, domain.HealthUnknown)
+					n.Status = endStatus
+					_ = s.infra.UpdateNodeStatus(ctx, n.ID, endStatus, domain.HealthUnknown)
 					s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
 					break
 				}

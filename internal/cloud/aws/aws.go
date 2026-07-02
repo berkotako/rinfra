@@ -43,6 +43,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -60,6 +62,7 @@ import (
 	"github.com/rinfra/rinfra/internal/cloud"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
+	"github.com/rinfra/rinfra/internal/retry"
 )
 
 // Credential key constants.
@@ -160,6 +163,17 @@ func (p *provider) route53Client(ctx context.Context, creds cloud.Credentials) (
 	}), nil
 }
 
+// shortID returns the first 8 chars of an id (or the whole id if shorter), used
+// for human-readable, length-safe resource names. Guards against a panic when a
+// node/engagement ID is shorter than 8 chars (raw slicing would blow up the
+// deploy goroutine, and a panic there takes down the server).
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
 // isAWSErrorCode reports whether err is an AWS API error with the given code
 // (e.g. "InvalidInstanceID.NotFound"). Used to make deletes idempotent.
 func isAWSErrorCode(err error, code string) bool {
@@ -168,6 +182,36 @@ func isAWSErrorCode(err error, code string) bool {
 		return apiErr.ErrorCode() == code
 	}
 	return false
+}
+
+// isDependencyErr reports whether err is a transient dependency/ordering error
+// raised when a resource is deleted before the resource depending on it has
+// finished terminating: a security group still attached to a not-yet-terminated
+// instance (DependencyViolation), or an Elastic IP still associated
+// (InvalidIPAddress.InUse). Retrying these converges once TerminateInstances —
+// which is asynchronous — completes, instead of failing every teardown.
+func isDependencyErr(err error) bool {
+	for _, code := range []string{"DependencyViolation", "InvalidIPAddress.InUse", "InvalidGroup.InUse", "IncorrectState"} {
+		if isAWSErrorCode(err, code) {
+			return true
+		}
+	}
+	return false
+}
+
+// teardownRetryAttempts / teardownRetryBackoff bound how long the EIP-release
+// and SG-delete calls wait for an in-flight instance termination to clear the
+// dependency (~3+6+12+24+48s ≈ 90s total, within a typical EC2 terminate).
+const (
+	teardownRetryAttempts = 6
+	teardownRetryBackoff  = 3 * time.Second
+)
+
+// retryOnDependency runs fn, retrying only while it fails with a transient
+// dependency/ordering error (see isDependencyErr). In tests (and once the
+// instance is gone) fn succeeds on the first call, so no sleep occurs.
+func retryOnDependency(ctx context.Context, fn func() error) error {
+	return retry.Do(ctx, teardownRetryAttempts, teardownRetryBackoff, isDependencyErr, fn)
 }
 
 // BuildProgram implements orchestration.ProgramBuilder. Creates an EC2
@@ -190,7 +234,7 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 		}
 
 		for _, n := range nodes {
-			nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
+			nodeName := fmt.Sprintf("rinfra-%s-%s", shortID(engagementID), shortID(n.ID))
 			instanceType := n.Spec.Size
 			if instanceType == "" {
 				instanceType = "t3.micro"
@@ -487,11 +531,29 @@ func stripZoneIDPrefix(id string) string {
 func buildRoute53RecordArgs(rec domain.Record, zoneID string) route53RecordArgs {
 	return route53RecordArgs{
 		ZoneID:  zoneID,
-		Name:    rec.Name + "." + rec.Zone,
+		Name:    qualifyRoute53Name(rec.Name, rec.Zone),
 		Type:    rec.Type,
 		TTL:     rec.TTL,
 		Records: []string{rec.Value},
 	}
+}
+
+// qualifyRoute53Name returns the fully-qualified record name for a Route53
+// record set. It is idempotent: the service layer (dnsRecordFor) already passes
+// the full FQDN as rec.Name for AWS, while direct callers may pass a relative
+// name ("cdn"). Appending the zone unconditionally would double it
+// ("cdn.example.com.example.com"); this only appends the zone when it is not
+// already present, and maps an empty/"@" name to the apex.
+func qualifyRoute53Name(name, zone string) string {
+	name = strings.TrimSuffix(strings.TrimSpace(name), ".")
+	z := strings.TrimSuffix(strings.TrimSpace(zone), ".")
+	if name == "" || name == "@" {
+		return z
+	}
+	if name == z || strings.HasSuffix(name, "."+z) {
+		return name // already fully-qualified
+	}
+	return name + "." + z
 }
 
 // route53RecordArgs is the internal representation for a Route53 record.
@@ -525,12 +587,22 @@ func addRoute53Record(ctx *pulumi.Context, name string, args route53RecordArgs) 
 	return err
 }
 
-// Destroy terminates the node's EC2 instance. Idempotent: an empty ProviderRef
-// is a no-op, and an InvalidInstanceID.NotFound error (already gone) is treated
-// as success.
+// Destroy tears the node fully down: it terminates the EC2 instance AND releases
+// the node's dedicated Elastic IP and deletes its security group (both tagged
+// rinfra:node=<nodeID> by BuildProgram / AssignStaticIP). Terminating the
+// instance alone would orphan the billed EIP and the SG — which is exactly what
+// happens on a partial-deploy rollback (rollbackProvisioned calls this), so
+// per-node Destroy must be node-scoped-complete, not instance-only.
 //
-// In the Pulumi-driven path, Destroy is complemented by Engine.Teardown (stack
-// destroy) and SweepOrphans; this direct method is for out-of-band cleanup.
+// Idempotent: an empty ProviderRef is a no-op, an InvalidInstanceID.NotFound
+// (already gone) is treated as success, and the EIP/SG deletes tolerate NotFound.
+// The EIP-release and SG-delete are retried on the transient DependencyViolation
+// /InUse errors that occur while the async instance termination is still in
+// flight (see retryOnDependency).
+//
+// In the Pulumi-driven path, engagement teardown goes through Engine.Teardown
+// (stack destroy) + SweepOrphans; this direct method is for out-of-band cleanup
+// and single-node rollback.
 func (p *provider) Destroy(ctx context.Context, creds cloud.Credentials, node domain.Node) error {
 	if node.ProviderRef == "" {
 		return nil // Never provisioned.
@@ -545,7 +617,63 @@ func (p *provider) Destroy(ctx context.Context, creds cloud.Credentials, node do
 	if err != nil && !isAWSErrorCode(err, "InvalidInstanceID.NotFound") {
 		return fmt.Errorf("aws.Destroy: terminate instance %s: %w", node.ProviderRef, err)
 	}
+	// Clean up the node's dedicated networking (EIP + SG), matched by the
+	// per-node tag so siblings in the same engagement are never touched.
+	if node.ID != "" {
+		if errs := p.cleanupNodeNetworking(ctx, client, node.ID); len(errs) > 0 {
+			return fmt.Errorf("aws.Destroy: node %s: %w", node.ID, errors.Join(errs...))
+		}
+	}
 	return nil
+}
+
+// cleanupNodeNetworking releases the Elastic IPs and deletes the security groups
+// tagged rinfra:node=<nodeID>. It is the node-scoped analogue of the
+// engagement-scoped SweepOrphans and shares its retry-on-dependency posture.
+// Returns the per-resource failures (NotFound treated as already-gone).
+func (p *provider) cleanupNodeNetworking(ctx context.Context, client *ec2.Client, nodeID string) []error {
+	nodeFilter := []ec2types.Filter{{
+		Name:   awssdk.String("tag:" + TagKey + ":node"),
+		Values: []string{nodeID},
+	}}
+	var errs []error
+
+	addrs, err := client.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: nodeFilter})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("describe addresses: %w", err))
+	} else {
+		for _, a := range addrs.Addresses {
+			if a.AllocationId == nil {
+				continue
+			}
+			allocID := a.AllocationId
+			if err := retryOnDependency(ctx, func() error {
+				_, e := client.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: allocID})
+				return e
+			}); err != nil && !isAWSErrorCode(err, "InvalidAllocationID.NotFound") {
+				errs = append(errs, fmt.Errorf("release address %s: %w", awssdk.ToString(allocID), err))
+			}
+		}
+	}
+
+	sgs, err := client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{Filters: nodeFilter})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("describe security groups: %w", err))
+	} else {
+		for _, sg := range sgs.SecurityGroups {
+			if sg.GroupId == nil {
+				continue
+			}
+			groupID := sg.GroupId
+			if err := retryOnDependency(ctx, func() error {
+				_, e := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: groupID})
+				return e
+			}); err != nil && !isAWSErrorCode(err, "InvalidGroup.NotFound") {
+				errs = append(errs, fmt.Errorf("delete security group %s: %w", awssdk.ToString(groupID), err))
+			}
+		}
+	}
+	return errs
 }
 
 // SweepOrphans deletes every resource tagged rinfra=<engagementID> — EC2
@@ -585,7 +713,8 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 		}
 	}
 
-	// 2. Elastic IPs tagged for this engagement.
+	// 2. Elastic IPs tagged for this engagement. Retried on InUse: TerminateInstances
+	//    above is asynchronous, so an EIP can still be associated for a short window.
 	addrs, err := client.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: tagFilter})
 	if err != nil {
 		errs = append(errs, fmt.Errorf("describe addresses: %w", err))
@@ -594,13 +723,19 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 			if a.AllocationId == nil {
 				continue
 			}
-			if _, err := client.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: a.AllocationId}); err != nil && !isAWSErrorCode(err, "InvalidAllocationID.NotFound") {
-				errs = append(errs, fmt.Errorf("release address %s: %w", awssdk.ToString(a.AllocationId), err))
+			allocID := a.AllocationId
+			if err := retryOnDependency(ctx, func() error {
+				_, e := client.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: allocID})
+				return e
+			}); err != nil && !isAWSErrorCode(err, "InvalidAllocationID.NotFound") {
+				errs = append(errs, fmt.Errorf("release address %s: %w", awssdk.ToString(allocID), err))
 			}
 		}
 	}
 
-	// 3. Security groups tagged for this engagement.
+	// 3. Security groups tagged for this engagement. Retried on DependencyViolation:
+	//    a SG can't be deleted until the instance it is attached to has finished
+	//    terminating, and that termination is still in flight from step 1.
 	sgs, err := client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{Filters: tagFilter})
 	if err != nil {
 		errs = append(errs, fmt.Errorf("describe security groups: %w", err))
@@ -609,8 +744,12 @@ func (p *provider) SweepOrphans(ctx context.Context, creds cloud.Credentials, en
 			if sg.GroupId == nil {
 				continue
 			}
-			if _, err := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: sg.GroupId}); err != nil && !isAWSErrorCode(err, "InvalidGroup.NotFound") {
-				errs = append(errs, fmt.Errorf("delete security group %s: %w", awssdk.ToString(sg.GroupId), err))
+			groupID := sg.GroupId
+			if err := retryOnDependency(ctx, func() error {
+				_, e := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: groupID})
+				return e
+			}); err != nil && !isAWSErrorCode(err, "InvalidGroup.NotFound") {
+				errs = append(errs, fmt.Errorf("delete security group %s: %w", awssdk.ToString(groupID), err))
 			}
 		}
 	}

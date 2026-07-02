@@ -7,6 +7,7 @@ package retry
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -56,8 +57,13 @@ var transientMarkers = []string{
 	"rate limit", "ratelimit", "throttl", "too many requests", "toomanyrequests",
 	"temporarily", "try again", "temporary failure",
 	"service unavailable", "serviceunavailable", "internalerror", "internal error",
-	"500", "502", "503", "504",
 }
+
+// http5xx matches a 5xx HTTP status as a standalone number, so a permanent error
+// whose text merely CONTAINS the digits (a resource id "sg-500ab", a port 5000)
+// is not misclassified as transient. Only 500/502/503/504 — the retryable
+// server-side statuses — are treated as transient.
+var http5xx = regexp.MustCompile(`(^|[^0-9])(500|502|503|504)([^0-9]|$)`)
 
 // IsTransient is the default classifier: it matches common transient-failure
 // markers (case-insensitive) in the error text. Conservative by design — an
@@ -72,5 +78,5 @@ func IsTransient(err error) bool {
 			return true
 		}
 	}
-	return false
+	return http5xx.MatchString(msg)
 }

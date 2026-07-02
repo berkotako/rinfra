@@ -24,7 +24,7 @@ func (p *provider) BuildConfig(engagementID string, creds cloud.Credentials, nod
 	outputs := map[string]any{}
 
 	for _, n := range nodes {
-		nodeName := fmt.Sprintf("rinfra-%s-%s", engagementID[:8], n.ID[:8])
+		nodeName := fmt.Sprintf("rinfra-%s-%s", shortID(engagementID), shortID(n.ID))
 		instanceType := n.Spec.Size
 		if instanceType == "" {
 			instanceType = "t3.micro"

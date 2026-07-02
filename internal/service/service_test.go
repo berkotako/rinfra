@@ -481,18 +481,20 @@ func TestDeployRealProviderNoCreds(t *testing.T) {
 	testEngine.RegisterBuilder(domain.CloudDigitalOcean, doBuilder)
 	svcInfra.WithEngine(testEngine)
 
-	// Save a topology with a DO node (real provider).
+	// Save a valid topology with DO nodes (real provider) so deploy passes
+	// validation and reaches the async provisioning path (where the no-creds
+	// failure is surfaced).
 	topology := domain.Topology{
 		EngagementID: eng.ID,
 		Nodes: []domain.Node{
 			{
 				ID:     "node-redir-do",
-				Spec:   domain.NodeSpec{Type: domain.NodeRedirector, Cloud: domain.CloudDigitalOcean},
-				Canvas: domain.NodeCanvas{Name: "redir-do"},
+				Spec:   domain.NodeSpec{Type: domain.NodeRedirector, Cloud: domain.CloudDigitalOcean, Region: "nyc3", Size: "s-1vcpu-1gb", ProfileName: "https"},
+				Canvas: domain.NodeCanvas{Name: "redir-do", FrontDomain: "cdn.example.com"},
 			},
 			{
 				ID:     "node-c2-do",
-				Spec:   domain.NodeSpec{Type: domain.NodeC2Server, Cloud: domain.CloudDigitalOcean, C2Framework: "sliver"},
+				Spec:   domain.NodeSpec{Type: domain.NodeC2Server, Cloud: domain.CloudDigitalOcean, Region: "nyc3", Size: "s-2vcpu-4gb", C2Framework: "sliver"},
 				Canvas: domain.NodeCanvas{Name: "c2-do"},
 			},
 		},
