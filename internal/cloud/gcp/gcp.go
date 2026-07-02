@@ -420,6 +420,29 @@ func (p *provider) ConfigureIngress(ctx context.Context, creds cloud.Credentials
 			return fmt.Errorf("gcp.ConfigureIngress: insert firewall %s: %w", fwName, err)
 		}
 	}
+
+	// Delete any stale per-source firewalls left by a previous apply with MORE
+	// sources. GCP firewall rules are additive, so a leftover higher-index rule
+	// (e.g. rinfra-fw-<node>-1 after shrinking from two source CIDRs to one) would
+	// keep allowing the removed source — defeating the per-source isolation. Remove
+	// every rinfra-fw-<node>-* firewall for this node that isn't in the desired set
+	// (an empty desired set — no allow rules — deletes them all).
+	desired := make(map[string]bool, len(sources))
+	for i := range sources {
+		desired[fmt.Sprintf("%s-%d", firewallName(node.ID), i)] = true
+	}
+	stalePrefix := firewallName(node.ID) + "-"
+	list, err := svc.Firewalls.List(proj).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("gcp.ConfigureIngress: list firewalls for stale cleanup: %w", err)
+	}
+	for _, fw := range list.Items {
+		if strings.HasPrefix(fw.Name, stalePrefix) && !desired[fw.Name] {
+			if _, err := svc.Firewalls.Delete(proj, fw.Name).Context(ctx).Do(); err != nil && !isNotFound(err) {
+				return fmt.Errorf("gcp.ConfigureIngress: delete stale firewall %s: %w", fw.Name, err)
+			}
+		}
+	}
 	return nil
 }
 

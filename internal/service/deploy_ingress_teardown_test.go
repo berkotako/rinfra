@@ -94,3 +94,57 @@ func TestTeardown_EngineErrorKeepsNodesReapable(t *testing.T) {
 		t.Error("engagement must NOT be completed when teardown failed")
 	}
 }
+
+// TestTeardown_NeverProvisionedNoCreds verifies that tearing down an engagement
+// whose engine nodes were never provisioned (empty ProviderRef) and whose creds
+// are absent SUCCEEDS — there is nothing to destroy, so missing creds must not
+// wedge teardown. Uses the real Pulumi engine; its missing-creds branch returns
+// before ever invoking Pulumi, so no CLI is needed.
+func TestTeardown_NeverProvisionedNoCreds(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+	svcInfra := buildInfraService(t, s, hub)
+
+	doProv, err := cloud.Get(domain.CloudDigitalOcean)
+	if err != nil {
+		t.Skipf("DO provider not registered: %v", err)
+	}
+	doBuilder, ok := doProv.(orchestration.ProgramBuilder)
+	if !ok {
+		t.Skip("DO provider does not implement ProgramBuilder")
+	}
+	engine := orchestration.New(t.TempDir(), testLogger())
+	engine.RegisterBuilder(domain.CloudDigitalOcean, doBuilder)
+	svcInfra.WithEngine(engine)
+
+	// A DO node that failed to provision (no ProviderRef) with no stored creds.
+	topology := domain.Topology{
+		EngagementID: eng.ID,
+		Nodes: []domain.Node{
+			{ID: "do-unprov", Spec: domain.NodeSpec{Type: domain.NodeC2Server, Cloud: domain.CloudDigitalOcean, C2Framework: "sliver"}, Status: domain.NodeFailed},
+		},
+	}
+	if err := s.infra.SaveTopology(ctx, topology); err != nil {
+		t.Fatalf("SaveTopology: %v", err)
+	}
+
+	jobID, err := svcInfra.Teardown(ctx, eng.ID, "op")
+	if err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if st := waitForJob(t, ctx, s.job, jobID); st != domain.JobDone {
+		t.Errorf("teardown job status = %s, want done (nothing to destroy)", st)
+	}
+	top, _ := svcInfra.GetTopology(ctx, eng.ID)
+	for _, n := range top.Nodes {
+		if n.ID == "do-unprov" && n.Status != domain.NodeDestroyed {
+			t.Errorf("never-provisioned node should be marked destroyed, got %s", n.Status)
+		}
+	}
+	if got, _ := s.eng.Get(ctx, eng.ID); got.Status != domain.EngagementCompleted {
+		t.Errorf("engagement should complete when there was nothing to tear down, got %s", got.Status)
+	}
+}

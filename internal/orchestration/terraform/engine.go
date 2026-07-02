@@ -197,8 +197,15 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 	for providerType, providerNodes := range groupByProvider(nodes) {
 		providerCreds, ok := creds[providerType]
 		if !ok {
-			e.log.Warn("terraform: no creds for teardown", "provider", providerType)
-			errs = append(errs, fmt.Errorf("no credentials for cloud %q (cannot destroy or sweep)", providerType))
+			// Missing creds is only a failure if something was provisioned. A deploy
+			// that failed on missing creds before writing any config/state leaves
+			// nodes with no ProviderRef and nothing to destroy — don't wedge teardown.
+			if anyProvisioned(providerNodes) {
+				e.log.Warn("terraform: no creds for teardown of provisioned nodes", "provider", providerType)
+				errs = append(errs, fmt.Errorf("no credentials for cloud %q (cannot destroy provisioned resources)", providerType))
+			} else {
+				e.log.Info("terraform: no creds but nothing provisioned; nothing to destroy", "provider", providerType)
+			}
 			continue
 		}
 		dir := e.workDir(engagementID, providerType)
@@ -303,6 +310,17 @@ func groupByProvider(nodes []domain.Node) map[domain.CloudProviderType][]domain.
 		out[n.Spec.Cloud] = append(out[n.Spec.Cloud], n)
 	}
 	return out
+}
+
+// anyProvisioned reports whether any node carries a ProviderRef (real resources
+// exist that a teardown must reach).
+func anyProvisioned(nodes []domain.Node) bool {
+	for _, n := range nodes {
+		if n.ProviderRef != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func errResults(nodes []domain.Node, err error) []orchestration.NodeResult {

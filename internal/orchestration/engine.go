@@ -30,6 +30,13 @@
 // pending nodes plus the already-standing ones), not just the newly-pending
 // nodes, so an incremental re-deploy converges instead of destroying live nodes.
 //
+// Engagements provisioned before the per-provider rename kept their state in the
+// old single stack (rinfra-<engagement-id>). Deploy/Teardown adopt that legacy
+// stack into the new provider-suffixed name on first use (single-provider
+// engagements only; see adoptLegacyStack), so they update existing infrastructure
+// instead of creating duplicates. This is a no-op on any system with no legacy
+// stack.
+//
 // # Resource tagging
 //
 // Every resource receives two tags / labels applied by the per-provider inline
@@ -53,6 +60,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
@@ -221,6 +229,16 @@ func (e *Engine) Deploy(ctx context.Context, engagementID string, nodes []domain
 			continue
 		}
 
+		// Adopt a pre-rename engagement stack into this provider-suffixed stack, so
+		// an engagement deployed before the per-provider rename updates its existing
+		// infrastructure instead of creating duplicates. No-op on fresh systems.
+		if err := e.adoptLegacyStack(ctx, stack, engagementID, providerType, len(byProvider) == 1); err != nil {
+			for _, n := range providerNodes {
+				results = append(results, NodeResult{NodeID: n.ID, Err: err})
+			}
+			continue
+		}
+
 		// Pulumi is declarative, so re-running Up after a transient failure is
 		// safe (it converges to the same desired state).
 		var upRes auto.UpResult
@@ -275,8 +293,17 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 
 		providerCreds, ok := creds[providerType]
 		if !ok {
-			e.log.Warn("orchestration: no creds for teardown", "provider", providerType)
-			errs = append(errs, fmt.Errorf("no credentials for cloud %q (cannot destroy stack or sweep)", providerType))
+			// Missing creds only matters if something was actually provisioned. When
+			// no node has a ProviderRef (e.g. a deploy that failed on missing creds
+			// before creating anything), there is no stack/resource to destroy, so
+			// this is NOT a teardown failure — the caller can mark the nodes
+			// destroyed. Erroring here would wedge every teardown/reaper attempt.
+			if anyProvisioned(providerNodes) {
+				e.log.Warn("orchestration: no creds for teardown of provisioned nodes", "provider", providerType)
+				errs = append(errs, fmt.Errorf("no credentials for cloud %q (cannot destroy provisioned resources)", providerType))
+			} else {
+				e.log.Info("orchestration: no creds but nothing provisioned; nothing to destroy", "provider", providerType)
+			}
 			continue
 		}
 
@@ -285,10 +312,16 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 		sName := stackName(engagementID, providerType)
 		projectName := "rinfra"
 
-		stack, err := auto.SelectStackInlineSource(ctx, sName, projectName, program, auto.EnvVars(envVars))
+		// Upsert (not Select) so a pre-rename engagement can adopt its legacy stack
+		// into this name before destroy; on a fresh system this just opens an empty
+		// stack and Destroy is a no-op.
+		stack, err := auto.UpsertStackInlineSource(ctx, sName, projectName, program, auto.EnvVars(envVars))
 		if err != nil {
-			// Stack does not exist — nothing to destroy for this provider.
-			e.log.Info("orchestration: stack not found for teardown (already destroyed?)", "engagement", engagementID, "provider", providerType, "err", err)
+			e.log.Error("orchestration: could not open stack for teardown", "engagement", engagementID, "provider", providerType, "err", err)
+			errs = append(errs, fmt.Errorf("open stack for cloud %q: %w", providerType, err))
+		} else if aerr := e.adoptLegacyStack(ctx, stack, engagementID, providerType, len(byProvider) == 1); aerr != nil {
+			e.log.Error("orchestration: legacy stack adoption failed on teardown", "engagement", engagementID, "provider", providerType, "err", aerr)
+			errs = append(errs, fmt.Errorf("adopt legacy stack for cloud %q: %w", providerType, aerr))
 		} else {
 			err = retry.Do(ctx, deployAttempts, deployBackoff, retry.IsTransient, func() error {
 				_, e2 := stack.Destroy(ctx, optdestroy.ProgressStreams(newLogWriter(e.log, engagementID)))
@@ -312,6 +345,82 @@ func (e *Engine) Teardown(ctx context.Context, engagementID string, nodes []doma
 	}
 
 	return errors.Join(errs...)
+}
+
+// legacyStackName is the pre–per-provider stack name (one stack per engagement,
+// no provider suffix). Engagements provisioned before the rename have their state
+// here; adoptLegacyStack migrates it into the provider-suffixed stack so the next
+// deploy updates existing infrastructure instead of creating duplicates.
+func legacyStackName(engagementID string) string { return "rinfra-" + engagementID }
+
+// adoptLegacyStack migrates the pre-rename engagement stack (rinfra-<eng>) into
+// the just-opened provider-suffixed stack. Guards keep it safe:
+//   - single-provider deploys only — the legacy state unambiguously belongs to
+//     this one provider (a legacy multi-cloud stack was already broken; it's left
+//     for manual teardown rather than mis-imported into one provider's stack);
+//   - only when the new stack has no resources yet — never clobber state that was
+//     already migrated or freshly created.
+//
+// It is a no-op on any system without a legacy stack (every fresh deploy), so the
+// normal path is unaffected. Errors are surfaced: a botched migration must fail
+// the operation rather than silently duplicate or drop resources.
+func (e *Engine) adoptLegacyStack(ctx context.Context, stack auto.Stack, engagementID string, providerType domain.CloudProviderType, singleProvider bool) error {
+	legacy := legacyStackName(engagementID)
+	newName := stackName(engagementID, providerType)
+	if !singleProvider || legacy == newName {
+		return nil
+	}
+	ws := stack.Workspace()
+	summaries, err := ws.ListStacks(ctx)
+	if err != nil {
+		e.log.Warn("orchestration: could not list stacks for legacy migration; proceeding without it", "err", err)
+		return nil
+	}
+	legacyFound, newCount := false, 0
+	for _, s := range summaries {
+		switch {
+		case stackNameMatches(s.Name, legacy):
+			legacyFound = true
+		case stackNameMatches(s.Name, newName):
+			if s.ResourceCount != nil {
+				newCount = *s.ResourceCount
+			}
+		}
+	}
+	if !legacyFound || newCount > 0 {
+		return nil // nothing to migrate, or the new stack already holds state
+	}
+	dep, err := ws.ExportStack(ctx, legacy)
+	if err != nil {
+		return fmt.Errorf("adopt legacy stack %q: export: %w", legacy, err)
+	}
+	if err := ws.ImportStack(ctx, newName, dep); err != nil {
+		return fmt.Errorf("adopt legacy stack into %q: import: %w", newName, err)
+	}
+	if err := ws.RemoveStack(ctx, legacy); err != nil {
+		// State is safe in the new stack; a lingering empty legacy stack is cosmetic.
+		e.log.Warn("orchestration: migrated legacy stack but could not remove it", "legacy", legacy, "err", err)
+	}
+	e.log.Info("orchestration: migrated legacy engagement stack to per-provider stack", "from", legacy, "to", newName)
+	return nil
+}
+
+// stackNameMatches reports whether a ListStacks summary name refers to the given
+// short stack name. Backends may qualify names (org/project/stack), so match the
+// exact name or a "/"-suffixed form.
+func stackNameMatches(summaryName, want string) bool {
+	return summaryName == want || strings.HasSuffix(summaryName, "/"+want)
+}
+
+// anyProvisioned reports whether any node in the group carries a ProviderRef,
+// i.e. whether real cloud resources exist that a teardown must reach.
+func anyProvisioned(nodes []domain.Node) bool {
+	for _, n := range nodes {
+		if n.ProviderRef != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // groupByProvider partitions nodes by their Spec.Cloud value.
