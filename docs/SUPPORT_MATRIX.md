@@ -19,6 +19,18 @@ redirectors/payload hosts; the C2 listener port on C2 servers) and calls
 `ConfigureIngress`. A failure marks the node `degraded` (possibly unreachable)
 rather than failing the whole deploy.
 
+**Stable addresses.** Every provider exports a durable public IP as the node's
+`PublicIP` so redirector DNS never points at an address that can change: AWS
+Elastic IP, GCP static regional Address, Azure static Public IP, and — since a
+droplet's own `ipv4_address` is ephemeral — DigitalOcean a **Reserved IP** bound
+to the droplet (reclaimed on teardown by the tag sweep).
+
+**DNS zone resolution.** `ManageDNS` accepts the zone as either the provider's
+native zone identifier or the DNS domain, and resolves the latter: AWS looks up
+the hosted-zone ID by name, and GCP maps the domain to a managed-zone **name** by
+matching `DnsName` (a managed-zone name can't contain dots, so the raw apex would
+never match). This lets the service default the zone to the apex domain.
+
 Provisioning always uses the **customer's** per-engagement credentials. RInfra
 never hosts attacker infra on its own tenancy.
 

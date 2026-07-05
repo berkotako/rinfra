@@ -373,8 +373,9 @@ func registrableDomain(fqdn string) string {
 //     to the zone ("cdn"; "@" for the apex itself).
 //   - AWS Route53: Zone is the apex (hosted zone resolved by name), Name is the
 //     full FQDN.
-//   - GCP Cloud DNS: Zone is the managed-zone name (defaulted to the apex, the
-//     common convention), Name is the FQDN with a trailing dot.
+//   - GCP Cloud DNS: Zone is the apex domain; GCP's ManageDNS resolves it to the
+//     managed-zone NAME by matching DnsName (a zone name can't contain dots).
+//     Name is the FQDN with a trailing dot.
 //
 // Zone is a best-effort default; operators whose managed zone / hosted zone is
 // not named after the apex can still drive ManageDNS directly.
