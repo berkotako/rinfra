@@ -36,6 +36,34 @@ func TestDeploy_ConfiguresIngress(t *testing.T) {
 	}
 }
 
+// TestDeploy_RejectsConcurrentJob verifies the atomic single-active-job guard: a
+// second Deploy while the first job is still active is rejected with
+// ErrJobRunning, even though the first job is only PENDING (which the
+// ListRunning-based pre-check would miss — so this exercises the Create-level
+// guard that closes the TOCTOU window), and no duplicate job is created.
+func TestDeploy_RejectsConcurrentJob(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcEng := service.NewEngagementService(s.eng, s.audit)
+	eng := authorizedEngagement(t, ctx, svcEng)
+	svcInfra := buildInfraService(t, s, hub)
+	saveTestTopology(t, ctx, svcInfra, eng.ID)
+
+	jobID, err := svcInfra.Deploy(ctx, eng.ID, "op")
+	if err != nil {
+		t.Fatalf("first Deploy: %v", err)
+	}
+
+	// Second deploy before the first finishes must be rejected.
+	if _, err := svcInfra.Deploy(ctx, eng.ID, "op"); !errors.Is(err, service.ErrJobRunning) {
+		t.Errorf("concurrent Deploy: got %v, want ErrJobRunning", err)
+	}
+
+	// Let the first job finish so the test doesn't leak a running goroutine.
+	waitForJob(t, ctx, s.job, jobID)
+}
+
 // errTeardownProvisioner is a registered IaC backend whose Teardown always
 // errors, to exercise the failed-teardown path.
 type errTeardownProvisioner struct{}

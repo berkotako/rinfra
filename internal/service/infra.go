@@ -621,9 +621,26 @@ func (s *InfraService) Deploy(ctx context.Context, engagementID string, actor st
 		return "", fmt.Errorf("%w: %s", ErrInvalidTopology, strings.Join(problems, "; "))
 	}
 
-	// Reject if a job is already running.
+	// Fast pre-check (nice error before doing more work). The authoritative guard
+	// is the atomic JobStore.Create below, which also closes the TOCTOU window.
 	if err := s.assertNoActiveJob(ctx, engagementID); err != nil {
 		return "", err
+	}
+
+	// Create the job FIRST — its creation is atomic ("one active infra job per
+	// engagement"), so two concurrent deploys can't both proceed. Only audit and
+	// transition the engagement once we actually own the job.
+	job := domain.Job{
+		EngagementID: engagementID,
+		Kind:         domain.JobDeploy,
+		Status:       domain.JobPending,
+	}
+	jobID, err := s.jobs.Create(ctx, job)
+	if err != nil {
+		if errors.Is(err, store.ErrActiveJobExists) {
+			return "", fmt.Errorf("%w: %v", ErrJobRunning, err)
+		}
+		return "", fmt.Errorf("create deploy job: %w", err)
 	}
 
 	// Record the deploy intent before any cloud call.
@@ -635,16 +652,6 @@ func (s *InfraService) Deploy(ctx context.Context, engagementID string, actor st
 		Detail:       "deploy initiated",
 		At:           time.Now().UTC(),
 	})
-
-	job := domain.Job{
-		EngagementID: engagementID,
-		Kind:         domain.JobDeploy,
-		Status:       domain.JobPending,
-	}
-	jobID, err := s.jobs.Create(ctx, job)
-	if err != nil {
-		return "", fmt.Errorf("create deploy job: %w", err)
-	}
 
 	// Transition engagement to active.
 	_ = s.engagements.UpdateStatus(ctx, engagementID, domain.EngagementActive)
@@ -1096,32 +1103,36 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 	})
 }
 
-// persistNodeFields re-saves a single node's IP/ProviderRef/Status by updating
-// the topology. This is a best-effort write; errors are logged but do not fail
-// the deploy.
+// persistNodeFields writes a single node's provisioning outputs (ProviderRef,
+// PublicIP) and status/health with one targeted store update. It replaces an
+// earlier whole-topology read-modify-write, which could clobber a concurrent
+// SaveTopology (lost update) or resurrect a node the user deleted mid-deploy.
+// Best-effort: errors are logged, not fatal to the deploy.
 func (s *InfraService) persistNodeFields(ctx context.Context, n *domain.Node) error {
-	t, err := s.infra.GetTopology(ctx, n.EngagementID)
-	if err != nil {
-		return err
-	}
-	for i := range t.Nodes {
-		if t.Nodes[i].ID == n.ID {
-			t.Nodes[i].ProviderRef = n.ProviderRef
-			t.Nodes[i].PublicIP = n.PublicIP
-			t.Nodes[i].Status = n.Status
-			t.Nodes[i].Health = n.Health
-		}
-	}
-	return s.infra.SaveTopology(ctx, t)
+	return s.infra.UpdateNodeProvisioning(ctx, n.ID, n.ProviderRef, n.PublicIP, n.Status, n.Health)
 }
 
 // Teardown drains and destroys all nodes for an engagement. It does NOT gate
 // on CanDeploy — teardown must always work. Reconciles against actual cloud
 // state via the provider.
 func (s *InfraService) Teardown(ctx context.Context, engagementID string, actor string) (string, error) {
-	// No CanDeploy gate for teardown — it must always work.
+	// No CanDeploy gate for teardown — it must always work. Fast pre-check; the
+	// atomic Create below is the authoritative single-active-job guard.
 	if err := s.assertNoActiveJob(ctx, engagementID); err != nil {
 		return "", err
+	}
+
+	job := domain.Job{
+		EngagementID: engagementID,
+		Kind:         domain.JobTeardown,
+		Status:       domain.JobPending,
+	}
+	jobID, err := s.jobs.Create(ctx, job)
+	if err != nil {
+		if errors.Is(err, store.ErrActiveJobExists) {
+			return "", fmt.Errorf("%w: %v", ErrJobRunning, err)
+		}
+		return "", fmt.Errorf("create teardown job: %w", err)
 	}
 
 	_ = s.audit.Record(ctx, audit.Event{
@@ -1132,16 +1143,6 @@ func (s *InfraService) Teardown(ctx context.Context, engagementID string, actor 
 		Detail:       "teardown initiated",
 		At:           time.Now().UTC(),
 	})
-
-	job := domain.Job{
-		EngagementID: engagementID,
-		Kind:         domain.JobTeardown,
-		Status:       domain.JobPending,
-	}
-	jobID, err := s.jobs.Create(ctx, job)
-	if err != nil {
-		return "", fmt.Errorf("create teardown job: %w", err)
-	}
 
 	go s.runTeardown(context.Background(), engagementID, jobID, actor)
 
