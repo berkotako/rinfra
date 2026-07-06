@@ -145,6 +145,48 @@ func TestInfraStore_UpdateNodeStatusNotFound(t *testing.T) {
 	}
 }
 
+func TestInfraStore_UpdateNodeProvisioning(t *testing.T) {
+	s := memstore.NewInfraStore()
+	_ = s.SaveTopology(ctx, domain.Topology{
+		EngagementID: "eng-1",
+		Nodes:        []domain.Node{{ID: "n1", Spec: domain.NodeSpec{Type: domain.NodeRedirector, Cloud: domain.CloudAWS, Region: "us-east-1", Size: "t3.small"}}},
+	})
+	if err := s.UpdateNodeProvisioning(ctx, "n1", "i-abc", "203.0.113.5", domain.NodeLive, domain.HealthHealthy); err != nil {
+		t.Fatalf("UpdateNodeProvisioning: %v", err)
+	}
+	nodes, _ := s.NodesForEngagement(ctx, "eng-1")
+	if len(nodes) == 0 {
+		t.Fatal("no nodes returned")
+	}
+	n := nodes[0]
+	if n.ProviderRef != "i-abc" || n.PublicIP != "203.0.113.5" || n.Status != domain.NodeLive || n.Health != domain.HealthHealthy {
+		t.Errorf("node not fully updated: %+v", n)
+	}
+}
+
+// TestInfraStore_UpdateNodeProvisioningNoResurrect verifies the targeted update
+// never re-inserts a node a concurrent SaveTopology removed — it returns
+// ErrNotFound and leaves the topology without the deleted node (the whole-topology
+// read-modify-write it replaced could resurrect it).
+func TestInfraStore_UpdateNodeProvisioningNoResurrect(t *testing.T) {
+	s := memstore.NewInfraStore()
+	_ = s.SaveTopology(ctx, domain.Topology{
+		EngagementID: "eng-1",
+		Nodes:        []domain.Node{{ID: "n1", Spec: domain.NodeSpec{Type: domain.NodeRedirector, Cloud: domain.CloudAWS, Region: "us-east-1", Size: "t3.small"}}},
+	})
+	// User deletes the node mid-deploy (SaveTopology without n1).
+	_ = s.SaveTopology(ctx, domain.Topology{EngagementID: "eng-1", Nodes: nil})
+
+	err := s.UpdateNodeProvisioning(ctx, "n1", "i-abc", "203.0.113.5", domain.NodeLive, domain.HealthHealthy)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for deleted node, got: %v", err)
+	}
+	nodes, _ := s.NodesForEngagement(ctx, "eng-1")
+	if len(nodes) != 0 {
+		t.Errorf("deleted node must not be resurrected, got %d nodes", len(nodes))
+	}
+}
+
 // --- ScenarioStore ---
 
 func TestScenarioStore_SaveAndGet(t *testing.T) {
@@ -280,6 +322,65 @@ func TestJobStore_CreateAndGet(t *testing.T) {
 	}
 	if got.Kind != domain.JobDeploy {
 		t.Errorf("Kind = %q, want deploy", got.Kind)
+	}
+}
+
+// TestJobStore_SingleActiveInfraJob verifies the atomic guard: at most one active
+// (pending/running) deploy/teardown job per engagement, while scenario runs and
+// other engagements are unaffected, and a terminal job frees the slot.
+func TestJobStore_SingleActiveInfraJob(t *testing.T) {
+	s := memstore.NewJobStore()
+
+	id1, err := s.Create(ctx, domain.Job{EngagementID: "eng-1", Kind: domain.JobDeploy, Status: domain.JobPending})
+	if err != nil {
+		t.Fatalf("first deploy job: %v", err)
+	}
+
+	// A second active infra job for the same engagement is rejected — even a
+	// teardown, and even while the first is only PENDING (not yet running).
+	if _, err := s.Create(ctx, domain.Job{EngagementID: "eng-1", Kind: domain.JobTeardown, Status: domain.JobPending}); !errors.Is(err, store.ErrActiveJobExists) {
+		t.Errorf("second active infra job: got %v, want ErrActiveJobExists", err)
+	}
+
+	// A scenario-run job is exempt from the guard.
+	if _, err := s.Create(ctx, domain.Job{EngagementID: "eng-1", Kind: domain.JobScenarioRun, Status: domain.JobPending}); err != nil {
+		t.Errorf("scenario-run job should be allowed alongside a deploy: %v", err)
+	}
+
+	// A different engagement is unaffected.
+	if _, err := s.Create(ctx, domain.Job{EngagementID: "eng-2", Kind: domain.JobDeploy, Status: domain.JobPending}); err != nil {
+		t.Errorf("other engagement's deploy should be allowed: %v", err)
+	}
+
+	// Once the first job reaches a terminal state, the slot is free again.
+	if err := s.UpdateStatus(ctx, id1, domain.JobDone, ""); err != nil {
+		t.Fatalf("finish first job: %v", err)
+	}
+	if _, err := s.Create(ctx, domain.Job{EngagementID: "eng-1", Kind: domain.JobDeploy, Status: domain.JobPending}); err != nil {
+		t.Errorf("new deploy after previous finished should be allowed: %v", err)
+	}
+}
+
+// TestJobStore_ListActive verifies ListActive returns pending+running jobs
+// (what boot reconciliation must clear) while ListRunning stays running-only.
+func TestJobStore_ListActive(t *testing.T) {
+	s := memstore.NewJobStore()
+	_, _ = s.Create(ctx, domain.Job{EngagementID: "e1", Kind: domain.JobDeploy, Status: domain.JobPending})
+	r, _ := s.Create(ctx, domain.Job{EngagementID: "e2", Kind: domain.JobTeardown, Status: domain.JobPending})
+	_ = s.UpdateStatus(ctx, r, domain.JobRunning, "")
+	d, _ := s.Create(ctx, domain.Job{EngagementID: "e3", Kind: domain.JobDeploy, Status: domain.JobPending})
+	_ = s.UpdateStatus(ctx, d, domain.JobDone, "")
+
+	active, err := s.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(active) != 2 { // pending e1 + running e2, not done e3
+		t.Errorf("ListActive len = %d, want 2 (pending + running)", len(active))
+	}
+	running, _ := s.ListRunning(ctx)
+	if len(running) != 1 {
+		t.Errorf("ListRunning len = %d, want 1 (running only)", len(running))
 	}
 }
 

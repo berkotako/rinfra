@@ -195,6 +195,25 @@ func (s *InfraStore) UpdateNodeStatus(_ context.Context, nodeID string, status d
 	return nil
 }
 
+// UpdateNodeProvisioning sets a node's provider ref, public IP, status, and
+// health in one targeted write. A no-op (ErrNotFound) if the node was removed —
+// it never re-inserts, so it can't resurrect a concurrently-deleted node.
+func (s *InfraStore) UpdateNodeProvisioning(_ context.Context, nodeID, providerRef, publicIP string, status domain.NodeStatus, health domain.Health) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("node %s: %w", nodeID, store.ErrNotFound)
+	}
+	n.ProviderRef = providerRef
+	n.PublicIP = publicIP
+	n.Status = status
+	n.Health = health
+	n.UpdatedAt = time.Now().UTC()
+	s.nodes[nodeID] = n
+	return nil
+}
+
 // NodesForEngagement returns all nodes for the given engagement.
 func (s *InfraStore) NodesForEngagement(_ context.Context, engagementID string) ([]domain.Node, error) {
 	s.mu.RLock()
@@ -652,7 +671,9 @@ func NewJobStore() *JobStore {
 
 var _ store.JobStore = (*JobStore)(nil)
 
-// Create stores j and returns its ID.
+// Create stores j and returns its ID. For deploy/teardown jobs it atomically
+// rejects a second active (pending/running) infra job for the same engagement
+// (store.ErrActiveJobExists), mirroring the Postgres partial unique index.
 func (s *JobStore) Create(_ context.Context, j domain.Job) (string, error) {
 	if j.ID == "" {
 		j.ID = uuid.NewString()
@@ -660,8 +681,28 @@ func (s *JobStore) Create(_ context.Context, j domain.Job) (string, error) {
 	j.CreatedAt = time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if isInfraJobKind(j.Kind) {
+		for _, ex := range s.rows {
+			if ex.EngagementID == j.EngagementID && isInfraJobKind(ex.Kind) && isActiveJobStatus(ex.Status) {
+				return "", store.ErrActiveJobExists
+			}
+		}
+	}
 	s.rows[j.ID] = j
 	return j.ID, nil
+}
+
+// isInfraJobKind reports whether a job kind is an infrastructure lifecycle job
+// (deploy/teardown) that the single-active-job guard covers. Scenario runs are
+// exempt.
+func isInfraJobKind(k domain.JobKind) bool {
+	return k == domain.JobDeploy || k == domain.JobTeardown
+}
+
+// isActiveJobStatus reports whether a job is still occupying the engagement
+// (pending or running).
+func isActiveJobStatus(s domain.JobStatus) bool {
+	return s == domain.JobPending || s == domain.JobRunning
 }
 
 // Get returns a job by ID.
@@ -703,6 +744,19 @@ func (s *JobStore) ListRunning(_ context.Context) ([]domain.Job, error) {
 	var out []domain.Job
 	for _, j := range s.rows {
 		if j.Status == domain.JobRunning {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
+// ListActive returns all jobs in a non-terminal state (pending or running).
+func (s *JobStore) ListActive(_ context.Context) ([]domain.Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []domain.Job
+	for _, j := range s.rows {
+		if isActiveJobStatus(j.Status) {
 			out = append(out, j)
 		}
 	}

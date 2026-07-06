@@ -263,9 +263,31 @@ func (p *provider) BuildProgram(engagementID string, creds cloud.Credentials, no
 				return fmt.Errorf("digitalocean: create droplet for node %s: %w", n.ID, err)
 			}
 
-			// Export the numeric droplet ID as ProviderRef and its IPv4 as PublicIP.
+			// Reserve a stable IP and bind it to the droplet. RInfra redirectors
+			// need a durable address (DNS points at it); the droplet's own
+			// Ipv4Address is ephemeral and can change on a power-cycle/rebuild, so
+			// the Reserved IP — not droplet.Ipv4Address — is exported as PublicIP.
+			// This matches AWS (EIP), GCP (static Address), and Azure (static PIP).
+			rip, err := pdo.NewReservedIp(ctx, nodeName+"-rip", &pdo.ReservedIpArgs{
+				Region: pulumi.String(region),
+			})
+			if err != nil {
+				return fmt.Errorf("digitalocean: create reserved IP for node %s: %w", n.ID, err)
+			}
+			_, err = pdo.NewReservedIpAssignment(ctx, nodeName+"-rip-assign", &pdo.ReservedIpAssignmentArgs{
+				IpAddress: rip.IpAddress,
+				DropletId: droplet.ID().ApplyT(func(id pulumi.ID) (int, error) {
+					return strconv.Atoi(string(id))
+				}).(pulumi.IntOutput),
+			})
+			if err != nil {
+				return fmt.Errorf("digitalocean: assign reserved IP for node %s: %w", n.ID, err)
+			}
+
+			// Export the numeric droplet ID as ProviderRef and the stable Reserved
+			// IP as PublicIP.
 			ctx.Export(orchestration.NodeProviderRefKey(n.ID), droplet.ID())
-			ctx.Export(orchestration.NodePublicIPKey(n.ID), droplet.Ipv4Address)
+			ctx.Export(orchestration.NodePublicIPKey(n.ID), rip.IpAddress)
 		}
 		return nil
 	}

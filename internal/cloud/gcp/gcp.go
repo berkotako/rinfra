@@ -560,8 +560,13 @@ func attachAddress(ctx context.Context, svc *compute.Service, proj, zone, instNa
 // ManageDNS upserts a GCP Cloud DNS RecordSet.
 //
 // GCP Cloud DNS uses "managed zones" (named resources in a project) rather
-// than zone IDs (Route53) or bare domain names (DO). The managed zone name
-// must be stored in creds.Raw["GCP_DNS_MANAGED_ZONE"] for the target zone.
+// than zone IDs (Route53) or bare domain names (DO). rec.Zone may be EITHER the
+// managed-zone resource name (e.g. "example-com") OR the DNS domain
+// (e.g. "example.com"); resolveManagedZone maps the latter to the former by
+// listing the project's zones and matching on DnsName, mirroring AWS's
+// resolve-by-name. This is what lets the service layer default the zone to the
+// apex domain (dots aren't allowed in a managed-zone NAME, so the raw apex would
+// never match) and still land on the right zone.
 //
 // GCP record set names must be fully-qualified (trailing dot): "www.example.com."
 // This differs from DO (no trailing dot) and AWS (no trailing dot in most contexts).
@@ -569,13 +574,13 @@ func attachAddress(ctx context.Context, svc *compute.Service, proj, zone, instNa
 // Cloud DNS has no native upsert: a Change atomically applies additions and
 // deletions. To UPSERT we add the new record set and, if a record of the same
 // name+type already exists, include the current record in deletions so the
-// Change replaces it in one transaction. rec.Zone is the managed-zone name.
+// Change replaces it in one transaction.
 func (p *provider) ManageDNS(ctx context.Context, creds cloud.Credentials, rec domain.Record) error {
 	if err := validateGCPCreds(creds); err != nil {
 		return err
 	}
 	if rec.Zone == "" {
-		return fmt.Errorf("gcp.ManageDNS: Zone must be set (GCP managed zone name)")
+		return fmt.Errorf("gcp.ManageDNS: Zone must be set (GCP managed zone name or DNS domain)")
 	}
 	if rec.Type == "" {
 		return fmt.Errorf("gcp.ManageDNS: Type must be set")
@@ -585,6 +590,7 @@ func (p *provider) ManageDNS(ctx context.Context, creds cloud.Credentials, rec d
 		return err
 	}
 	proj := project(creds)
+	zoneName := resolveManagedZone(ctx, svc, proj, rec.Zone)
 
 	// GCP record names are FQDN with a trailing dot.
 	name := rec.Name
@@ -606,9 +612,9 @@ func (p *provider) ManageDNS(ctx context.Context, creds cloud.Credentials, rec d
 
 	// If a record set of the same name+type exists, it must be deleted in the
 	// same change for the addition to be accepted (UPSERT semantics).
-	existing, err := svc.ResourceRecordSets.List(proj, rec.Zone).Name(name).Type(rec.Type).Context(ctx).Do()
+	existing, err := svc.ResourceRecordSets.List(proj, zoneName).Name(name).Type(rec.Type).Context(ctx).Do()
 	if err != nil && !isNotFound(err) {
-		return fmt.Errorf("gcp.ManageDNS: list record sets in %s: %w", rec.Zone, err)
+		return fmt.Errorf("gcp.ManageDNS: list record sets in %s: %w", zoneName, err)
 	}
 	if err == nil {
 		for _, rr := range existing.Rrsets {
@@ -618,10 +624,37 @@ func (p *provider) ManageDNS(ctx context.Context, creds cloud.Credentials, rec d
 		}
 	}
 
-	if _, err := svc.Changes.Create(proj, rec.Zone, change).Context(ctx).Do(); err != nil {
-		return fmt.Errorf("gcp.ManageDNS: apply change in zone %s: %w", rec.Zone, err)
+	if _, err := svc.Changes.Create(proj, zoneName, change).Context(ctx).Do(); err != nil {
+		return fmt.Errorf("gcp.ManageDNS: apply change in zone %s: %w", zoneName, err)
 	}
 	return nil
+}
+
+// resolveManagedZone maps rec.Zone to a GCP managed-zone NAME. Cloud DNS
+// operations need the zone resource name (e.g. "example-com"), but the service
+// layer defaults rec.Zone to the DNS domain (e.g. "example.com"), which is never
+// a valid zone name — dots aren't allowed. This lists the project's managed zones
+// and matches by name or DnsName. It falls back to the literal zone when the list
+// is unavailable or has no match, so callers that already pass a real managed-zone
+// name keep working unchanged.
+func resolveManagedZone(ctx context.Context, svc *dns.Service, proj, zone string) string {
+	list, err := svc.ManagedZones.List(proj).Context(ctx).Do()
+	if err != nil {
+		return zone // can't enumerate — assume the caller gave a real zone name
+	}
+	want := zone
+	if !strings.HasSuffix(want, ".") {
+		want += "."
+	}
+	for _, mz := range list.ManagedZones {
+		if mz.Name == zone {
+			return zone // already a valid managed-zone name
+		}
+		if mz.DnsName == want {
+			return mz.Name // resolved domain -> zone name
+		}
+	}
+	return zone // no match — fall back to the literal value
 }
 
 // addGCPDNSRecord is the Pulumi inline program helper that creates a Cloud DNS

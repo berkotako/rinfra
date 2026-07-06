@@ -252,6 +252,40 @@ func TestManageDNS_UpsertReplacesExisting(t *testing.T) {
 	}
 }
 
+// TestManageDNS_ResolvesDomainToZoneName verifies that a rec.Zone given as a DNS
+// domain (the service-layer apex default) is resolved to the managed-zone NAME by
+// matching DnsName, so the change lands on the real zone instead of a bogus
+// dotted zone name that Cloud DNS would reject.
+func TestManageDNS_ResolvesDomainToZoneName(t *testing.T) {
+	f := &fakeGCP{notFound: map[string]bool{}}
+	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.record(r)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/managedZones") && r.Method == http.MethodGet:
+			// Domain "example.com" is served by managed zone named "example-com".
+			w.Write([]byte(`{"managedZones":[{"name":"example-com","dnsName":"example.com."}]}`))
+		case strings.HasSuffix(r.URL.Path, "/rrsets") && r.Method == http.MethodGet:
+			w.Write([]byte(`{"rrsets":[]}`))
+		case strings.HasSuffix(r.URL.Path, "/changes") && r.Method == http.MethodPost:
+			w.Write([]byte(`{"kind":"dns#change","id":"1","status":"pending"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":{"code":404,"message":"x"}}`))
+		}
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	p := &provider{baseEndpoint: ts.URL + "/"}
+	// Zone is the apex DOMAIN (as dnsRecordFor defaults it), not a zone name.
+	rec := domain.Record{Zone: "example.com", Name: "cdn.example.com.", Type: "A", Value: "203.0.113.9", TTL: 300}
+	if err := p.ManageDNS(t.Context(), gcpTestCreds(), rec); err != nil {
+		t.Fatalf("ManageDNS: %v", err)
+	}
+	if !f.hit("POST", "/managedZones/example-com/changes") {
+		t.Error("expected the change to be applied against the resolved zone name 'example-com'")
+	}
+}
+
 func TestDestroy_DeletesInstance(t *testing.T) {
 	p, f := newFakeGCP(t, nil)
 	node := domain.Node{ID: "node-1", ProviderRef: "rinfra-eng-1-node-1", Spec: domain.NodeSpec{Region: "us-central1-a"}}

@@ -14,6 +14,13 @@ import (
 // exist. Callers should use errors.Is(err, store.ErrNotFound) to detect this.
 var ErrNotFound = errors.New("record not found")
 
+// ErrActiveJobExists is returned by JobStore.Create when an active (pending or
+// running) infrastructure job (deploy/teardown) already exists for the
+// engagement. The store enforces this atomically so two concurrent deploy/
+// teardown requests cannot both pass an application-level check and
+// double-provision. The service maps it to its own ErrJobRunning.
+var ErrActiveJobExists = errors.New("an active infrastructure job already exists for this engagement")
+
 // EngagementStore persists engagements and their authorization state.
 type EngagementStore interface {
 	Create(ctx context.Context, e domain.Engagement) (string, error)
@@ -36,6 +43,12 @@ type InfraStore interface {
 	SaveTopology(ctx context.Context, t domain.Topology) error
 	GetTopology(ctx context.Context, engagementID string) (domain.Topology, error)
 	UpdateNodeStatus(ctx context.Context, nodeID string, status domain.NodeStatus, health domain.Health) error
+	// UpdateNodeProvisioning sets a node's provisioning outputs (provider ref +
+	// public IP) together with its status/health in one targeted write keyed by
+	// node ID. Unlike a topology read-modify-write it touches ONLY that node, so
+	// it can't resurrect a node another writer concurrently removed. Returns
+	// ErrNotFound if the node no longer exists.
+	UpdateNodeProvisioning(ctx context.Context, nodeID, providerRef, publicIP string, status domain.NodeStatus, health domain.Health) error
 	NodesForEngagement(ctx context.Context, engagementID string) ([]domain.Node, error)
 }
 
@@ -107,13 +120,20 @@ type CredentialStore interface {
 // JobStore persists durable background-job records. Jobs survive server restarts;
 // the boot-time reconciler calls ListRunning to re-adopt in-flight work.
 type JobStore interface {
+	// Create inserts a job and returns its ID. For deploy/teardown jobs it
+	// atomically rejects a second active (pending/running) infrastructure job for
+	// the same engagement with ErrActiveJobExists, so concurrent requests can't
+	// both start. Scenario-run jobs are exempt from this guard.
 	Create(ctx context.Context, j domain.Job) (string, error)
 	Get(ctx context.Context, id string) (domain.Job, error)
 	UpdateStatus(ctx context.Context, id string, status domain.JobStatus, errText string) error
-	// ListRunning returns all jobs whose status is JobRunning, used during
-	// boot-time reconciliation to detect orphaned jobs from a prior server
-	// instance.
+	// ListRunning returns all jobs whose status is JobRunning.
 	ListRunning(ctx context.Context) ([]domain.Job, error)
+	// ListActive returns all jobs in a non-terminal state (pending OR running).
+	// Boot-time reconciliation fails these — after a restart their driving
+	// goroutine is gone, and a leftover PENDING infra job would otherwise block
+	// the engagement forever via the single-active-job index.
+	ListActive(ctx context.Context) ([]domain.Job, error)
 }
 
 // UserStore persists operator user accounts.

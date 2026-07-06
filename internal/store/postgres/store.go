@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/store"
@@ -390,6 +391,23 @@ func (s *InfraStore) UpdateNodeStatus(ctx context.Context, nodeID string, status
 		string(status), string(health), nodeID)
 	if err != nil {
 		return fmt.Errorf("update node status %s: %w", nodeID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("node %s: %w", nodeID, store.ErrNotFound)
+	}
+	return nil
+}
+
+// UpdateNodeProvisioning sets a node's provider ref, public IP, status, and
+// health in one targeted UPDATE keyed by id. It touches only that row, so it
+// never resurrects a node a concurrent SaveTopology removed (RowsAffected==0 ->
+// ErrNotFound).
+func (s *InfraStore) UpdateNodeProvisioning(ctx context.Context, nodeID, providerRef, publicIP string, status domain.NodeStatus, health domain.Health) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET provider_ref=$1, public_ip=$2, status=$3, health=$4, updated_at=now() WHERE id=$5`,
+		providerRef, publicIP, string(status), string(health), nodeID)
+	if err != nil {
+		return fmt.Errorf("update node provisioning %s: %w", nodeID, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("node %s: %w", nodeID, store.ErrNotFound)
@@ -1072,6 +1090,13 @@ func (s *JobStore) Create(ctx context.Context, j domain.Job) (string, error) {
 		RETURNING id`,
 		j.EngagementID, string(j.Kind), string(j.Status), detail).Scan(&id)
 	if err != nil {
+		// The partial unique index idx_jobs_one_active_infra makes "one active
+		// deploy/teardown job per engagement" atomic; a violation means a
+		// concurrent request already started one.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "idx_jobs_one_active_infra" {
+			return "", store.ErrActiveJobExists
+		}
 		return "", fmt.Errorf("create job: %w", err)
 	}
 	return id, nil
@@ -1125,12 +1150,22 @@ func (s *JobStore) UpdateStatus(ctx context.Context, id string, status domain.Jo
 
 // ListRunning returns all jobs in the running state for boot-time reconciliation.
 func (s *JobStore) ListRunning(ctx context.Context) ([]domain.Job, error) {
+	return s.listByStatusSQL(ctx, `status='running'`)
+}
+
+// ListActive returns all jobs in a non-terminal state (pending or running).
+func (s *JobStore) ListActive(ctx context.Context) ([]domain.Job, error) {
+	return s.listByStatusSQL(ctx, `status IN ('pending','running')`)
+}
+
+// listByStatusSQL runs the job SELECT with the given status predicate.
+func (s *JobStore) listByStatusSQL(ctx context.Context, statusPredicate string) ([]domain.Job, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, engagement_id, kind, status, detail,
 		       created_at, started_at, finished_at, err
-		FROM jobs WHERE status='running' ORDER BY created_at`)
+		FROM jobs WHERE `+statusPredicate+` ORDER BY created_at`)
 	if err != nil {
-		return nil, fmt.Errorf("list running jobs: %w", err)
+		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 	defer rows.Close()
 
