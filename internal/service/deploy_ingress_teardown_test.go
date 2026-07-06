@@ -10,6 +10,7 @@ import (
 	"github.com/rinfra/rinfra/internal/domain"
 	"github.com/rinfra/rinfra/internal/orchestration"
 	"github.com/rinfra/rinfra/internal/service"
+	"github.com/rinfra/rinfra/internal/store"
 )
 
 // TestDeploy_ConfiguresIngress verifies the deploy path now applies ingress on
@@ -33,6 +34,40 @@ func TestDeploy_ConfiguresIngress(t *testing.T) {
 	}
 	if !hasAuditAction(s.audit, "infra.ingress", eng.ID) {
 		t.Error("expected ingress to be configured (infra.ingress audit) for the live nodes")
+	}
+}
+
+// TestResumeJobs_ClearsPendingInfraJob verifies boot reconciliation fails a
+// PENDING infra job left by a crash (not just running ones) — otherwise it would
+// stay covered by the single-active-job index and block the engagement forever.
+func TestResumeJobs_ClearsPendingInfraJob(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStores()
+	hub := service.NewHub()
+	svcInfra := buildInfraService(t, s, hub)
+
+	// A job left PENDING by a crashed process (goroutine never set it running).
+	jid, err := s.job.Create(ctx, domain.Job{EngagementID: "eng-x", Kind: domain.JobDeploy, Status: domain.JobPending})
+	if err != nil {
+		t.Fatalf("seed pending job: %v", err)
+	}
+	// While it exists, the engagement is blocked (the bug this guards against).
+	if _, err := s.job.Create(ctx, domain.Job{EngagementID: "eng-x", Kind: domain.JobDeploy, Status: domain.JobPending}); !errors.Is(err, store.ErrActiveJobExists) {
+		t.Fatalf("expected the pending job to block a second one, got %v", err)
+	}
+
+	// Boot reconciliation must clear the orphaned pending job.
+	svcInfra.ResumeJobs(ctx)
+	got, err := s.job.Get(ctx, jid)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != domain.JobFailed {
+		t.Errorf("orphaned pending job status = %s, want failed after ResumeJobs", got.Status)
+	}
+	// The engagement is no longer blocked.
+	if _, err := s.job.Create(ctx, domain.Job{EngagementID: "eng-x", Kind: domain.JobDeploy, Status: domain.JobPending}); err != nil {
+		t.Errorf("engagement still blocked after reconcile: %v", err)
 	}
 }
 

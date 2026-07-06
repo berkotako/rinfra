@@ -783,43 +783,55 @@ func (s *InfraService) configureNodeIngress(ctx context.Context, engagementID st
 func (s *InfraService) rollbackProvisioned(ctx context.Context, engagementID, actor string, nodes []*domain.Node) int {
 	n := 0
 	for i := len(nodes) - 1; i >= 0; i-- {
-		node := nodes[i]
-		prov, err := cloud.Get(node.Spec.Cloud)
-		if err != nil {
-			// Can't reach the provider — leave the node reapable so a later
-			// teardown/sweep removes it rather than orphaning it.
-			s.log.Warn("rollback: no provider; left reapable", "node", node.ID, "cloud", node.Spec.Cloud, "err", err)
-			s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, "no provider; left for teardown")
-			continue
+		if s.rollbackNode(ctx, engagementID, actor, nodes[i], "rolled back after partial deploy failure") {
+			n++
 		}
-
-		// Skip providers whose Destroy is engagement-scoped (e.g. Azure deletes
-		// the whole resource group): destroying this node would also remove
-		// pre-existing siblings from earlier deploys. Leave it reapable for
-		// engagement-level teardown (which uses the tag sweep) instead.
-		if _, perNode := prov.(cloud.PerNodeDestroyer); !perNode {
-			s.log.Warn("rollback: provider Destroy is engagement-scoped; deferring to teardown", "node", node.ID, "cloud", node.Spec.Cloud)
-			s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, "engagement-scoped destroy; deferred to teardown")
-			continue
-		}
-
-		// Real providers need creds; the fake/direct path uses empty creds.
-		creds := cloud.Credentials{Provider: node.Spec.Cloud}
-		if c, err := s.loadCreds(ctx, engagementID, node.Spec.Cloud); err == nil {
-			creds = c
-		}
-		if err := prov.Destroy(ctx, creds, *node); err != nil {
-			// Destroy failed — keep the node failed/reapable so teardown/the reaper
-			// retry it. Marking it destroyed here would orphan the live resource
-			// (both runTeardown and the reaper skip destroyed nodes).
-			s.log.Warn("rollback: destroy failed; left reapable for teardown sweep", "node", node.ID, "err", err)
-			s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, fmt.Sprintf("destroy failed (%v); left for teardown", err))
-			continue
-		}
-		s.markRolledBack(ctx, engagementID, actor, node, domain.NodeDestroyed, "rolled back after partial deploy failure")
-		n++
 	}
 	return n
+}
+
+// rollbackNode destroys a single just-provisioned node's cloud resource and
+// records the outcome, returning true only when the resource was confirmed
+// destroyed. It is PerNodeDestroyer-aware: a provider whose Destroy is
+// engagement-scoped (e.g. Azure deletes the whole resource group) is deferred to
+// engagement-level teardown so siblings aren't nuked; a Destroy failure or a
+// missing provider leaves the node failed/reapable for the teardown sweep.
+// doneDetail labels the audited infra.rollback event on success.
+func (s *InfraService) rollbackNode(ctx context.Context, engagementID, actor string, node *domain.Node, doneDetail string) bool {
+	prov, err := cloud.Get(node.Spec.Cloud)
+	if err != nil {
+		s.log.Warn("rollback: no provider; left reapable", "node", node.ID, "cloud", node.Spec.Cloud, "err", err)
+		s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, "no provider; left for teardown")
+		return false
+	}
+	if _, perNode := prov.(cloud.PerNodeDestroyer); !perNode {
+		s.log.Warn("rollback: provider Destroy is engagement-scoped; deferring to teardown", "node", node.ID, "cloud", node.Spec.Cloud)
+		s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, "engagement-scoped destroy; deferred to teardown")
+		return false
+	}
+	// Real providers need creds; the fake/direct path uses empty creds.
+	creds := cloud.Credentials{Provider: node.Spec.Cloud}
+	if c, err := s.loadCreds(ctx, engagementID, node.Spec.Cloud); err == nil {
+		creds = c
+	}
+	if err := prov.Destroy(ctx, creds, *node); err != nil {
+		s.log.Warn("rollback: destroy failed; left reapable for teardown sweep", "node", node.ID, "err", err)
+		s.markRolledBack(ctx, engagementID, actor, node, domain.NodeFailed, fmt.Sprintf("destroy failed (%v); left for teardown", err))
+		return false
+	}
+	s.markRolledBack(ctx, engagementID, actor, node, domain.NodeDestroyed, doneDetail)
+	return true
+}
+
+// rollbackDeletedNode rolls back a node that was removed from the topology while
+// its provisioning call was still in flight (persistNodeFields → ErrNotFound). The
+// cloud resource was created but is no longer wanted; destroying it now prevents
+// an orphan (later Teardown/ReapExpired build cleanup from NodesForEngagement,
+// which no longer lists this node). markRolledBack's status write no-ops because
+// the row is gone, but the Destroy + audit still run.
+func (s *InfraService) rollbackDeletedNode(ctx context.Context, engagementID, actor string, node *domain.Node) {
+	s.log.Warn("deploy: node removed during provisioning; rolling back its resource", "node", node.ID, "cloud", node.Spec.Cloud)
+	s.rollbackNode(ctx, engagementID, actor, node, "node deleted during provisioning; resource rolled back")
 }
 
 // markRolledBack records a rollback outcome for a node: sets its status (destroyed
@@ -1013,7 +1025,13 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 						np.PublicIP = r.PublicIP
 						np.Status = domain.NodeLive
 						np.Health = domain.HealthHealthy
-						_ = s.persistNodeFields(ctx, np)
+						if perr := s.persistNodeFields(ctx, np); errors.Is(perr, store.ErrNotFound) {
+							// Node was deleted from the topology mid-provision; its
+							// resource was created but is unwanted — roll it back so it
+							// doesn't orphan, and don't treat it as live.
+							s.rollbackDeletedNode(ctx, engagementID, actor, np)
+							continue
+						}
 						_ = s.infra.UpdateNodeStatus(ctx, np.ID, domain.NodeLive, domain.HealthHealthy)
 						s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(np)})
 						liveNodes = append(liveNodes, np)
@@ -1062,8 +1080,13 @@ func (s *InfraService) runDeploy(ctx context.Context, engagementID, jobID, actor
 		n.Status = domain.NodeLive
 		n.Health = domain.HealthHealthy
 
-		// Persist updated node. We need to re-save the topology to capture ProviderRef/IP.
-		_ = s.persistNodeFields(ctx, n)
+		// Persist the node's provisioning outputs (targeted, by id).
+		if perr := s.persistNodeFields(ctx, n); errors.Is(perr, store.ErrNotFound) {
+			// Node deleted from the topology mid-provision — roll back its resource
+			// so it doesn't orphan, and don't treat it as live.
+			s.rollbackDeletedNode(ctx, engagementID, actor, n)
+			continue
+		}
 		_ = s.infra.UpdateNodeStatus(ctx, n.ID, domain.NodeLive, domain.HealthHealthy)
 		s.hub.Publish(Event{Kind: EventNodeStatus, EngagementID: engagementID, Data: nodeStatusPayload(n)})
 		liveNodes = append(liveNodes, n)
@@ -1358,17 +1381,21 @@ func (s *InfraService) GetCredentialMeta(ctx context.Context, engagementID, prov
 	return meta, nil
 }
 
-// ResumeJobs marks any jobs left in the "running" state as failed due to
-// server restart. Call this once at boot.
+// ResumeJobs marks any job left in a non-terminal state (pending or running) as
+// failed due to server restart. Call this once at boot, before serving requests.
 func (s *InfraService) ResumeJobs(ctx context.Context) {
-	running, err := s.jobs.ListRunning(ctx)
+	// Reconcile ALL non-terminal jobs (pending AND running): after a restart their
+	// driving goroutine is gone. A leftover PENDING deploy/teardown job matters
+	// especially — it stays covered by the single-active-job index and would block
+	// every future deploy/teardown for the engagement until cleared.
+	active, err := s.jobs.ListActive(ctx)
 	if err != nil {
-		s.log.Error("resume jobs: list running", "err", err)
+		s.log.Error("resume jobs: list active", "err", err)
 		return
 	}
-	for _, j := range running {
+	for _, j := range active {
 		_ = s.jobs.UpdateStatus(ctx, j.ID, domain.JobFailed, "interrupted by server restart")
-		s.log.Warn("marked orphaned job as failed", "job_id", j.ID, "kind", string(j.Kind))
+		s.log.Warn("marked orphaned job as failed", "job_id", j.ID, "kind", string(j.Kind), "status", string(j.Status))
 	}
 }
 

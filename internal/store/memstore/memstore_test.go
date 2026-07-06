@@ -361,6 +361,29 @@ func TestJobStore_SingleActiveInfraJob(t *testing.T) {
 	}
 }
 
+// TestJobStore_ListActive verifies ListActive returns pending+running jobs
+// (what boot reconciliation must clear) while ListRunning stays running-only.
+func TestJobStore_ListActive(t *testing.T) {
+	s := memstore.NewJobStore()
+	_, _ = s.Create(ctx, domain.Job{EngagementID: "e1", Kind: domain.JobDeploy, Status: domain.JobPending})
+	r, _ := s.Create(ctx, domain.Job{EngagementID: "e2", Kind: domain.JobTeardown, Status: domain.JobPending})
+	_ = s.UpdateStatus(ctx, r, domain.JobRunning, "")
+	d, _ := s.Create(ctx, domain.Job{EngagementID: "e3", Kind: domain.JobDeploy, Status: domain.JobPending})
+	_ = s.UpdateStatus(ctx, d, domain.JobDone, "")
+
+	active, err := s.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(active) != 2 { // pending e1 + running e2, not done e3
+		t.Errorf("ListActive len = %d, want 2 (pending + running)", len(active))
+	}
+	running, _ := s.ListRunning(ctx)
+	if len(running) != 1 {
+		t.Errorf("ListRunning len = %d, want 1 (running only)", len(running))
+	}
+}
+
 func TestJobStore_UpdateStatus(t *testing.T) {
 	s := memstore.NewJobStore()
 	id, _ := s.Create(ctx, domain.Job{EngagementID: "eng-1", Kind: domain.JobDeploy, Status: domain.JobPending})

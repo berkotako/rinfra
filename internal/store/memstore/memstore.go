@@ -750,6 +750,19 @@ func (s *JobStore) ListRunning(_ context.Context) ([]domain.Job, error) {
 	return out, nil
 }
 
+// ListActive returns all jobs in a non-terminal state (pending or running).
+func (s *JobStore) ListActive(_ context.Context) ([]domain.Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []domain.Job
+	for _, j := range s.rows {
+		if isActiveJobStatus(j.Status) {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
 // --- Audit Logger ---
 
 // AuditEvent is a stored audit event with its assigned ID.

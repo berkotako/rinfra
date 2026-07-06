@@ -1150,12 +1150,22 @@ func (s *JobStore) UpdateStatus(ctx context.Context, id string, status domain.Jo
 
 // ListRunning returns all jobs in the running state for boot-time reconciliation.
 func (s *JobStore) ListRunning(ctx context.Context) ([]domain.Job, error) {
+	return s.listByStatusSQL(ctx, `status='running'`)
+}
+
+// ListActive returns all jobs in a non-terminal state (pending or running).
+func (s *JobStore) ListActive(ctx context.Context) ([]domain.Job, error) {
+	return s.listByStatusSQL(ctx, `status IN ('pending','running')`)
+}
+
+// listByStatusSQL runs the job SELECT with the given status predicate.
+func (s *JobStore) listByStatusSQL(ctx context.Context, statusPredicate string) ([]domain.Job, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, engagement_id, kind, status, detail,
 		       created_at, started_at, finished_at, err
-		FROM jobs WHERE status='running' ORDER BY created_at`)
+		FROM jobs WHERE `+statusPredicate+` ORDER BY created_at`)
 	if err != nil {
-		return nil, fmt.Errorf("list running jobs: %w", err)
+		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 	defer rows.Close()
 

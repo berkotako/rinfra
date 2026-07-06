@@ -181,6 +181,8 @@ per-adapter `switch t.AttackID` tables):
   atomically by a partial unique index (`idx_jobs_one_active_infra`, mirrored in
   the memstore), so two concurrent deploys can't both start and double-provision
   (`JobStore.Create` returns `store.ErrActiveJobExists`, mapped to `ErrJobRunning`).
+  Boot reconciliation (`ResumeJobs` → `JobStore.ListActive`) fails any leftover
+  pending/running job so a crash mid-flight never wedges the engagement.
 - **HTTP:** stdlib `net/http` + `chi` router is fine. Keep handlers thin;
   business logic in services.
 - **Logging:** stdlib `log/slog`, structured, context-aware.

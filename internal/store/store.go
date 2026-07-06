@@ -127,10 +127,13 @@ type JobStore interface {
 	Create(ctx context.Context, j domain.Job) (string, error)
 	Get(ctx context.Context, id string) (domain.Job, error)
 	UpdateStatus(ctx context.Context, id string, status domain.JobStatus, errText string) error
-	// ListRunning returns all jobs whose status is JobRunning, used during
-	// boot-time reconciliation to detect orphaned jobs from a prior server
-	// instance.
+	// ListRunning returns all jobs whose status is JobRunning.
 	ListRunning(ctx context.Context) ([]domain.Job, error)
+	// ListActive returns all jobs in a non-terminal state (pending OR running).
+	// Boot-time reconciliation fails these — after a restart their driving
+	// goroutine is gone, and a leftover PENDING infra job would otherwise block
+	// the engagement forever via the single-active-job index.
+	ListActive(ctx context.Context) ([]domain.Job, error)
 }
 
 // UserStore persists operator user accounts.
