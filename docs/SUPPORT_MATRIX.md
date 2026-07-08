@@ -54,6 +54,31 @@ only works where the framework exposes a usable operator API.
 Strike, Brute Ratel) means the emulation engine records every technique as
 `manual_required` and a human operates the framework.
 
+### Cleanable persistence primitives
+
+Two technique→primitive mappings create real host-side persistence and are
+auto-reverted at the end of a run (`c2.IsCleanable`, the `c2.Reverter`
+capability): `scheduled_task` and `registry_run_key`. Five more genuinely plant
+their artifact (not read-only recon of one) rather than just detecting it:
+`shortcut_modification` (T1547.009), `wmi_event_subscription` (T1546.003),
+`ifeo_injection` (T1546.012), `port_monitor` (T1547.010), `active_setup`
+(T1547.014).
+
+| Primitive | Sliver | Mythic | Metasploit | PoshC2 | custom |
+|-----------|:---:|:---:|:---:|:---:|:---:|
+| `scheduled_task` | render+revert | render+revert | render+revert | — | — |
+| `registry_run_key` | render+revert | — | — | — | — |
+| `shortcut_modification` | render+revert | render+revert | render+revert | — | — |
+| `wmi_event_subscription` | render+revert | render+revert | render+revert | — | — |
+| `ifeo_injection` | render+revert | render+revert | render+revert | — | — |
+| `port_monitor` | render+revert | render+revert | render+revert | — | — |
+| `active_setup` | render+revert | render+revert | render+revert | — | — |
+
+A "—" reports the technique `unsupported` on that framework (honest BAS
+taxonomy, no fabricated attempt) rather than a partial/best-effort try. PoshC2
+and custom don't implement any cleanable primitive today — extending them is a
+future increment, not an oversight.
+
 ### Two usage modes
 
 RInfra supports two ways to use a deployed teamserver:

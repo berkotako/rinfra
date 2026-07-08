@@ -16,6 +16,8 @@ func TestValidPrimitives_CoversAllKinds(t *testing.T) {
 		c2.PrimPowerShell, c2.PrimShell, c2.PrimSysInfo, c2.PrimProcessList,
 		c2.PrimNetConnections, c2.PrimNetConfig, c2.PrimFileList, c2.PrimDownload,
 		c2.PrimScheduledTask, c2.PrimRegistryRunKey,
+		c2.PrimShortcutModification, c2.PrimWMIEventSubscription, c2.PrimIFEOInjection,
+		c2.PrimPortMonitor, c2.PrimActiveSetup,
 		c2.PrimRemoteSystemDiscovery, c2.PrimAccountDiscovery,
 		c2.PrimPermissionGroupDiscovery, c2.PrimServiceDiscovery, c2.PrimShareDiscovery,
 	}

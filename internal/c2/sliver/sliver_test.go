@@ -2,14 +2,18 @@ package sliver_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	sliverpkg "github.com/rinfra/rinfra/internal/c2/sliver"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 // FakeSliverClient is a test double for SliverClient.
@@ -72,6 +76,237 @@ func TestOperator_Revert_DeletesPersistence(t *testing.T) {
 	res, _ = rev.Revert(ctx, "s1", domain.Technique{AttackID: "T1082"})
 	if res.Status != domain.ExecUnsupported {
 		t.Errorf("non-persistence Revert: want unsupported, got %v", res.Status)
+	}
+}
+
+// decodePSCommand reverses encodePSCommand (sliver.go, unexported): extracts
+// the base64 suffix from a "... -EncodedCommand <b64>" command, base64-decodes
+// it, and decodes the bytes as UTF-16LE back to the plaintext PowerShell
+// script. This proves the encoding round-trips correctly, not just that SOME
+// base64 was emitted.
+func decodePSCommand(t *testing.T, cmd string) string {
+	t.Helper()
+	const marker = "-EncodedCommand "
+	idx := strings.Index(cmd, marker)
+	if idx == -1 {
+		t.Fatalf("command missing %q marker: %q", marker, cmd)
+	}
+	b64 := cmd[idx+len(marker):]
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	if len(raw)%2 != 0 {
+		t.Fatalf("decoded byte count %d is not UTF-16LE aligned", len(raw))
+	}
+	u16 := make([]uint16, len(raw)/2)
+	for i := range u16 {
+		u16[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+	return string(utf16.Decode(u16))
+}
+
+// TestOperator_NewCleanablePrimitives_RegistryBased covers the 3 new
+// reg-based cleanable primitives (ifeo_injection, port_monitor, active_setup)
+// end-to-end: Execute renders the create command, Revert renders the delete
+// command, both asserted byte-exact against the catalog's real default args
+// (pulled via ttp.Compile so the test can't drift from catalog.yaml).
+func TestOperator_NewCleanablePrimitives_RegistryBased(t *testing.T) {
+	cases := []string{"T1546.012", "T1547.010", "T1547.014"}
+
+	for _, attackID := range cases {
+		t.Run(attackID, func(t *testing.T) {
+			tech := domain.Technique{AttackID: attackID}
+			prim, ok, err := ttp.Compile(tech)
+			if err != nil || !ok {
+				t.Fatalf("ttp.Compile(%s): ok=%v err=%v", attackID, ok, err)
+			}
+
+			client := &FakeSliverClient{executeResult: "OK"}
+			op := sliverpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+			ctx := context.Background()
+
+			if _, err := op.Execute(ctx, "s1", tech); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			createCmd := client.LastCmd
+
+			rev, ok := op.(c2.Reverter)
+			if !ok {
+				t.Fatal("sliver operator should implement c2.Reverter")
+			}
+			if _, err := rev.Revert(ctx, "s1", tech); err != nil {
+				t.Fatalf("Revert: %v", err)
+			}
+			deleteCmd := client.LastCmd
+
+			switch prim.Kind {
+			case c2.PrimIFEOInjection:
+				key := `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\` + prim.Arg("target_image")
+				if !strings.Contains(createCmd, "reg add") || !strings.Contains(createCmd, key) ||
+					!strings.Contains(createCmd, "/v Debugger") || !strings.Contains(createCmd, prim.Arg("debugger")) {
+					t.Errorf("ifeo_injection create cmd = %q", createCmd)
+				}
+				if !strings.Contains(deleteCmd, "reg delete") || !strings.Contains(deleteCmd, key) ||
+					!strings.Contains(deleteCmd, "/v Debugger") {
+					t.Errorf("ifeo_injection delete cmd = %q", deleteCmd)
+				}
+			case c2.PrimPortMonitor:
+				key := `HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\` + prim.Arg("monitor_name")
+				if !strings.Contains(createCmd, "reg add") || !strings.Contains(createCmd, key) ||
+					!strings.Contains(createCmd, "/v Driver") || !strings.Contains(createCmd, prim.Arg("driver")) {
+					t.Errorf("port_monitor create cmd = %q", createCmd)
+				}
+				if !strings.Contains(deleteCmd, "reg delete") || !strings.Contains(deleteCmd, key) {
+					t.Errorf("port_monitor delete cmd = %q", deleteCmd)
+				}
+				if strings.Contains(deleteCmd, "/v ") {
+					t.Errorf("port_monitor delete should remove the whole dedicated subkey, not a value: %q", deleteCmd)
+				}
+			case c2.PrimActiveSetup:
+				key := `HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\` + prim.Arg("component_id")
+				if !strings.Contains(createCmd, "reg add") || !strings.Contains(createCmd, key) ||
+					!strings.Contains(createCmd, "/v StubPath") || !strings.Contains(createCmd, prim.Arg("stub_path")) {
+					t.Errorf("active_setup create cmd = %q", createCmd)
+				}
+				if !strings.Contains(deleteCmd, "reg delete") || !strings.Contains(deleteCmd, key) {
+					t.Errorf("active_setup delete cmd = %q", deleteCmd)
+				}
+				if strings.Contains(deleteCmd, "/v ") {
+					t.Errorf("active_setup delete should remove the whole dedicated subkey, not a value: %q", deleteCmd)
+				}
+			default:
+				t.Fatalf("unexpected primitive kind %q for %s", prim.Kind, attackID)
+			}
+		})
+	}
+}
+
+// TestOperator_NewCleanablePrimitives_PowerShellEncoded covers the 2 new
+// primitives that require multi-token PowerShell delivered via
+// -EncodedCommand (shortcut_modification, wmi_event_subscription). It
+// decodes the base64/UTF-16LE payload back to plaintext to prove the
+// round-trip, not just that some base64 was emitted.
+func TestOperator_NewCleanablePrimitives_PowerShellEncoded(t *testing.T) {
+	t.Run("shortcut_modification", func(t *testing.T) {
+		tech := domain.Technique{AttackID: "T1547.009"}
+		prim, ok, err := ttp.Compile(tech)
+		if err != nil || !ok {
+			t.Fatalf("ttp.Compile(T1547.009): ok=%v err=%v", ok, err)
+		}
+
+		client := &FakeSliverClient{executeResult: "OK"}
+		op := sliverpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+		ctx := context.Background()
+
+		if _, err := op.Execute(ctx, "s1", tech); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		createCmd := client.LastCmd
+		if !strings.Contains(createCmd, "powershell -NoProfile -EncodedCommand ") {
+			t.Fatalf("create cmd missing EncodedCommand delivery: %q", createCmd)
+		}
+		decoded := decodePSCommand(t, createCmd)
+		for _, want := range []string{"CreateShortcut", prim.Arg("shortcut_path"), prim.Arg("target"), prim.Arg("arguments")} {
+			if !strings.Contains(decoded, want) {
+				t.Errorf("decoded create script missing %q: %q", want, decoded)
+			}
+		}
+
+		rev, ok := op.(c2.Reverter)
+		if !ok {
+			t.Fatal("sliver operator should implement c2.Reverter")
+		}
+		if _, err := rev.Revert(ctx, "s1", tech); err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		deleteCmd := client.LastCmd
+		if !strings.Contains(deleteCmd, "powershell -NoProfile -EncodedCommand ") {
+			t.Fatalf("delete cmd missing EncodedCommand delivery: %q", deleteCmd)
+		}
+		decodedDel := decodePSCommand(t, deleteCmd)
+		if !strings.Contains(decodedDel, "Remove-Item") || !strings.Contains(decodedDel, prim.Arg("shortcut_path")) {
+			t.Errorf("decoded delete script = %q", decodedDel)
+		}
+	})
+
+	t.Run("wmi_event_subscription", func(t *testing.T) {
+		tech := domain.Technique{AttackID: "T1546.003"}
+		prim, ok, err := ttp.Compile(tech)
+		if err != nil || !ok {
+			t.Fatalf("ttp.Compile(T1546.003): ok=%v err=%v", ok, err)
+		}
+
+		client := &FakeSliverClient{executeResult: "OK"}
+		op := sliverpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+		ctx := context.Background()
+
+		if _, err := op.Execute(ctx, "s1", tech); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		createCmd := client.LastCmd
+		if !strings.Contains(createCmd, "powershell -NoProfile -EncodedCommand ") {
+			t.Fatalf("create cmd missing EncodedCommand delivery: %q", createCmd)
+		}
+		decoded := decodePSCommand(t, createCmd)
+		for _, want := range []string{"Set-WmiInstance", prim.Arg("filter_name"), prim.Arg("consumer_name"), prim.Arg("command")} {
+			if !strings.Contains(decoded, want) {
+				t.Errorf("decoded create script missing %q: %q", want, decoded)
+			}
+		}
+
+		rev, ok := op.(c2.Reverter)
+		if !ok {
+			t.Fatal("sliver operator should implement c2.Reverter")
+		}
+		if _, err := rev.Revert(ctx, "s1", tech); err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		deleteCmd := client.LastCmd
+		if !strings.Contains(deleteCmd, "powershell -NoProfile -EncodedCommand ") {
+			t.Fatalf("delete cmd missing EncodedCommand delivery: %q", deleteCmd)
+		}
+		decodedDel := decodePSCommand(t, deleteCmd)
+		for _, want := range []string{"Get-WmiObject", "Remove-WmiObject", prim.Arg("filter_name"), prim.Arg("consumer_name")} {
+			if !strings.Contains(decodedDel, want) {
+				t.Errorf("decoded delete script missing %q: %q", want, decodedDel)
+			}
+		}
+	})
+}
+
+// TestOperator_RegistryRunKey_CustomData proves the new optional "data" arg
+// threads through: T1219 (Remote Access Software) points the Run-key at an
+// operator-supplied path instead of the catalog's default "whoami" marker.
+func TestOperator_RegistryRunKey_CustomData(t *testing.T) {
+	tech := domain.Technique{
+		AttackID: "T1219",
+		Inputs:   map[string]string{"target": `C:\Program Files\Vendor\remote.exe`},
+	}
+	prim, ok, err := ttp.Compile(tech)
+	if err != nil || !ok {
+		t.Fatalf("ttp.Compile(T1219): ok=%v err=%v", ok, err)
+	}
+	if prim.Kind != c2.PrimRegistryRunKey {
+		t.Fatalf("T1219 primitive kind = %q, want %q", prim.Kind, c2.PrimRegistryRunKey)
+	}
+
+	client := &FakeSliverClient{executeResult: "OK"}
+	op := sliverpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+
+	if _, err := op.Execute(context.Background(), "s1", tech); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	cmd := client.LastCmd
+	if !strings.Contains(cmd, "registry write") {
+		t.Fatalf("T1219 create cmd = %q", cmd)
+	}
+	wantData := `--d "C:\Program Files\Vendor\remote.exe"`
+	if !strings.Contains(cmd, wantData) {
+		t.Errorf("T1219 create cmd missing custom data %q: %q", wantData, cmd)
+	}
+	if strings.Contains(cmd, `--d "whoami"`) {
+		t.Errorf("T1219 create cmd should not fall back to the default whoami marker: %q", cmd)
 	}
 }
 

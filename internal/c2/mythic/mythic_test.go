@@ -2,14 +2,18 @@ package mythic_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	mythicpkg "github.com/rinfra/rinfra/internal/c2/mythic"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 // FakeMythicClient is a test double for MythicClient.
@@ -222,4 +226,311 @@ func TestOperator_StartListener(t *testing.T) {
 	if err := op.StartListener(context.Background(), spec); err != nil {
 		t.Fatalf("StartListener: %v", err)
 	}
+}
+
+// decodePSEncodedCommand reverses the mythic package's -EncodedCommand
+// convention (base64 of a UTF-16LE script) so tests can assert on the
+// plaintext PowerShell a rendered/reverted tasking actually carries.
+func decodePSEncodedCommand(t *testing.T, cmd string) string {
+	t.Helper()
+	const marker = "-EncodedCommand "
+	i := strings.Index(cmd, marker)
+	if i < 0 {
+		t.Fatalf("command missing %q: %q", marker, cmd)
+	}
+	enc := cmd[i+len(marker):]
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	if len(raw)%2 != 0 {
+		t.Fatalf("decoded bytes not UTF-16LE aligned: %d bytes", len(raw))
+	}
+	u16 := make([]uint16, len(raw)/2)
+	for i := range u16 {
+		u16[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+	return string(utf16.Decode(u16))
+}
+
+func TestOperator_Execute_ShortcutModification(t *testing.T) {
+	client := &FakeMythicClient{taskOutput: "ok"}
+	op := mythicpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+
+	tech := domain.Technique{AttackID: "T1547.009"}
+	prim, ok, err := ttp.Compile(tech)
+	if err != nil || !ok {
+		t.Fatalf("ttp.Compile(T1547.009): ok=%v err=%v", ok, err)
+	}
+
+	res, err := op.Execute(context.Background(), "callback-001", tech)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != domain.ExecSuccess {
+		t.Fatalf("status = %v, want success", res.Status)
+	}
+	if client.lastCmd != "shell" {
+		t.Errorf("cmd = %q, want shell", client.lastCmd)
+	}
+	cmd := client.lastParams["command"]
+	if !strings.Contains(cmd, "powershell -NoProfile -EncodedCommand ") {
+		t.Fatalf("command missing EncodedCommand prefix: %q", cmd)
+	}
+	script := decodePSEncodedCommand(t, cmd)
+	for _, want := range []string{"CreateShortcut", prim.Arg("shortcut_path"), prim.Arg("target"), prim.Arg("arguments")} {
+		if !strings.Contains(script, want) {
+			t.Errorf("decoded script missing %q: %q", want, script)
+		}
+	}
+}
+
+func TestOperator_Execute_WMIEventSubscription(t *testing.T) {
+	client := &FakeMythicClient{taskOutput: "ok"}
+	op := mythicpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+
+	tech := domain.Technique{AttackID: "T1546.003"}
+	prim, ok, err := ttp.Compile(tech)
+	if err != nil || !ok {
+		t.Fatalf("ttp.Compile(T1546.003): ok=%v err=%v", ok, err)
+	}
+
+	res, err := op.Execute(context.Background(), "callback-001", tech)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != domain.ExecSuccess {
+		t.Fatalf("status = %v, want success", res.Status)
+	}
+	if client.lastCmd != "shell" {
+		t.Errorf("cmd = %q, want shell", client.lastCmd)
+	}
+	cmd := client.lastParams["command"]
+	if !strings.Contains(cmd, "powershell -NoProfile -EncodedCommand ") {
+		t.Fatalf("command missing EncodedCommand prefix: %q", cmd)
+	}
+	script := decodePSEncodedCommand(t, cmd)
+	for _, want := range []string{
+		"Set-WmiInstance", "__EventFilter", "CommandLineEventConsumer",
+		prim.Arg("filter_name"), prim.Arg("consumer_name"), prim.Arg("command"),
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("decoded script missing %q: %q", want, script)
+		}
+	}
+}
+
+func TestOperator_Execute_IFEOInjection(t *testing.T) {
+	client := &FakeMythicClient{taskOutput: "ok"}
+	op := mythicpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+
+	tech := domain.Technique{AttackID: "T1546.012"}
+	prim, ok, err := ttp.Compile(tech)
+	if err != nil || !ok {
+		t.Fatalf("ttp.Compile(T1546.012): ok=%v err=%v", ok, err)
+	}
+
+	res, err := op.Execute(context.Background(), "callback-001", tech)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != domain.ExecSuccess {
+		t.Fatalf("status = %v, want success", res.Status)
+	}
+	if client.lastCmd != "shell" {
+		t.Errorf("cmd = %q, want shell", client.lastCmd)
+	}
+	cmd := client.lastParams["command"]
+	wantKey := `Image File Execution Options\` + prim.Arg("target_image")
+	for _, want := range []string{"reg add", wantKey, "Debugger", prim.Arg("debugger")} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command missing %q: %q", want, cmd)
+		}
+	}
+}
+
+func TestOperator_Execute_PortMonitor(t *testing.T) {
+	client := &FakeMythicClient{taskOutput: "ok"}
+	op := mythicpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+
+	tech := domain.Technique{AttackID: "T1547.010"}
+	prim, ok, err := ttp.Compile(tech)
+	if err != nil || !ok {
+		t.Fatalf("ttp.Compile(T1547.010): ok=%v err=%v", ok, err)
+	}
+
+	res, err := op.Execute(context.Background(), "callback-001", tech)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != domain.ExecSuccess {
+		t.Fatalf("status = %v, want success", res.Status)
+	}
+	if client.lastCmd != "shell" {
+		t.Errorf("cmd = %q, want shell", client.lastCmd)
+	}
+	cmd := client.lastParams["command"]
+	wantKey := `Control\Print\Monitors\` + prim.Arg("monitor_name")
+	for _, want := range []string{"reg add", wantKey, "Driver", prim.Arg("driver")} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command missing %q: %q", want, cmd)
+		}
+	}
+}
+
+func TestOperator_Execute_ActiveSetup(t *testing.T) {
+	client := &FakeMythicClient{taskOutput: "ok"}
+	op := mythicpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+
+	tech := domain.Technique{AttackID: "T1547.014"}
+	prim, ok, err := ttp.Compile(tech)
+	if err != nil || !ok {
+		t.Fatalf("ttp.Compile(T1547.014): ok=%v err=%v", ok, err)
+	}
+
+	res, err := op.Execute(context.Background(), "callback-001", tech)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != domain.ExecSuccess {
+		t.Fatalf("status = %v, want success", res.Status)
+	}
+	if client.lastCmd != "shell" {
+		t.Errorf("cmd = %q, want shell", client.lastCmd)
+	}
+	cmd := client.lastParams["command"]
+	wantKey := `Active Setup\Installed Components\` + prim.Arg("component_id")
+	for _, want := range []string{"reg add", wantKey, "StubPath", prim.Arg("stub_path")} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command missing %q: %q", want, cmd)
+		}
+	}
+}
+
+func TestOperator_Revert_NewPersistencePrimitives(t *testing.T) {
+	client := &FakeMythicClient{taskOutput: "ok"}
+	op := mythicpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+	rev, ok := op.(c2.Reverter)
+	if !ok {
+		t.Fatal("mythic operator should implement c2.Reverter")
+	}
+	ctx := context.Background()
+
+	t.Run("shortcut_modification", func(t *testing.T) {
+		tech := domain.Technique{AttackID: "T1547.009"}
+		prim, ok, err := ttp.Compile(tech)
+		if err != nil || !ok {
+			t.Fatalf("ttp.Compile: ok=%v err=%v", ok, err)
+		}
+		res, err := rev.Revert(ctx, "callback-001", tech)
+		if err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		if res.Status != domain.ExecSuccess {
+			t.Fatalf("status = %v, want success", res.Status)
+		}
+		if client.lastCmd != "shell" {
+			t.Errorf("cmd = %q, want shell", client.lastCmd)
+		}
+		cmd := client.lastParams["command"]
+		if !strings.Contains(cmd, "powershell -NoProfile -EncodedCommand ") {
+			t.Fatalf("command missing EncodedCommand prefix: %q", cmd)
+		}
+		script := decodePSEncodedCommand(t, cmd)
+		for _, want := range []string{"Remove-Item", prim.Arg("shortcut_path")} {
+			if !strings.Contains(script, want) {
+				t.Errorf("decoded revert script missing %q: %q", want, script)
+			}
+		}
+	})
+
+	t.Run("wmi_event_subscription", func(t *testing.T) {
+		tech := domain.Technique{AttackID: "T1546.003"}
+		prim, ok, err := ttp.Compile(tech)
+		if err != nil || !ok {
+			t.Fatalf("ttp.Compile: ok=%v err=%v", ok, err)
+		}
+		res, err := rev.Revert(ctx, "callback-001", tech)
+		if err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		if res.Status != domain.ExecSuccess {
+			t.Fatalf("status = %v, want success", res.Status)
+		}
+		cmd := client.lastParams["command"]
+		script := decodePSEncodedCommand(t, cmd)
+		for _, want := range []string{
+			"Remove-WmiObject", "__FilterToConsumerBinding", "__EventFilter", "CommandLineEventConsumer",
+			prim.Arg("filter_name"), prim.Arg("consumer_name"),
+		} {
+			if !strings.Contains(script, want) {
+				t.Errorf("decoded revert script missing %q: %q", want, script)
+			}
+		}
+	})
+
+	t.Run("ifeo_injection", func(t *testing.T) {
+		tech := domain.Technique{AttackID: "T1546.012"}
+		prim, ok, err := ttp.Compile(tech)
+		if err != nil || !ok {
+			t.Fatalf("ttp.Compile: ok=%v err=%v", ok, err)
+		}
+		res, err := rev.Revert(ctx, "callback-001", tech)
+		if err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		if res.Status != domain.ExecSuccess {
+			t.Fatalf("status = %v, want success", res.Status)
+		}
+		cmd := client.lastParams["command"]
+		wantKey := `Image File Execution Options\` + prim.Arg("target_image")
+		for _, want := range []string{"reg delete", wantKey, "Debugger"} {
+			if !strings.Contains(cmd, want) {
+				t.Errorf("revert command missing %q: %q", want, cmd)
+			}
+		}
+		if strings.Contains(cmd, "reg add") {
+			t.Errorf("revert command should not add: %q", cmd)
+		}
+	})
+
+	t.Run("port_monitor", func(t *testing.T) {
+		tech := domain.Technique{AttackID: "T1547.010"}
+		prim, ok, err := ttp.Compile(tech)
+		if err != nil || !ok {
+			t.Fatalf("ttp.Compile: ok=%v err=%v", ok, err)
+		}
+		res, err := rev.Revert(ctx, "callback-001", tech)
+		if err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		if res.Status != domain.ExecSuccess {
+			t.Fatalf("status = %v, want success", res.Status)
+		}
+		cmd := client.lastParams["command"]
+		wantKey := `Control\Print\Monitors\` + prim.Arg("monitor_name")
+		if !strings.Contains(cmd, "reg delete") || !strings.Contains(cmd, wantKey) {
+			t.Errorf("revert command = %q, want reg delete of %q", cmd, wantKey)
+		}
+	})
+
+	t.Run("active_setup", func(t *testing.T) {
+		tech := domain.Technique{AttackID: "T1547.014"}
+		prim, ok, err := ttp.Compile(tech)
+		if err != nil || !ok {
+			t.Fatalf("ttp.Compile: ok=%v err=%v", ok, err)
+		}
+		res, err := rev.Revert(ctx, "callback-001", tech)
+		if err != nil {
+			t.Fatalf("Revert: %v", err)
+		}
+		if res.Status != domain.ExecSuccess {
+			t.Fatalf("status = %v, want success", res.Status)
+		}
+		cmd := client.lastParams["command"]
+		wantKey := `Active Setup\Installed Components\` + prim.Arg("component_id")
+		if !strings.Contains(cmd, "reg delete") || !strings.Contains(cmd, wantKey) {
+			t.Errorf("revert command = %q, want reg delete of %q", cmd, wantKey)
+		}
+	})
 }

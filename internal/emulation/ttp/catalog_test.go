@@ -137,7 +137,7 @@ func TestCompile_EnumerationEntries(t *testing.T) {
 		"T1012", "T1518.001", "T1518", "T1614.001", "T1217", "T1087.003",
 		// Panel-authored read-only enumeration batch (28 -> 100).
 		"T1016.001", "T1046", "T1134", "T1555", "T1552.001", "T1115",
-		"T1547.004", "T1546.012", "T1562.001", "T1078.003",
+		"T1547.004", "T1562.001", "T1078.003",
 	}
 	for _, id := range ids {
 		prim, ok, err := ttp.Compile(domain.Technique{AttackID: id})

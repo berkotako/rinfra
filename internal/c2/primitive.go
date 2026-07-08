@@ -53,8 +53,32 @@ const (
 	// PrimScheduledTask creates a scheduled task. Args: "task_name".
 	PrimScheduledTask PrimitiveKind = "scheduled_task"
 	// PrimRegistryRunKey writes a Run-key persistence entry.
-	// Args: "registry_key", "registry_value".
+	// Args: "registry_key", "registry_value", optional "data" (the value's
+	// command data; defaults to "whoami" when unset, so existing entries that
+	// only wanted a benign marker are unaffected).
 	PrimRegistryRunKey PrimitiveKind = "registry_run_key"
+	// PrimShortcutModification creates a Windows shortcut (.lnk) that launches
+	// a target command — Boot or Logon Autostart Execution: Shortcut
+	// Modification (T1547.009). Args: "shortcut_path", "target", "arguments".
+	PrimShortcutModification PrimitiveKind = "shortcut_modification"
+	// PrimWMIEventSubscription creates a WMI permanent event subscription
+	// (__EventFilter + CommandLineEventConsumer + __FilterToConsumerBinding) —
+	// Event Triggered Execution: WMI Event Subscription (T1546.003).
+	// Args: "filter_name", "consumer_name", "query", "command".
+	PrimWMIEventSubscription PrimitiveKind = "wmi_event_subscription"
+	// PrimIFEOInjection adds a Debugger value under a target binary's Image
+	// File Execution Options key, hijacking its execution — Event Triggered
+	// Execution: Image File Execution Options Injection (T1546.012).
+	// Args: "target_image", "debugger".
+	PrimIFEOInjection PrimitiveKind = "ifeo_injection"
+	// PrimPortMonitor registers a DLL as a print-monitor driver, loaded into
+	// spoolsv.exe (SYSTEM) at boot — Boot or Logon Autostart Execution: Port
+	// Monitors (T1547.010). Args: "monitor_name", "driver".
+	PrimPortMonitor PrimitiveKind = "port_monitor"
+	// PrimActiveSetup adds an Active Setup component that runs a StubPath
+	// command once per user at logon — Boot or Logon Autostart Execution:
+	// Active Setup (T1547.014). Args: "component_id", "stub_path".
+	PrimActiveSetup PrimitiveKind = "active_setup"
 
 	// The following are read-only host/network discovery primitives. Each maps
 	// to a benign Windows built-in enumeration command (see DiscoveryCommand) —
@@ -78,7 +102,13 @@ const (
 // asks the operator to undo these via the optional Reverter capability, so an
 // engagement leaves no orphaned persistence on the customer's host.
 func IsCleanable(k PrimitiveKind) bool {
-	return k == PrimScheduledTask || k == PrimRegistryRunKey
+	switch k {
+	case PrimScheduledTask, PrimRegistryRunKey, PrimShortcutModification,
+		PrimWMIEventSubscription, PrimIFEOInjection, PrimPortMonitor, PrimActiveSetup:
+		return true
+	default:
+		return false
+	}
 }
 
 // DiscoveryCommand maps a read-only discovery primitive to the Windows built-in

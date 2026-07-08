@@ -507,7 +507,8 @@ func TestEmulation_Cleanup_RevertsPersistence(t *testing.T) {
 		Name: "persist",
 		Techniques: []domain.Technique{
 			{AttackID: "T1082", Name: "System Info"},        // not cleanable
-			{AttackID: "T1053.005", Name: "Scheduled Task"}, // cleanable
+			{AttackID: "T1053.005", Name: "Scheduled Task"}, // cleanable (pre-existing)
+			{AttackID: "T1546.012", Name: "IFEO Injection"}, // cleanable (new persistence primitive)
 		},
 	}, "op")
 	if err != nil {
@@ -520,8 +521,9 @@ func TestEmulation_Cleanup_RevertsPersistence(t *testing.T) {
 	}
 	run := waitForRun(t, svcEmu, runID)
 
-	if len(reverted) != 1 || reverted[0] != "T1053.005" {
-		t.Fatalf("want exactly T1053.005 reverted, got %v", reverted)
+	// Reverted in reverse order: the later-run T1546.012 first, then T1053.005.
+	if len(reverted) != 2 || reverted[0] != "T1546.012" || reverted[1] != "T1053.005" {
+		t.Fatalf("want [T1546.012 T1053.005] reverted (reverse order), got %v", reverted)
 	}
 	if !hasAuditAction(s.audit, "emulation.cleanup", eng.ID) {
 		t.Error("expected an emulation.cleanup audit event")
@@ -530,12 +532,12 @@ func TestEmulation_Cleanup_RevertsPersistence(t *testing.T) {
 	// exactly one result per executed technique.
 	n := 0
 	for _, r := range run.Results {
-		if r.TechniqueAttackID == "T1053.005" {
+		if r.TechniqueAttackID == "T1053.005" || r.TechniqueAttackID == "T1546.012" {
 			n++
 		}
 	}
-	if n != 1 {
-		t.Errorf("scheduled-task results: want 1 (cleanup not a result), got %d", n)
+	if n != 2 {
+		t.Errorf("cleanable-technique results: want 2 (cleanup not a result), got %d", n)
 	}
 }
 

