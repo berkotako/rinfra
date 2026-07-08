@@ -165,6 +165,7 @@ techniques:
   # cleanup is needed (consistent with the "leave no orphaned artifacts"
   # invariant). The command is operator-overridable via the `command` input.
   # Domain-aware account/group enumeration (the most-requested AD coverage gap).
+  # TODO(operator):
   - attack_id: "T1087.002"
     name: "Account Discovery: Domain Account"
     tactic: discovery
@@ -173,8 +174,9 @@ techniques:
     args:
       script:
         from: command
-        default: net user /domain
+        default: Get-ADUser -Filter * -Properties Enabled | Select-Object Name,SamAccountName,Enabled
 
+  # TODO(operator):
   - attack_id: "T1069.002"
     name: "Permission Groups Discovery: Domain Groups"
     tactic: discovery
@@ -186,7 +188,7 @@ techniques:
         # `-a '-c "<script>"'`, so any inner quote breaks the grouping. Enumerate
         # all domain groups (operators can target a specific group via the input).
         from: command
-        default: net group /domain
+        default: Get-ADGroup -Filter * | Select-Object Name,GroupCategory,GroupScope
 
   - attack_id: "T1482"
     name: "Domain Trust Discovery"
@@ -198,6 +200,7 @@ techniques:
         from: command
         default: nltest /domain_trusts
 
+  # TODO(operator):
   - attack_id: "T1201"
     name: "Password Policy Discovery"
     tactic: discovery
@@ -206,7 +209,7 @@ techniques:
     args:
       script:
         from: command
-        default: net accounts
+        default: Get-ADDefaultDomainPasswordPolicy | Select-Object MinPasswordLength,PasswordHistoryCount,LockoutThreshold,LockoutDuration,MaxPasswordAge,ComplexityEnabled
 
   - attack_id: "T1033"
     name: "System Owner/User Discovery"
@@ -238,6 +241,7 @@ techniques:
         from: command
         default: reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
 
+  # TODO(operator):
   - attack_id: "T1518.001"
     name: "Security Software Discovery"
     tactic: discovery
@@ -246,8 +250,9 @@ techniques:
     args:
       script:
         from: command
-        default: Get-MpComputerStatus | Select-Object AMRunningMode, AntivirusEnabled, RealTimeProtectionEnabled
+        default: Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct | Select-Object displayName,productState,pathToSignedProductExe
 
+  # TODO(operator):
   - attack_id: "T1518"
     name: "Software Discovery"
     tactic: discovery
@@ -256,7 +261,7 @@ techniques:
     args:
       script:
         from: command
-        default: Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* | Select-Object DisplayName
+        default: Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*,HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* | Select-Object DisplayName,DisplayVersion,Publisher
 
   - attack_id: "T1614.001"
     name: "System Location Discovery: System Language Discovery"
@@ -268,6 +273,7 @@ techniques:
         from: command
         default: Get-WinSystemLocale
 
+  # TODO(operator):
   - attack_id: "T1217"
     name: "Browser Information Discovery"
     tactic: collection
@@ -278,7 +284,7 @@ techniques:
         # Quote-free (path has a space): recurse under the Chrome dir and filter
         # by name rather than quoting "User Data".
         from: command
-        default: Get-ChildItem $env:LOCALAPPDATA\Google -Recurse -Filter Bookmarks -ErrorAction SilentlyContinue
+        default: Get-ChildItem $env:LOCALAPPDATA\Google,$env:LOCALAPPDATA\Microsoft\Edge,$env:APPDATA\Mozilla -Recurse -Include Bookmarks,History,places.sqlite -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime
 
   - attack_id: "T1087.003"
     name: "Account Discovery: Email Account"
@@ -294,6 +300,7 @@ techniques:
   # All reuse the powershell/shell primitive (render on every framework), are
   # read-only native built-ins (no state, no cleanup), and quote-free.
 
+  # TODO(operator):
   - attack_id: "T1016.001"
     name: "System Network Configuration Discovery: Internet Connection Discovery"
     tactic: discovery
@@ -302,7 +309,7 @@ techniques:
     args:
       command:
         from: command
-        default: 'ping -n 1 8.8.8.8'
+        default: curl -s http://www.msftconnecttest.com/connecttest.txt
 
   - attack_id: "T1016.002"
     name: "System Network Configuration Discovery: Wi-Fi Discovery"
@@ -334,6 +341,7 @@ techniques:
         from: command
         default: 'Get-CimInstance Win32_ComputerSystem | Select-Object Model, Manufacturer, NumberOfLogicalProcessors, TotalPhysicalMemory'
 
+  # TODO(operator):
   - attack_id: "T1497.003"
     name: "Virtualization/Sandbox Evasion: Time Based Evasion"
     tactic: defense-evasion
@@ -342,8 +350,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-Date; (Get-Date).Ticks'
+        default: Get-CimInstance Win32_OperatingSystem | Select-Object LastBootUpTime,LocalDateTime,NumberOfProcesses,NumberOfUsers
 
+  # TODO(operator):
   - attack_id: "T1622"
     name: "Debugger Evasion"
     tactic: defense-evasion
@@ -352,7 +361,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-CimInstance Win32_Process | Where-Object Name -in ntsd.exe,cdb.exe,windbg.exe,ollydbg.exe,x64dbg.exe | Select-Object Name,ProcessId'
+        default: Get-CimInstance Win32_Process | Where-Object Name -in x64dbg.exe,x32dbg.exe,windbg.exe,ida64.exe,ida.exe,dnSpy.exe,cdb.exe,immunitydebugger.exe | Select-Object Name,ProcessId,CommandLine
 
   - attack_id: "T1010"
     name: "Application Window Discovery"
@@ -394,6 +403,7 @@ techniques:
         from: command
         default: 'nltest /dclist:'
 
+  # TODO(operator):
   - attack_id: "T1590.002"
     name: "Gather Victim Network Information: DNS"
     tactic: reconnaissance
@@ -402,7 +412,7 @@ techniques:
     args:
       command:
         from: command
-        default: 'nltest /dsgetdc:.'
+        default: ipconfig /displaydns
 
   - attack_id: "T1590.004"
     name: "Gather Victim Network Information: Network Topology"
@@ -464,6 +474,7 @@ techniques:
         from: command
         default: 'driverquery /fo csv'
 
+  # TODO(operator):
   - attack_id: "T1087.004"
     name: "Account Discovery: Cloud Account"
     tactic: discovery
@@ -472,8 +483,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem $env:USERPROFILE\.aws -ErrorAction SilentlyContinue | Select-Object Name,FullName'
+        default: aws iam list-users --output table; az ad user list --output table; gcloud auth list
 
+  # TODO(operator):
   - attack_id: "T1069.003"
     name: "Permission Groups Discovery: Cloud Groups"
     tactic: discovery
@@ -482,8 +494,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem $env:USERPROFILE\.azure -ErrorAction SilentlyContinue | Select-Object Name,FullName'
+        default: aws iam list-groups --output table; az ad group list --output table
 
+  # TODO(operator):
   - attack_id: "T1538"
     name: "Cloud Service Dashboard"
     tactic: discovery
@@ -492,8 +505,9 @@ techniques:
     args:
       command:
         from: command
-        default: 'az account list --output table'
+        default: az account list --output table; aws sts get-caller-identity --output table; gcloud projects list
 
+  # TODO(operator):
   - attack_id: "T1526"
     name: "Cloud Service Discovery"
     tactic: discovery
@@ -502,8 +516,9 @@ techniques:
     args:
       command:
         from: command
-        default: 'az resource list --output table'
+        default: az provider list --output table; aws service-quotas list-services --output table; gcloud services list
 
+  # TODO(operator):
   - attack_id: "T1580"
     name: "Cloud Infrastructure Discovery"
     tactic: discovery
@@ -512,8 +527,9 @@ techniques:
     args:
       command:
         from: command
-        default: 'aws ec2 describe-instances --query Reservations[].Instances[].[InstanceId,InstanceType,State.Name,PublicIpAddress] --output table'
+        default: aws ec2 describe-instances --query Reservations[].Instances[].[InstanceId,InstanceType,State.Name,PublicIpAddress] --output table; az vm list --output table; gcloud compute instances list
 
+  # TODO(operator):
   - attack_id: "T1619"
     name: "Cloud Storage Object Discovery"
     tactic: discovery
@@ -522,18 +538,20 @@ techniques:
     args:
       command:
         from: command
-        default: 'aws s3 ls'
+        default: aws s3 ls; az storage account list --output table; gcloud storage buckets list
 
+  # TODO(operator):
   - attack_id: "T1613"
     name: "Container and Resource Discovery"
     tactic: discovery
-    risk: dangerous
+    risk: caution
     primitive: shell
     args:
       command:
         from: command
-        default: 'az container list --output table'
+        default: kubectl get pods --all-namespaces; docker ps -a; az container list --output table
 
+  # TODO(operator):
   - attack_id: "T1069"
     name: "Permission Groups Discovery"
     tactic: discovery
@@ -542,8 +560,9 @@ techniques:
     args:
       command:
         from: command
-        default: 'dsquery group -limit 0'
+        default: powershell -NoProfile -Command Get-ADGroup -Filter *
 
+  # TODO(operator):
   - attack_id: "T1087"
     name: "Account Discovery"
     tactic: discovery
@@ -552,7 +571,7 @@ techniques:
     args:
       command:
         from: command
-        default: 'dsquery user -limit 0'
+        default: powershell -NoProfile -Command Get-ADUser -Filter *
 
   - attack_id: "T1615"
     name: "Group Policy Discovery"
@@ -584,6 +603,7 @@ techniques:
         from: command
         default: 'Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true} -Properties DoesNotRequirePreAuth | Select-Object Name,SamAccountName'
 
+  # TODO(operator):
   - attack_id: "T1078.002"
     name: "Valid Accounts: Domain Accounts"
     tactic: defense-evasion
@@ -592,8 +612,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ADUser -Filter {Enabled -eq true} -Properties LastLogonDate | Select-Object Name,SamAccountName,LastLogonDate | Sort-Object LastLogonDate -Descending'
+        default: Get-ADUser -Filter {Enabled -eq $true} -Properties LastLogonDate | Select-Object Name,SamAccountName,LastLogonDate | Sort-Object LastLogonDate -Descending
 
+  # TODO(operator):
   - attack_id: "T1552.006"
     name: "Unsecured Credentials: Group Policy Preferences"
     tactic: credential-access
@@ -602,7 +623,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem \\$env:USERDNSDOMAIN\SYSVOL -Recurse -Filter Groups.xml -ErrorAction SilentlyContinue | Select-Object FullName'
+        default: Get-ChildItem \\$env:USERDNSDOMAIN\SYSVOL -Recurse -Include Groups.xml,Services.xml,ScheduledTasks.xml,DataSources.xml,Printers.xml,Drives.xml -ErrorAction SilentlyContinue | Select-Object FullName
 
   - attack_id: "T1555"
     name: "Credentials from Password Stores"
@@ -624,6 +645,7 @@ techniques:
         from: command
         default: 'vaultcmd /list'
 
+  # TODO(operator):
   - attack_id: "T1555.003"
     name: "Credentials from Password Stores: Credentials from Web Browsers"
     tactic: credential-access
@@ -632,7 +654,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem $env:LOCALAPPDATA\Google\Chrome\User*\Default -Filter Login*Data -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime'
+        default: Get-ChildItem $env:LOCALAPPDATA\*\*\User*Data\*\Login*Data -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime
 
   - attack_id: "T1552.001"
     name: "Unsecured Credentials: Credentials In Files"
@@ -644,6 +666,7 @@ techniques:
         from: command
         default: 'Get-ChildItem $env:USERPROFILE -Recurse -Include *.xml,*.ini,*.txt -ErrorAction SilentlyContinue | Select-String -Pattern password -SimpleMatch | Select-Object Path, LineNumber'
 
+  # TODO(operator):
   - attack_id: "T1552.002"
     name: "Unsecured Credentials: Credentials in Registry"
     tactic: credential-access
@@ -652,8 +675,9 @@ techniques:
     args:
       command:
         from: command
-        default: 'reg query HKLM\SOFTWARE\OpenSSH'
+        default: reg query HKLM /f password /t REG_SZ /s
 
+  # TODO(operator):
   - attack_id: "T1552.004"
     name: "Unsecured Credentials: Private Keys"
     tactic: credential-access
@@ -662,7 +686,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem C:\Users -Recurse -Include *.pem,*.key,*.pfx,*.p12,*.ppk -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime'
+        default: Get-ChildItem C:\Users -Recurse -Force -Include *.pem,*.key,*.pfx,*.p12,*.ppk,*.jks,id_rsa,id_ecdsa,id_ed25519 -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime,Length
 
   - attack_id: "T1115"
     name: "Clipboard Data"
@@ -674,6 +698,7 @@ techniques:
         from: command
         default: 'Get-Clipboard'
 
+  # TODO(operator):
   - attack_id: "T1039"
     name: "Data from Network Shared Drive"
     tactic: collection
@@ -682,8 +707,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem \\$env:COMPUTERNAME\C$ -ErrorAction SilentlyContinue | Select-Object Name,FullName,LastWriteTime'
+        default: Get-SmbMapping | Select-Object LocalPath,RemotePath,Status
 
+  # TODO(operator):
   - attack_id: "T1119"
     name: "Automated Collection"
     tactic: collection
@@ -692,8 +718,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem C:\Users -Recurse -Include *.docx,*.xlsx,*.pdf -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime,Length'
+        default: Get-ChildItem C:\Users -Recurse -Force -Include *.doc,*.docx,*.xls,*.xlsx,*.ppt,*.pptx,*.pdf,*.csv,*.txt,*.kdbx,*.pst -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime,Length
 
+  # TODO(operator):
   - attack_id: "T1113"
     name: "Screen Capture"
     tactic: collection
@@ -702,7 +729,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-CimInstance Win32_DesktopMonitor | Select-Object Name,ScreenWidth,ScreenHeight'
+        default: Get-CimInstance Win32_VideoController | Select-Object Name,CurrentHorizontalResolution,CurrentVerticalResolution,VideoModeDescription
 
   - attack_id: "T1074.001"
     name: "Data Staged: Local Data Staging"
@@ -754,6 +781,7 @@ techniques:
         from: command
         default: 'Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Winlogon'
 
+  # TODO(operator):
   - attack_id: "T1547.009"
     name: "Boot or Logon Autostart Execution: Shortcut Modification"
     tactic: persistence
@@ -762,8 +790,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem $env:APPDATA\Microsoft\Windows\Start*Menu\Programs\Startup'
+        default: Get-ChildItem $env:APPDATA\Microsoft\Windows\Start*Menu\Programs\Startup,$env:ProgramData\Microsoft\Windows\Start*Menu\Programs\Startup -Force -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime,Length
 
+  # TODO(operator):
   - attack_id: "T1546.003"
     name: "Event Triggered Execution: Windows Management Instrumentation Event Subscription"
     tactic: persistence
@@ -772,8 +801,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-CimInstance -Namespace root\subscription -ClassName __EventFilter | Select-Object Name, Query'
+        default: Get-CimInstance -Namespace root\subscription -ClassName __EventFilter | Select-Object Name,Query; Get-CimInstance -Namespace root\subscription -ClassName CommandLineEventConsumer | Select-Object Name,CommandLineTemplate
 
+  # TODO(operator):
   - attack_id: "T1546.012"
     name: "Event Triggered Execution: Image File Execution Options Injection"
     tactic: persistence
@@ -782,7 +812,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Image*'
+        default: Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Image* | ForEach-Object {Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue} | Where-Object Debugger | Select-Object PSChildName,Debugger
 
   - attack_id: "T1562.001"
     name: "Impair Defenses: Disable or Modify Tools"
@@ -814,6 +844,7 @@ techniques:
         from: command
         default: 'Get-MpPreference | Select-Object ExclusionPath, ExclusionExtension, ExclusionProcess, ExclusionIpAddress'
 
+  # TODO(operator):
   - attack_id: "T1547.010"
     name: "Boot or Logon Autostart Execution: Port Monitors"
     tactic: persistence
@@ -822,8 +853,9 @@ techniques:
     args:
       command:
         from: command
-        default: 'reg query HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors'
+        default: reg query HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors /s
 
+  # TODO(operator):
   - attack_id: "T1547.014"
     name: "Boot or Logon Autostart Execution: Active Setup"
     tactic: persistence
@@ -832,7 +864,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem HKLM:\SOFTWARE\Microsoft\Active*Setup\Installed*Components'
+        default: Get-ChildItem HKLM:\SOFTWARE\Microsoft\Active*Setup\Installed*Components | ForEach-Object {Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue} | Where-Object StubPath | Select-Object PSChildName,StubPath
 
   - attack_id: "T1059.004"
     name: "Command and Scripting Interpreter: Unix Shell"
@@ -884,16 +916,18 @@ techniques:
         from: command
         default: 'whoami /priv'
 
+  # TODO(operator):
   - attack_id: "T1530"
     name: "Data from Cloud Storage"
     tactic: collection
-    risk: dangerous
+    risk: caution
     primitive: shell
     args:
       command:
         from: command
-        default: 'aws s3api list-buckets --output table'
+        default: aws s3 ls; az storage account list --output table; gcloud storage buckets list
 
+  # TODO(operator):
   - attack_id: "T1213"
     name: "Data from Information Repositories"
     tactic: collection
@@ -902,7 +936,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem \\$env:LOGONSERVER\SYSVOL -ErrorAction SilentlyContinue | Select-Object Name,FullName'
+        default: Get-ItemProperty HKCU:\Software\Microsoft\OneDrive\Accounts\* -ErrorAction SilentlyContinue | Select-Object DisplayName,UserFolder,ServiceEndpointUri
 
   - attack_id: "T1025"
     name: "Data from Removable Media"
@@ -914,16 +948,18 @@ techniques:
         from: command
         default: 'Get-Volume | Where-Object DriveType -eq Removable | Select-Object DriveLetter,FileSystemLabel,Size'
 
+  # TODO(operator):
   - attack_id: "T1602"
     name: "Data from Configuration Repository"
     tactic: collection
-    risk: safe
+    risk: caution
     primitive: shell
     args:
       command:
         from: command
-        default: 'wmic computersystem get Name,Domain,Workgroup'
+        default: reg query HKLM\SYSTEM\CurrentControlSet\Services\SNMP\Parameters /s
 
+  # TODO(operator):
   - attack_id: "T1219"
     name: "Remote Access Software"
     tactic: command-and-control
@@ -932,7 +968,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-Process | Where-Object Name -in teamviewer,anydesk,vncviewer,radmin | Select-Object Name,Id,Path'
+        default: Get-Process | Where-Object Name -in teamviewer,anydesk,screenconnect,connectwisecontrol,atera,splashtop,ninjarmm,gotoassist,logmein,vncviewer,winvnc,radmin | Select-Object Name,Id,Path
 
   - attack_id: "T1027"
     name: "Obfuscated Files or Information"
@@ -984,6 +1020,7 @@ techniques:
         from: command
         default: 'Get-LocalUser | Select-Object Name,Enabled,PasswordLastSet,LastLogon'
 
+  # TODO(operator):
   - attack_id: "T1649"
     name: "Steal or Forge Authentication Certificates"
     tactic: credential-access
@@ -992,8 +1029,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-ChildItem Cert:\CurrentUser\My | Select-Object Subject,Thumbprint,NotAfter'
+        default: Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My | Select-Object Subject,Thumbprint,NotAfter,HasPrivateKey,EnhancedKeyUsageList
 
+  # TODO(operator):
   - attack_id: "T1564.002"
     name: "Hide Artifacts: Hidden Users"
     tactic: defense-evasion
@@ -1002,8 +1040,9 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-LocalUser | Select-Object Name,Enabled,Description | Sort-Object Name'
+        default: Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows*NT\CurrentVersion\Winlogon\SpecialAccounts\UserList -ErrorAction SilentlyContinue; Get-LocalUser | Select-Object Name,Enabled,LastLogon | Sort-Object Name
 
+  # TODO(operator):
   - attack_id: "T1564.003"
     name: "Hide Artifacts: Hidden Window"
     tactic: defense-evasion
@@ -1012,7 +1051,7 @@ techniques:
     args:
       script:
         from: command
-        default: 'Get-Process | Where-Object MainWindowHandle -eq 0 | Select-Object Name,Id,StartTime'
+        default: Get-CimInstance Win32_Process | Where-Object CommandLine -like *Hidden* | Select-Object Name,ProcessId,CommandLine
 
   # --- Top-up to 100+ real entries (read-only; panel-reviewed) ---
 
@@ -1026,6 +1065,7 @@ techniques:
         from: command
         default: 'curl -s http://169.254.169.254/latest/meta-data/'
 
+  # TODO(operator):
   - attack_id: "T1552.003"
     name: "Unsecured Credentials: Bash History"
     tactic: credential-access
@@ -1034,7 +1074,7 @@ techniques:
     args:
       command:
         from: command
-        default: 'cat $HOME/.bash_history'
+        default: cat $HOME/.bash_history $HOME/.zsh_history 2>/dev/null
 
   - attack_id: "T1547.002"
     name: "Boot or Logon Autostart Execution: Authentication Package"

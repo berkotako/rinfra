@@ -114,7 +114,7 @@ _Last updated: 2026-06-22._
   a senior-red-team panel rated every technique's *realistic* operational risk
   across four lenses — detection footprint, credential/data exposure, blast
   radius/scope-creep, and OPSEC/authorization sensitivity — with the most
-  conservative lens winning. Current split: **34 safe / 44 caution / 24
+  conservative lens winning. Current split: **33 safe / 47 caution / 22
   dangerous**. `dangerous` covers adversary-equivalent reads (cloud-IAM/metadata
   and plaintext-secret exposure, domain-wide AD dumps, Kerberoasting) and the
   two state-changing primitives (`registry_run_key`, `scheduled_task`). The tag
