@@ -30,7 +30,9 @@
 #               surfaces, remote shares, or heavy recursive scans.
 #   dangerous — adversary-equivalent (cloud-IAM/metadata or plaintext-secret
 #               exposure, domain-wide AD dumps, Kerberoasting) OR backed by a
-#               state-changing primitive (registry_run_key, scheduled_task).
+#               state-changing primitive (registry_run_key, scheduled_task,
+#               shortcut_modification, wmi_event_subscription, ifeo_injection,
+#               port_monitor, active_setup).
 #
 # No payload content, shellcode, or exploit material belongs in this file — only
 # the portable verb + the parameters the technique supplies.
@@ -341,8 +343,11 @@ techniques:
     primitive: powershell
     args:
       script:
+        # The canonical check: measure actual elapsed wall-clock time against an
+        # intended sleep to detect a sandbox's accelerated/mocked clock, rather
+        # than just reading the clock once.
         from: command
-        default: 'Get-Date; (Get-Date).Ticks'
+        default: '$s=Get-Date; Start-Sleep -Seconds 2; ((Get-Date)-$s).TotalSeconds'
 
   - attack_id: "T1622"
     name: "Debugger Evasion"
@@ -588,11 +593,15 @@ techniques:
     name: "Valid Accounts: Domain Accounts"
     tactic: defense-evasion
     risk: caution
-    primitive: powershell
+    primitive: shell
     args:
-      script:
+      command:
+        # The direct, honest proxy: klist lists the live Kerberos service
+        # tickets the CURRENT session already holds — literal evidence the
+        # session is authenticated as a valid domain account — rather than a
+        # generic AD account enumeration (that's T1087.002's job).
         from: command
-        default: 'Get-ADUser -Filter {Enabled -eq true} -Properties LastLogonDate | Select-Object Name,SamAccountName,LastLogonDate | Sort-Object LastLogonDate -Descending'
+        default: 'klist'
 
   - attack_id: "T1552.006"
     name: "Unsecured Credentials: Group Policy Preferences"
@@ -647,12 +656,16 @@ techniques:
   - attack_id: "T1552.002"
     name: "Unsecured Credentials: Credentials in Registry"
     tactic: credential-access
-    risk: caution
-    primitive: shell
+    risk: dangerous
+    primitive: powershell
     args:
-      command:
+      script:
+        # Quote-free ("Windows NT" has a space, bridged with a wildcard, same
+        # trick as T1547.004): the canonical registry credential exposure —
+        # cleartext autologon creds under Winlogon — not an OpenSSH host-key
+        # path that doesn't actually hold user credentials.
         from: command
-        default: 'reg query HKLM\SOFTWARE\OpenSSH'
+        default: 'Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Winlogon | Select-Object DefaultUserName,DefaultDomainName,DefaultPassword,AutoAdminLogon'
 
   - attack_id: "T1552.004"
     name: "Unsecured Credentials: Private Keys"
@@ -701,8 +714,11 @@ techniques:
     primitive: powershell
     args:
       script:
+        # Read-only precursor: enumerates the exact display surface
+        # (System.Windows.Forms.Screen) real screen-capture code queries right
+        # before Graphics.CopyFromScreen, instead of generic WMI monitor specs.
         from: command
-        default: 'Get-CimInstance Win32_DesktopMonitor | Select-Object Name,ScreenWidth,ScreenHeight'
+        default: 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | Select-Object DeviceName,Bounds,Primary'
 
   - attack_id: "T1074.001"
     name: "Data Staged: Local Data Staging"
@@ -757,32 +773,50 @@ techniques:
   - attack_id: "T1547.009"
     name: "Boot or Logon Autostart Execution: Shortcut Modification"
     tactic: persistence
-    risk: safe
-    primitive: powershell
+    risk: dangerous
+    primitive: shortcut_modification
     args:
-      script:
-        from: command
-        default: 'Get-ChildItem $env:APPDATA\Microsoft\Windows\Start*Menu\Programs\Startup'
+      shortcut_path:
+        from: shortcut_path
+        default: '%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\RInfraTest.lnk'
+      target:
+        from: target
+        default: 'C:\Windows\System32\cmd.exe'
+      arguments:
+        from: arguments
+        default: '/c whoami'
 
   - attack_id: "T1546.003"
     name: "Event Triggered Execution: Windows Management Instrumentation Event Subscription"
     tactic: persistence
-    risk: caution
-    primitive: powershell
+    risk: dangerous
+    primitive: wmi_event_subscription
     args:
-      script:
+      filter_name:
+        from: filter_name
+        default: RInfraTestFilter
+      consumer_name:
+        from: consumer_name
+        default: RInfraTestConsumer
+      query:
+        from: query
+        default: "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System'"
+      command:
         from: command
-        default: 'Get-CimInstance -Namespace root\subscription -ClassName __EventFilter | Select-Object Name, Query'
+        default: 'cmd.exe /c whoami'
 
   - attack_id: "T1546.012"
     name: "Event Triggered Execution: Image File Execution Options Injection"
     tactic: persistence
-    risk: caution
-    primitive: powershell
+    risk: dangerous
+    primitive: ifeo_injection
     args:
-      script:
-        from: command
-        default: 'Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Image*'
+      target_image:
+        from: target_image
+        default: osk.exe
+      debugger:
+        from: debugger
+        default: 'C:\Windows\System32\cmd.exe'
 
   - attack_id: "T1562.001"
     name: "Impair Defenses: Disable or Modify Tools"
@@ -817,22 +851,28 @@ techniques:
   - attack_id: "T1547.010"
     name: "Boot or Logon Autostart Execution: Port Monitors"
     tactic: persistence
-    risk: caution
-    primitive: shell
+    risk: dangerous
+    primitive: port_monitor
     args:
-      command:
-        from: command
-        default: 'reg query HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors'
+      monitor_name:
+        from: monitor_name
+        default: RInfraTestMonitor
+      driver:
+        from: driver
+        default: rinfratest.dll
 
   - attack_id: "T1547.014"
     name: "Boot or Logon Autostart Execution: Active Setup"
     tactic: persistence
-    risk: caution
-    primitive: powershell
+    risk: dangerous
+    primitive: active_setup
     args:
-      script:
-        from: command
-        default: 'Get-ChildItem HKLM:\SOFTWARE\Microsoft\Active*Setup\Installed*Components'
+      component_id:
+        from: component_id
+        default: '{6C6D5F6A-7261-4E76-8B7E-52494E465241}'
+      stub_path:
+        from: stub_path
+        default: 'C:\Windows\System32\cmd.exe /c whoami'
 
   - attack_id: "T1059.004"
     name: "Command and Scripting Interpreter: Unix Shell"
@@ -917,22 +957,36 @@ techniques:
   - attack_id: "T1602"
     name: "Data from Configuration Repository"
     tactic: collection
-    risk: safe
+    risk: caution
     primitive: shell
     args:
       command:
+        # T1602.001 (SNMP) proxy: on-host SNMP community strings are the closest
+        # genuine "configuration repository" credential surface a Windows host
+        # exposes, rather than generic domain-membership info.
         from: command
-        default: 'wmic computersystem get Name,Domain,Workgroup'
+        default: 'reg query HKLM\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\ValidCommunities'
 
   - attack_id: "T1219"
     name: "Remote Access Software"
     tactic: command-and-control
-    risk: caution
-    primitive: powershell
+    risk: dangerous
+    primitive: registry_run_key
     args:
-      script:
-        from: command
-        default: 'Get-Process | Where-Object Name -in teamviewer,anydesk,vncviewer,radmin | Select-Object Name,Id,Path'
+      # RInfra does not bundle or install any remote-access tool (compose, not
+      # author) — `target` must be the path to software the operator has
+      # already legitimately deployed/found on the box; establishes real
+      # persistent auto-launch for it. No default: unresolved -> a clean
+      # Compile error rather than a fabricated attempt against a made-up path.
+      registry_key:
+        from: registry_key
+        default: 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+      registry_value:
+        from: registry_value
+        default: RInfraRemoteAccess
+      data:
+        from: target
+        required: true
 
   - attack_id: "T1027"
     name: "Obfuscated Files or Information"
@@ -1001,8 +1055,12 @@ techniques:
     primitive: powershell
     args:
       script:
+        # Quote-free (Windows*NT wildcard, matches T1547.004): checks the actual
+        # artifact this technique creates — a SpecialAccounts\UserList entry
+        # that hides the account from the logon screen — not a generic user
+        # listing (that's T1087.001's job).
         from: command
-        default: 'Get-LocalUser | Select-Object Name,Enabled,Description | Sort-Object Name'
+        default: 'Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows*\CurrentVersion\Winlogon\SpecialAccounts\UserList -ErrorAction SilentlyContinue'
 
   - attack_id: "T1564.003"
     name: "Hide Artifacts: Hidden Window"
@@ -1011,8 +1069,11 @@ techniques:
     primitive: powershell
     args:
       script:
+        # Targets the actual IOC — a -WindowStyle Hidden / -w hidden flag in the
+        # command line — instead of MainWindowHandle -eq 0, which also flags
+        # every ordinary console-less background process.
         from: command
-        default: 'Get-Process | Where-Object MainWindowHandle -eq 0 | Select-Object Name,Id,StartTime'
+        default: 'Get-CimInstance Win32_Process | Where-Object CommandLine -match hidden | Select-Object Name,ProcessId,CommandLine'
 
   # --- Top-up to 100+ real entries (read-only; panel-reviewed) ---
 

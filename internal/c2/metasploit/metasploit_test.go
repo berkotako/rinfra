@@ -2,14 +2,18 @@ package metasploit_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/rinfra/rinfra/internal/c2"
 	"github.com/rinfra/rinfra/internal/c2/deploy"
 	msfpkg "github.com/rinfra/rinfra/internal/c2/metasploit"
 	"github.com/rinfra/rinfra/internal/domain"
+	"github.com/rinfra/rinfra/internal/emulation/ttp"
 )
 
 // FakeMsfClient is a test double for MsfRpcdClient. Reads model msfrpcd's
@@ -22,6 +26,7 @@ type FakeMsfClient struct {
 	consoleWrites []string
 	reads         int
 	lastDispatch  string // "meterpreter" or "shell" — which transport ran the command
+	lastCmd       string // the exact rendered command handed to the dispatch call
 }
 
 func (f *FakeMsfClient) popOutput() string {
@@ -46,15 +51,17 @@ func (f *FakeMsfClient) ConsoleRead(_ context.Context, _ string) (string, bool, 
 func (f *FakeMsfClient) SessionList(_ context.Context) ([]msfpkg.MsfSession, error) {
 	return f.sessions, nil
 }
-func (f *FakeMsfClient) SessionMeterpreterRun(_ context.Context, _, _ string) error {
+func (f *FakeMsfClient) SessionMeterpreterRun(_ context.Context, _, cmd string) error {
 	f.lastDispatch = "meterpreter"
+	f.lastCmd = cmd
 	return f.shellErr
 }
 func (f *FakeMsfClient) SessionMeterpreterRead(_ context.Context, _ string) (string, error) {
 	return f.popOutput(), nil
 }
-func (f *FakeMsfClient) SessionShellWrite(_ context.Context, _, _ string) error {
+func (f *FakeMsfClient) SessionShellWrite(_ context.Context, _, cmd string) error {
 	f.lastDispatch = "shell"
+	f.lastCmd = strings.TrimSuffix(cmd, "\n")
 	return f.shellErr
 }
 func (f *FakeMsfClient) SessionShellRead(_ context.Context, _ string) (string, error) {
@@ -239,5 +246,323 @@ func TestOperator_Sessions(t *testing.T) {
 	}
 	if sessions[0].Metadata["type"] != "meterpreter" {
 		t.Errorf("expected type=meterpreter, got %q", sessions[0].Metadata["type"])
+	}
+}
+
+// decodePSCommand reverses the package's encodePSCommand (base64 of a
+// UTF-16LE script) into plaintext, so tests can assert on the actual
+// PowerShell content delivered via -EncodedCommand without duplicating the
+// encoder under test.
+func decodePSCommand(t *testing.T, encoded string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	if len(raw)%2 != 0 {
+		t.Fatalf("decoded payload has odd byte length %d", len(raw))
+	}
+	u16 := make([]uint16, len(raw)/2)
+	for i := range u16 {
+		u16[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+	return string(utf16.Decode(u16))
+}
+
+// TestOperator_Execute_NewCleanablePrimitives_RegBased covers the render path
+// (Execute) for the 3 new reg-based cleanable primitives added alongside
+// PrimScheduledTask: ifeo_injection, port_monitor, active_setup. Each should
+// render as a plain `shell reg add ...` — no EncodedCommand wrapping needed
+// since these are single well-formed reg.exe invocations.
+func TestOperator_Execute_NewCleanablePrimitives_RegBased(t *testing.T) {
+	tests := []struct {
+		name     string
+		attackID string
+		valueTag string // the /v <name> reg value written
+	}{
+		{"ifeo_injection", "T1546.012", "Debugger"},
+		{"port_monitor", "T1547.010", "Driver"},
+		{"active_setup", "T1547.014", "StubPath"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prim, ok, err := ttp.Compile(domain.Technique{AttackID: tc.attackID})
+			if err != nil || !ok {
+				t.Fatalf("ttp.Compile(%s): ok=%v err=%v", tc.attackID, ok, err)
+			}
+
+			client := &FakeMsfClient{shellOutput: "ok"}
+			op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
+			res, err := op.Execute(context.Background(), "1", domain.Technique{AttackID: tc.attackID})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if res.Status != domain.ExecSuccess {
+				t.Fatalf("status = %v, want success; output=%q", res.Status, res.Output)
+			}
+
+			cmd := client.lastCmd
+			if !strings.HasPrefix(cmd, "shell reg add ") {
+				t.Fatalf("cmd = %q, want %q prefix", cmd, "shell reg add ")
+			}
+
+			var wantKey, wantData string
+			switch prim.Kind {
+			case c2.PrimIFEOInjection:
+				wantKey = `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\` + prim.Arg("target_image")
+				wantData = prim.Arg("debugger")
+			case c2.PrimPortMonitor:
+				wantKey = `HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\` + prim.Arg("monitor_name")
+				wantData = prim.Arg("driver")
+			case c2.PrimActiveSetup:
+				wantKey = `HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\` + prim.Arg("component_id")
+				wantData = prim.Arg("stub_path")
+			default:
+				t.Fatalf("unexpected primitive kind %q for attack id %s", prim.Kind, tc.attackID)
+			}
+			if !strings.Contains(cmd, wantKey) {
+				t.Errorf("cmd missing key %q: %q", wantKey, cmd)
+			}
+			if !strings.Contains(cmd, "/v "+tc.valueTag) {
+				t.Errorf("cmd missing value name %q: %q", tc.valueTag, cmd)
+			}
+			if !strings.Contains(cmd, wantData) {
+				t.Errorf("cmd missing data %q: %q", wantData, cmd)
+			}
+		})
+	}
+}
+
+// TestOperator_Revert_NewCleanablePrimitives_RegBased covers the cleanup path
+// (Revert) for the 3 new reg-based cleanable primitives. port_monitor and
+// active_setup delete the whole dedicated subkey (like scheduled_task deletes
+// its whole task); ifeo_injection deletes only the Debugger value, since the
+// IFEO subkey may legitimately pre-exist for other reasons.
+func TestOperator_Revert_NewCleanablePrimitives_RegBased(t *testing.T) {
+	tests := []struct {
+		name         string
+		attackID     string
+		wantValueDel string // non-empty if only a single value (not the whole key) should be deleted
+	}{
+		{"ifeo_injection", "T1546.012", "Debugger"},
+		{"port_monitor", "T1547.010", ""},
+		{"active_setup", "T1547.014", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prim, ok, err := ttp.Compile(domain.Technique{AttackID: tc.attackID})
+			if err != nil || !ok {
+				t.Fatalf("ttp.Compile(%s): ok=%v err=%v", tc.attackID, ok, err)
+			}
+
+			client := &FakeMsfClient{shellOutput: "ok"}
+			op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
+			rev, ok := op.(c2.Reverter)
+			if !ok {
+				t.Fatal("metasploit operator should implement c2.Reverter")
+			}
+			res, err := rev.Revert(context.Background(), "1", domain.Technique{AttackID: tc.attackID})
+			if err != nil {
+				t.Fatalf("Revert: %v", err)
+			}
+			if res.Status != domain.ExecSuccess {
+				t.Fatalf("status = %v, want success; output=%q", res.Status, res.Output)
+			}
+
+			cmd := client.lastCmd
+			if !strings.HasPrefix(cmd, "shell reg delete ") {
+				t.Fatalf("cmd = %q, want %q prefix", cmd, "shell reg delete ")
+			}
+
+			var wantKey string
+			switch prim.Kind {
+			case c2.PrimIFEOInjection:
+				wantKey = `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\` + prim.Arg("target_image")
+			case c2.PrimPortMonitor:
+				wantKey = `HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\` + prim.Arg("monitor_name")
+			case c2.PrimActiveSetup:
+				wantKey = `HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\` + prim.Arg("component_id")
+			default:
+				t.Fatalf("unexpected primitive kind %q for attack id %s", prim.Kind, tc.attackID)
+			}
+			if !strings.Contains(cmd, wantKey) {
+				t.Errorf("cmd missing key %q: %q", wantKey, cmd)
+			}
+			if tc.wantValueDel != "" {
+				if !strings.Contains(cmd, "/v "+tc.wantValueDel) {
+					t.Errorf("cmd missing value delete %q: %q", tc.wantValueDel, cmd)
+				}
+			} else if strings.Contains(cmd, "/v ") {
+				t.Errorf("%s revert should delete the whole subkey, not a single value: %q", tc.name, cmd)
+			}
+		})
+	}
+}
+
+// TestOperator_Execute_NewCleanablePrimitives_EncodedCommand covers the
+// render path for the 2 new primitives that need real multi-statement
+// PowerShell (COM object / WMI cmdlets): shortcut_modification and
+// wmi_event_subscription. Both should render as a `shell powershell -NoProfile
+// -EncodedCommand <base64>` command (no nested quoting), so the test decodes
+// the payload and asserts on the underlying script.
+func TestOperator_Execute_NewCleanablePrimitives_EncodedCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		attackID  string
+		wantParts func(prim c2.Primitive) []string
+	}{
+		{
+			name:     "shortcut_modification",
+			attackID: "T1547.009",
+			wantParts: func(prim c2.Primitive) []string {
+				return []string{
+					"CreateShortcut", prim.Arg("shortcut_path"), prim.Arg("target"), prim.Arg("arguments"),
+				}
+			},
+		},
+		{
+			name:     "wmi_event_subscription",
+			attackID: "T1546.003",
+			wantParts: func(prim c2.Primitive) []string {
+				return []string{
+					"Set-WmiInstance", "__EventFilter", "CommandLineEventConsumer", "__FilterToConsumerBinding",
+					prim.Arg("filter_name"), prim.Arg("consumer_name"), prim.Arg("command"),
+				}
+			},
+		},
+	}
+	const prefix = "shell powershell -NoProfile -EncodedCommand "
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prim, ok, err := ttp.Compile(domain.Technique{AttackID: tc.attackID})
+			if err != nil || !ok {
+				t.Fatalf("ttp.Compile(%s): ok=%v err=%v", tc.attackID, ok, err)
+			}
+
+			client := &FakeMsfClient{shellOutput: "ok"}
+			op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
+			res, err := op.Execute(context.Background(), "1", domain.Technique{AttackID: tc.attackID})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if res.Status != domain.ExecSuccess {
+				t.Fatalf("status = %v, want success; output=%q", res.Status, res.Output)
+			}
+
+			if !strings.HasPrefix(client.lastCmd, prefix) {
+				t.Fatalf("cmd = %q, want prefix %q", client.lastCmd, prefix)
+			}
+			plaintext := decodePSCommand(t, strings.TrimPrefix(client.lastCmd, prefix))
+			for _, want := range tc.wantParts(prim) {
+				if want == "" {
+					continue
+				}
+				if !strings.Contains(plaintext, want) {
+					t.Errorf("decoded script missing %q: %q", want, plaintext)
+				}
+			}
+		})
+	}
+}
+
+// TestOperator_Revert_NewCleanablePrimitives_EncodedCommand covers the
+// cleanup path for the 2 EncodedCommand-delivered primitives.
+func TestOperator_Revert_NewCleanablePrimitives_EncodedCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		attackID  string
+		wantParts func(prim c2.Primitive) []string
+	}{
+		{
+			name:     "shortcut_modification",
+			attackID: "T1547.009",
+			wantParts: func(prim c2.Primitive) []string {
+				return []string{"Remove-Item", prim.Arg("shortcut_path")}
+			},
+		},
+		{
+			name:     "wmi_event_subscription",
+			attackID: "T1546.003",
+			wantParts: func(prim c2.Primitive) []string {
+				return []string{
+					"__FilterToConsumerBinding", "__EventFilter", "CommandLineEventConsumer",
+					prim.Arg("filter_name"), prim.Arg("consumer_name"),
+				}
+			},
+		},
+	}
+	const prefix = "shell powershell -NoProfile -EncodedCommand "
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prim, ok, err := ttp.Compile(domain.Technique{AttackID: tc.attackID})
+			if err != nil || !ok {
+				t.Fatalf("ttp.Compile(%s): ok=%v err=%v", tc.attackID, ok, err)
+			}
+
+			client := &FakeMsfClient{shellOutput: "ok"}
+			op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
+			rev, ok := op.(c2.Reverter)
+			if !ok {
+				t.Fatal("metasploit operator should implement c2.Reverter")
+			}
+			res, err := rev.Revert(context.Background(), "1", domain.Technique{AttackID: tc.attackID})
+			if err != nil {
+				t.Fatalf("Revert: %v", err)
+			}
+			if res.Status != domain.ExecSuccess {
+				t.Fatalf("status = %v, want success; output=%q", res.Status, res.Output)
+			}
+
+			if !strings.HasPrefix(client.lastCmd, prefix) {
+				t.Fatalf("cmd = %q, want prefix %q", client.lastCmd, prefix)
+			}
+			plaintext := decodePSCommand(t, strings.TrimPrefix(client.lastCmd, prefix))
+			for _, want := range tc.wantParts(prim) {
+				if want == "" {
+					continue
+				}
+				if !strings.Contains(plaintext, want) {
+					t.Errorf("decoded cleanup script missing %q: %q", want, plaintext)
+				}
+			}
+		})
+	}
+}
+
+// TestOperator_Revert_ScheduledTask_StillWorks pins the pre-existing
+// PrimScheduledTask cleanup behavior (msfCleanupCommand's switch conversion
+// must not change it) and confirms non-cleanable/unmapped techniques still
+// report unsupported rather than a fabricated cleanup.
+func TestOperator_Revert_ScheduledTask_StillWorks(t *testing.T) {
+	client := &FakeMsfClient{shellOutput: "ok"}
+	op := msfpkg.NewOperatorWithClient(c2.Teamserver{}, client, msfpkg.WithPoll(0))
+	rev, ok := op.(c2.Reverter)
+	if !ok {
+		t.Fatal("metasploit operator should implement c2.Reverter")
+	}
+	ctx := context.Background()
+
+	prim, ok, err := ttp.Compile(domain.Technique{AttackID: "T1053.005"})
+	if err != nil || !ok {
+		t.Fatalf("ttp.Compile(T1053.005): ok=%v err=%v", ok, err)
+	}
+	res, err := rev.Revert(ctx, "1", domain.Technique{AttackID: "T1053.005"})
+	if err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if res.Status != domain.ExecSuccess {
+		t.Fatalf("status = %v, want success", res.Status)
+	}
+	wantCmd := `shell schtasks /delete /tn "` + prim.Arg("task_name") + `" /f`
+	if client.lastCmd != wantCmd {
+		t.Errorf("cmd = %q, want %q", client.lastCmd, wantCmd)
+	}
+
+	// Non-cleanable technique -> unsupported, no fabricated cleanup.
+	res, _ = rev.Revert(ctx, "1", domain.Technique{AttackID: "T1082"})
+	if res.Status != domain.ExecUnsupported {
+		t.Errorf("non-cleanable Revert: want unsupported, got %v", res.Status)
 	}
 }

@@ -41,9 +41,11 @@ them as invariants; never weaken them to make a feature easier.
   Provisioning is transactional where possible; every engagement supports a
   guaranteed teardown that reconciles actual cloud state, not just our DB. This
   extends to **emulation artifacts**: a persistence technique (scheduled task,
-  Run key) is reverted at the end of its run via the optional `c2.Reverter`
-  capability (run in reverse order, audited as `emulation.cleanup`), so an
-  engagement leaves no orphaned persistence on the customer's host. It also
+  Run key, shortcut modification, WMI event subscription, IFEO injection, port
+  monitor, Active Setup) is reverted at the end of its run via the optional
+  `c2.Reverter` capability (run in reverse order, audited as
+  `emulation.cleanup`), so an engagement leaves no orphaned persistence on the
+  customer's host. It also
   extends in **time**: a background reaper (`InfraService.ReapExpired`,
   `StartReaper`) tears down infra whose engagement activity window has closed
   (`Engagement.WindowExpired`), audited as `infra.auto_teardown` — `CanDeploy`
@@ -145,6 +147,24 @@ per-adapter `switch t.AttackID` tables):
    (`from` input key, `default`, `required`). `ttp.Compile(t)` resolves a
    `Technique` to a primitive. **This is the "add a TTP" surface** — a technique
    that reuses an existing primitive is a one-entry YAML change, no Go edits.
+   Five more kinds are **cleanable** (`c2.IsCleanable`) real persistence
+   primitives, not read-only recon of an existing artifact: shortcut_modification
+   (T1547.009), wmi_event_subscription (T1546.003), ifeo_injection (T1546.012),
+   port_monitor (T1547.010), active_setup (T1547.014) — each genuinely plants
+   its artifact and is auto-reverted like scheduled_task/registry_run_key (see
+   the Reverter note below). Sliver, Mythic, and Metasploit render + revert all
+   five; PoshC2 and custom report them unsupported today (same partial-coverage
+   precedent as registry_run_key, which Mythic/Metasploit don't render either).
+   The two PowerShell-only ones (shortcut_modification, wmi_event_subscription)
+   are delivered via base64 `-EncodedCommand` rather than a quoted `-Command`
+   string — real tradecraft, and it sidesteps the nested-quote hazards a
+   COM-object/WMI-cmdlet one-liner would hit going through Metasploit's
+   `-a '-c "%s"'` wrapper. `registry_run_key` also takes an optional `data` arg
+   (Run-key value data, default `whoami`) — used by T1219 (Remote Access
+   Software) to point the key at an operator-supplied path to already-deployed
+   remote-access software, since RInfra does not bundle or install one
+   (compose, not author); the input is `required` so an unresolved path fails
+   the technique cleanly instead of a fabricated attempt.
 2. **Renderers** — each `Operator.Execute` adapter has a small
    `renderXxxPrimitive(c2.Primitive)` switching over the closed primitive set
    and emitting that framework's native command(s). Framework-specific defaults
