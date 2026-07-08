@@ -275,6 +275,54 @@ func TestOperator_NewCleanablePrimitives_PowerShellEncoded(t *testing.T) {
 	})
 }
 
+// TestOperator_NewCleanablePrimitives_FirstTokenIsRealBinary pins a live-client
+// correctness invariant (flagged by review): live.go's Execute RPC parses the
+// rendered command literally as "program path" + args (splitCommand) — it does
+// NOT interpret a leading "execute"/"shell" word as a Sliver console verb, so a
+// rendered string like "execute reg add ..." tries to launch a program named
+// "execute" instead of reg.exe. The first whitespace-delimited token of every
+// new primitive's create/revert command must therefore be the real target
+// binary (reg or powershell), never a fake verb prefix.
+func TestOperator_NewCleanablePrimitives_FirstTokenIsRealBinary(t *testing.T) {
+	cases := []struct {
+		attackID   string
+		wantBinary string
+	}{
+		{"T1547.009", "powershell"}, // shortcut_modification
+		{"T1546.003", "powershell"}, // wmi_event_subscription
+		{"T1546.012", "reg"},        // ifeo_injection
+		{"T1547.010", "reg"},        // port_monitor
+		{"T1547.014", "reg"},        // active_setup
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.attackID, func(t *testing.T) {
+			tech := domain.Technique{AttackID: tc.attackID}
+			client := &FakeSliverClient{executeResult: "OK"}
+			op := sliverpkg.NewOperatorWithClient(c2.Teamserver{}, client)
+			ctx := context.Background()
+
+			if _, err := op.Execute(ctx, "s1", tech); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if first := strings.Fields(client.LastCmd)[0]; first != tc.wantBinary {
+				t.Errorf("create cmd first token = %q, want %q (full: %q)", first, tc.wantBinary, client.LastCmd)
+			}
+
+			rev, ok := op.(c2.Reverter)
+			if !ok {
+				t.Fatal("sliver operator should implement c2.Reverter")
+			}
+			if _, err := rev.Revert(ctx, "s1", tech); err != nil {
+				t.Fatalf("Revert: %v", err)
+			}
+			if first := strings.Fields(client.LastCmd)[0]; first != tc.wantBinary {
+				t.Errorf("revert cmd first token = %q, want %q (full: %q)", first, tc.wantBinary, client.LastCmd)
+			}
+		})
+	}
+}
+
 // TestOperator_RegistryRunKey_CustomData proves the new optional "data" arg
 // threads through: T1219 (Remote Access Software) points the Run-key at an
 // operator-supplied path instead of the catalog's default "whoami" marker.
